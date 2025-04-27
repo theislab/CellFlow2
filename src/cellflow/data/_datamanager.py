@@ -317,7 +317,8 @@ class DataManager:
         self, covariate_data: pd.DataFrame
     ) -> np.ndarray | list[list[Any]]:
         if len(self._split_covariates) > 0:
-            return covariate_data[self._split_covariates].drop_duplicates().values
+            res = sorted(covariate_data[self._split_covariates].drop_duplicates().values)
+            return res
         else:
             return [[]]
 
@@ -641,6 +642,12 @@ class DataManager:
         perturb_covariates = {k: _to_list(v) for k, v in self._perturbation_covariates.items()}
         npartitions = 2  # TODO: make this dynamic
 
+
+        # delete later
+        covariate_data = covariate_data.copy()
+        covariate_data['cell_index'] = covariate_data.index
+        covariate_data = covariate_data.reset_index(drop=True)
+
         # Modified process_condition function
         def process_condition(tgt_idx, tgt_cond):
             """Process a single condition and return its embeddings with identifying info.
@@ -680,27 +687,28 @@ class DataManager:
         control_key = self._control_key
 
         df = covariate_data[split_covariates + perturbation_covariates_keys + [control_key]]
+        df = df.reset_index(drop=True)
         for col in split_covariates + perturbation_covariates_keys:
             if df[col].dtype != "category":
                 df[col] = df[col].astype("category")
         ddf = dd.from_pandas(df, npartitions=npartitions)
         ddf = ddf.sort_values(by=[*split_covariates, *perturbation_covariates_keys, control_key])
+        ddf = ddf.reset_index(drop=True)
 
-        control_combs = df[split_covariates + [control_key]].drop_duplicates(keep="first")
-        all_combs = df[split_covariates + perturbation_covariates_keys + [control_key]].drop_duplicates(keep="first")
+        all_combs = ddf[[control_key] + split_covariates + perturbation_covariates_keys].drop_duplicates(keep="first")
+        control_combs = all_combs[[control_key] + split_covariates].drop_duplicates(keep="first")
         with ProgressBar():
             control_combs, all_combs, df = dask.compute(control_combs, all_combs, ddf)
 
-        control_combs = control_combs[control_combs[control_key]].sort_values(by=split_covariates)
-        all_combs = all_combs[~all_combs[control_key]].sort_values(by=split_covariates + perturbation_covariates_keys)
+        control_combs = control_combs[control_combs[control_key]].sort_values(
+            by=[*split_covariates]
+        ).reset_index(drop=True)
+        all_combs = all_combs[~all_combs[control_key]].sort_values(
+            by=[*split_covariates, *perturbation_covariates_keys]
+        ).reset_index(drop=True)
 
-        all_combs["global_pert_mask"] = np.arange(len(all_combs))
-        control_combs["global_control_mask"] = np.arange(len(control_combs))
-        control_combs["global_control_mask"] = control_combs["global_control_mask"].astype(int)
-        all_combs["global_pert_mask"] = all_combs["global_pert_mask"].astype(int)
-
-        control_combs = control_combs.sort_values(by=split_covariates)
-        all_combs = all_combs.sort_values(by=split_covariates + perturbation_covariates_keys)
+        all_combs["global_pert_mask"] = np.arange(len(all_combs), dtype=np.int32)
+        control_combs["global_control_mask"] = np.arange(len(control_combs), dtype=np.int32)
 
         all_combs = all_combs.drop(columns=[control_key])
         control_combs = control_combs.drop(columns=[control_key])
@@ -712,8 +720,6 @@ class DataManager:
         df["perturbation_covariates_mask"] = df["global_pert_mask"]
         df.loc[df[control_key], "perturbation_covariates_mask"] = -1
         df.loc[~df[control_key], "split_covariates_mask"] = -1
-        df["perturbation_covariates_mask"] = df["perturbation_covariates_mask"].astype(int)
-        df["split_covariates_mask"] = df["split_covariates_mask"].astype(int)
 
         split_idx_to_covariates = (
             df[["global_control_mask", *split_covariates]]
@@ -770,34 +776,10 @@ class DataManager:
             for pert_cov, emb in embeddings.items():
                 condition_data[pert_cov].append(emb)
 
-        # Process in the same order as the condition_indices we tracked
-        # for tgt_idx, emb in results:
-        #     embedding, split_info = result_mapping[(src_idx, tgt_idx)]
-        #     for pert_cov, emb in embedding.items():
-        #         condition_data[pert_cov].append(emb)
 
         for pert_cov, emb in condition_data.items():
             condition_data[pert_cov] = jnp.array(emb)
 
-        print("Computing condition data... old")
-        return_data_old = self._get_condition_data_old(
-            split_cov_combs=split_cov_combs,
-            adata=adata,
-            covariate_data=covariate_data,
-            rep_dict=rep_dict,
-            condition_id_key=condition_id_key
-        )
-        # now compare them
-        print("Comparing old and new condition data...")
-        # assert np.array_equal(return_data_old.split_covariates_mask, split_covariates_mask), f"Split covariates mask mismatch: {return_data_old.split_covariates_mask} != {split_covariates_mask}"
-        # assert np.array_equal(return_data_old.perturbation_covariates_mask, perturbation_covariates_mask), f"Perturbation covariates mask mismatch: {return_data_old.perturbation_covariates_mask} != {perturbation_covariates_mask}"
-        # assert return_data_old.split_idx_to_covariates == split_idx_to_covariates, f"Split idx to covariates mismatch: {return_data_old.split_idx_to_covariates} != {split_idx_to_covariates}"
-        # assert return_data_old.perturbation_idx_to_covariates == perturbation_idx_to_covariates, f"Perturbation idx to covariates mismatch: {return_data_old.perturbation_idx_to_covariates} != {perturbation_idx_to_covariates}"
-        # assert return_data_old.perturbation_idx_to_id == perturbation_idx_to_id, f"Perturbation idx to id mismatch: {return_data_old.perturbation_idx_to_id} != {perturbation_idx_to_id}"
-        # assert return_data_old.condition_data == condition_data, f"Condition data mismatch: {return_data_old.condition_data} != {condition_data}"
-        # assert return_data_old.control_to_perturbation == control_to_perturbation, f"Control to perturbation mismatch: {return_data_old.control_to_perturbation} != {control_to_perturbation}"
-        # assert return_data_old.max_combination_length == self._max_combination_length, f"Max combination length mismatch: {return_data_old.max_combination_length} != {self._max_combination_length}"
-        print("Tests passed")
         res = ReturnData(
             split_covariates_mask=split_covariates_mask,
             split_idx_to_covariates=split_idx_to_covariates,
@@ -808,8 +790,6 @@ class DataManager:
             control_to_perturbation=control_to_perturbation,
             max_combination_length=self._max_combination_length,
         )
-        self.new = res
-        self.old = return_data_old
         return res
 
     @staticmethod
