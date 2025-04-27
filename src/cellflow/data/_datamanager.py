@@ -684,8 +684,12 @@ class DataManager:
         with ProgressBar():
             control_combs, all_combs, df = dask.compute(control_combs, all_combs, ddf)
 
-        control_combs = control_combs[control_combs[control_key]].sort_values(by=split_covariates)
-        all_combs = all_combs[~all_combs[control_key]].sort_values(by=split_covariates + perturbation_covariates_keys)
+        control_combs = control_combs[control_combs[control_key]].sort_values(
+            by=[*split_covariates]
+        ).reset_index(drop=True)
+        all_combs = all_combs[~all_combs[control_key]].sort_values(
+            by=[*split_covariates, *perturbation_covariates_keys]
+        ).reset_index(drop=True)
 
         all_combs["global_pert_mask"] = np.arange(len(all_combs), dtype=np.int32)
         control_combs["global_control_mask"] = np.arange(len(control_combs), dtype=np.int32)
