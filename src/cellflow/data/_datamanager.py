@@ -659,14 +659,21 @@ class DataManager:
         control_key = self._control_key
 
         df = covariate_data[split_covariates + perturbation_covariates_keys + [control_key]]
+        # cell_idx_key = 'cell_index'
+        # df[cell_idx_key] = df.index
+        # df = df.set_index(cell_idx_key, drop=False)
         for col in split_covariates + perturbation_covariates_keys:
             if df[col].dtype != "category":
                 df[col] = df[col].astype("category")
         ddf = dd.from_pandas(df, npartitions=npartitions)
         ddf = ddf.sort_values(by=[*split_covariates, *perturbation_covariates_keys, control_key])
 
-        all_combs = ddf[split_covariates + perturbation_covariates_keys + [control_key]].drop_duplicates(keep="first")
-        control_combs = all_combs[split_covariates + [control_key]].drop_duplicates(keep="first")
+        all_combs = ddf[split_covariates + perturbation_covariates_keys + [control_key]].drop_duplicates(
+            keep="first", subset=split_covariates + perturbation_covariates_keys + [control_key]
+        )
+        control_combs = all_combs[split_covariates + [control_key]].drop_duplicates(
+            keep="first", subset=split_covariates + [control_key]
+        )
         with ProgressBar():
             control_combs, all_combs, df = dask.compute(control_combs, all_combs, ddf)
 
@@ -682,16 +689,32 @@ class DataManager:
         all_combs = all_combs.drop(columns=[control_key])
         control_combs = control_combs.drop(columns=[control_key])
 
-        df = df.merge(control_combs, on=split_covariates, how="left")
-        df = df.merge(all_combs, on=split_covariates + perturbation_covariates_keys, how="left")
-        df = df.sort_values(by=split_covariates + perturbation_covariates_keys + [control_key])
-        df = df.reset_index(drop=True)
+        cell_index_key = "cell_index"
+        df = df.reset_index(drop=False).rename(columns={"index": cell_index_key})
+        # Use left joins that preserve the original DataFrame's structure
+        # First merge with control_combs
+        df = df.merge(control_combs, on=split_covariates, how="left", suffixes=("", "_control"))
 
+        # Then merge with all_combs
+        df = df.merge(
+            all_combs,
+            on=split_covariates + perturbation_covariates_keys,
+            how="left",
+            suffixes=("", "_pert"),
+        )
+
+        # Set the original cell index as the index again
+        df = df.set_index(cell_index_key)
+        df = df.sort_values(by=[*split_covariates, *perturbation_covariates_keys])
+        # Now apply your mask logic
+        df["global_control_mask"] = df["global_control_mask"]
+        df["global_pert_mask"] = df["global_pert_mask"]
         df["split_covariates_mask"] = df["global_control_mask"]
         df["perturbation_covariates_mask"] = df["global_pert_mask"]
-        df.loc[df[control_key], "perturbation_covariates_mask"] = -1
         df.loc[~df[control_key], "split_covariates_mask"] = -1
-
+        df.loc[df[control_key], "perturbation_covariates_mask"] = -1
+        df["split_covariates_mask"] = df["split_covariates_mask"].astype(np.int32)
+        df["perturbation_covariates_mask"] = df["perturbation_covariates_mask"].astype(np.int32)
         split_idx_to_covariates = (
             df[["global_control_mask", *split_covariates]]
             .groupby(["global_control_mask"])
@@ -699,7 +722,6 @@ class DataManager:
             .to_dict(orient="index")
         )
         split_idx_to_covariates = {k: tuple(v[s] for s in split_covariates) for k, v in split_idx_to_covariates.items()}
-        # split_covariates_to_idx = {v: k for k, v in split_idx_to_covariates.items()}
 
         perturbation_idx_to_covariates = (
             df[["global_pert_mask", *perturbation_covariates_keys, *split_covariates]]
@@ -716,6 +738,8 @@ class DataManager:
         control_to_perturbation = df[~df[control_key]].groupby(["global_control_mask"])["global_pert_mask"].unique()
         control_to_perturbation = control_to_perturbation.to_dict()
         control_to_perturbation = {k: np.array(v, dtype=np.int32) for k, v in control_to_perturbation.items()}
+
+        df = df.reindex(covariate_data.index)
 
         split_covariates_mask = jnp.asarray(df["split_covariates_mask"].values, dtype=jnp.int32)
         perturbation_covariates_mask = jnp.asarray(df["perturbation_covariates_mask"].values, dtype=jnp.int32)
