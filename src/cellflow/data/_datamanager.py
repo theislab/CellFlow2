@@ -620,6 +620,12 @@ class DataManager:
         perturb_covariates = {k: _to_list(v) for k, v in self._perturbation_covariates.items()}
         npartitions = 2  # TODO: make this dynamic
 
+
+        # delete later
+        covariate_data = covariate_data.copy()
+        covariate_data['cell_index'] = covariate_data.index
+        covariate_data = covariate_data.reset_index(drop=True)
+
         # Modified process_condition function
         def process_condition(tgt_idx, tgt_cond):
             """Process a single condition and return its embeddings with identifying info.
@@ -667,6 +673,7 @@ class DataManager:
                 df[col] = df[col].astype("category")
         ddf = dd.from_pandas(df, npartitions=npartitions)
         ddf = ddf.sort_values(by=[*split_covariates, *perturbation_covariates_keys, control_key])
+        ddf = ddf.reset_index(drop=True)
 
         all_combs = ddf[split_covariates + perturbation_covariates_keys + [control_key]].drop_duplicates(
             keep="first", subset=split_covariates + perturbation_covariates_keys + [control_key]
