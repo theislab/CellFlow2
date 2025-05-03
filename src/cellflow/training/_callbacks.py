@@ -266,6 +266,63 @@ class PCADecodedMetrics(Metrics):
         return metrics
 
 
+class PCADecodedMetrics2(Metrics):
+    """Callback to compute metrics on true validation data during training
+
+    Parameters
+    ----------
+    ref_adata
+        An :class:`~anndata.AnnData` object with the reference data containing
+        ``adata.varm["X_mean"]`` and ``adata.varm["PCs"]``.
+    metrics
+        List of metrics to compute. Supported metrics are ``"r_squared"``, ``"mmd"``,
+        ``"sinkhorn_div"``, and ``"e_distance"``.
+    metric_aggregations
+        List of aggregation functions to use for each metric. Supported aggregations are ``"mean"``
+        and ``"median"``.
+    condition_id_key
+        Key in :attr:`~anndata.AnnData.obs` that defines the condition id.
+    log_prefix
+        Prefix to add to the log keys.
+    """
+
+    def __init__(
+        self,
+        ref_adata: ad.AnnData,
+        metrics: list[Literal["r_squared", "mmd", "sinkhorn_div", "e_distance"]],
+        metric_aggregations: list[Literal["mean", "median"]] = None,
+        condition_id_key: str | None = None,
+        log_prefix: str = "pca_decoded_",
+    ):
+        super().__init__(metrics, metric_aggregations)
+        self.pcs = ref_adata.varm["PCs"]
+        self.means = ref_adata.varm["X_mean"]
+        self.reconstruct_data = lambda x: x @ np.transpose(self.pcs) + np.transpose(self.means)
+        self.condition_id_key = condition_id_key
+        self.log_prefix = log_prefix
+
+    def on_log_iteration(
+        self,
+        validation_data: dict[str, dict[str, ArrayLike]],
+        predicted_data: dict[str, dict[str, ArrayLike]],
+    ) -> dict[str, float]:
+        """Called at each validation/log iteration to reconstruct the data and compute metrics on the reconstruction
+
+        Parameters
+        ----------
+        validation_data
+            Validation data in nested dictionary format with same keys as ``predicted_data``
+        predicted_data
+            Predicted data in nested dictionary format with same keys as ``validation_data``
+        """
+        validation_data_gt = None
+        predicted_data_decoded = jtu.tree_map(self.reconstruct_data, predicted_data)
+
+        metrics = super().on_log_iteration(validation_data_gt, predicted_data_decoded)
+        metrics = {f"{self.log_prefix}{k}": v for k, v in metrics.items()}
+        return metrics
+
+
 class VAEDecodedMetrics(Metrics):
     """Callback to compute metrics on decoded validation data during training
 
