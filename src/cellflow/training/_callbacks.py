@@ -14,6 +14,7 @@ from cellflow.metrics._metrics import (
     compute_scalar_mmd,
     compute_sinkhorn_div,
 )
+from cellflow.solvers import _genot, _otfm
 
 __all__ = [
     "BaseCallback",
@@ -301,26 +302,57 @@ class PCADecodedMetrics2(Metrics):
         self.condition_id_key = condition_id_key
         self.log_prefix = log_prefix
 
+    def add_validation_adata(
+        self,
+        validation_adata: dict[str, ad.AnnData],
+    ) -> None:
+        self.validation_adata = validation_adata
+
     def on_log_iteration(
         self,
-        validation_data: dict[str, dict[str, ArrayLike]],
-        predicted_data: dict[str, dict[str, ArrayLike]],
+        valid_source_data: dict[str, dict[str, ArrayLike]],
+        valid_true_data: dict[str, dict[str, ArrayLike]],
+        valid_pred_data: dict[str, dict[str, ArrayLike]],
+        solver: _genot.GENOT | _otfm.OTFlowMatching,
     ) -> dict[str, float]:
         """Called at each validation/log iteration to reconstruct the data and compute metrics on the reconstruction
 
         Parameters
         ----------
-        validation_data
-            Validation data in nested dictionary format with same keys as ``predicted_data``
-        predicted_data
-            Predicted data in nested dictionary format with same keys as ``validation_data``
+        valid_source_data
+            Source data in nested dictionary format with same keys as ``valid_true_data``
+        valid_true_data
+            Validation data in nested dictionary format with same keys as ``valid_pred_data``
+        valid_pred_data
+            Predicted data in nested dictionary format with same keys as ``valid_true_data``
+        solver
+            :class:`~cellflow.solvers.OTFlowMatching` solver or :class:`~cellflow.solvers.GENOT`
+            solver with a conditional velocity field.
         """
-        validation_data_gt = None
-        predicted_data_decoded = jtu.tree_map(self.reconstruct_data, predicted_data)
+        true_counts = {}
+        for name in self.validation_adata.keys():
+            true_counts[name] = {}
+            conditions_adata = self.validation_adata[name].obs[self.condition_id_key].unique()
+            conditions_pred = valid_pred_data[name].keys()
+            for cond in conditions_adata & conditions_pred:
+                true_counts[name][cond] = self.validation_adata[name][
+                    self.validation_adata[name].obs[self.condition_id_key] == cond
+                ].X
 
-        metrics = super().on_log_iteration(validation_data_gt, predicted_data_decoded)
+        predicted_data_decoded = jtu.tree_map(self.reconstruct_data, valid_pred_data)
+
+        metrics = super().on_log_iteration(true_counts, predicted_data_decoded)
         metrics = {f"{self.log_prefix}{k}": v for k, v in metrics.items()}
         return metrics
+
+    def on_train_end(
+        self,
+        valid_source_data: dict[str, dict[str, ArrayLike]],
+        valid_true_data: dict[str, dict[str, ArrayLike]],
+        valid_pred_data: dict[str, dict[str, ArrayLike]],
+        solver: _genot.GENOT | _otfm.OTFlowMatching,
+    ) -> dict[str, float]:
+        return super().on_train_end(valid_source_data, valid_true_data, valid_pred_data, solver)
 
 
 class VAEDecodedMetrics(Metrics):
