@@ -24,6 +24,7 @@ __all__ = [
     "WandbLogger",
     "CallbackRunner",
     "PCADecodedMetrics",
+    "PCADecodedMetrics2",
     "VAEDecodedMetrics",
 ]
 
@@ -292,8 +293,8 @@ class PCADecodedMetrics2(Metrics):
         ref_adata: ad.AnnData,
         metrics: list[Literal["r_squared", "mmd", "sinkhorn_div", "e_distance"]],
         metric_aggregations: list[Literal["mean", "median"]] = None,
-        condition_id_key: str | None = None,
-        log_prefix: str = "pca_decoded_",
+        condition_id_key: str = "condition",
+        log_prefix: str = "pca_decoded_2_",
     ):
         super().__init__(metrics, metric_aggregations)
         self.pcs = ref_adata.varm["PCs"]
@@ -332,12 +333,12 @@ class PCADecodedMetrics2(Metrics):
         true_counts = {}
         for name in self.validation_adata.keys():
             true_counts[name] = {}
-            conditions_adata = self.validation_adata[name].obs[self.condition_id_key].unique()
+            conditions_adata = set(self.validation_adata[name].obs[self.condition_id_key].unique())
             conditions_pred = valid_pred_data[name].keys()
             for cond in conditions_adata & conditions_pred:
                 true_counts[name][cond] = self.validation_adata[name][
                     self.validation_adata[name].obs[self.condition_id_key] == cond
-                ].X
+                ].X.toarray()
 
         predicted_data_decoded = jtu.tree_map(self.reconstruct_data, valid_pred_data)
 

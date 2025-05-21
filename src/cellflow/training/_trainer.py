@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from cellflow.data._dataloader import TrainSampler, ValidationSampler
 from cellflow.solvers import _genot, _otfm
-from cellflow.training._callbacks import BaseCallback, CallbackRunner
+from cellflow.training._callbacks import BaseCallback, CallbackRunner, PCADecodedMetrics2
 
 
 class CellFlowTrainer:
@@ -105,6 +105,10 @@ class CellFlowTrainer:
         """
         self.training_logs = {"loss": []}
         rng = jax.random.PRNGKey(0)
+
+        for callback in callbacks:
+            if isinstance(callback, PCADecodedMetrics2):
+                callback.add_validation_adata(self.validation_adata)
 
         # Initiate callbacks
         valid_loaders = valid_loaders or {}
