@@ -353,7 +353,7 @@ class PCADecodedMetrics2(Metrics):
         valid_pred_data: dict[str, dict[str, ArrayLike]],
         solver: _genot.GENOT | _otfm.OTFlowMatching,
     ) -> dict[str, float]:
-        return super().on_train_end(valid_source_data, valid_true_data, valid_pred_data, solver)
+        return self.on_log_iteration(valid_source_data, valid_true_data, valid_pred_data, solver)
 
 
 class VAEDecodedMetrics(Metrics):
