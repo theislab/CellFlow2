@@ -19,15 +19,21 @@ class TestCallbacks:
         assert reconstruction.shape == adata_pca.X.shape
         assert jnp.allclose(reconstruction, adata_pca.layers["counts"])
 
-    def test_pca_decoded_2(self, adata_pca: ad.AnnData):
+    @pytest.mark.parametrize("sparse_matrix", [True, False])
+    @pytest.mark.parametrize("layers", [None, "test"])
+    def test_pca_decoded_2(self, adata_pca: ad.AnnData, sparse_matrix, layers):
         from cellflow.solvers import OTFlowMatching
         from cellflow.training import PCADecodedMetrics2
 
         adata_gt = adata_pca.copy()
         adata_gt.obs["condition"] = np.random.choice(["A", "B"], size=adata_pca.shape[0])
+        if not sparse_matrix:
+            adata_gt.X = adata_gt.X.toarray()
+        if layers is not None:
+            adata_gt.layers[layers] = adata_gt.X.copy()
 
         decoded_metrics_callback = PCADecodedMetrics2(
-            ref_adata=adata_pca, metrics=["r_squared"], condition_id_key="condition"
+            ref_adata=adata_pca, metrics=["r_squared"], condition_id_key="condition", layers=layers
         )
 
         callbacks = [decoded_metrics_callback]

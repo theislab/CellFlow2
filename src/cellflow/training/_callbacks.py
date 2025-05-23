@@ -6,6 +6,7 @@ import anndata as ad
 import jax.tree as jt
 import jax.tree_util as jtu
 import numpy as np
+import scipy
 
 from cellflow._types import ArrayLike
 from cellflow.metrics._metrics import (
@@ -284,6 +285,9 @@ class PCADecodedMetrics2(Metrics):
         and ``"median"``.
     condition_id_key
         Key in :attr:`~anndata.AnnData.obs` that defines the condition id.
+    layer
+        Key in :attr:`~anndata.AnnData.layers` from which to get the counts.
+        If :obj:`None`, use :attr:`~anndata.AnnData.X`.
     log_prefix
         Prefix to add to the log keys.
     """
@@ -294,6 +298,7 @@ class PCADecodedMetrics2(Metrics):
         metrics: list[Literal["r_squared", "mmd", "sinkhorn_div", "e_distance"]],
         metric_aggregations: list[Literal["mean", "median"]] = None,
         condition_id_key: str = "condition",
+        layers: str | None = None,
         log_prefix: str = "pca_decoded_2_",
     ):
         super().__init__(metrics, metric_aggregations)
@@ -301,6 +306,7 @@ class PCADecodedMetrics2(Metrics):
         self.means = ref_adata.varm["X_mean"]
         self.reconstruct_data = lambda x: x @ np.transpose(self.pcs) + np.transpose(self.means)
         self.condition_id_key = condition_id_key
+        self.layers = layers
         self.log_prefix = log_prefix
 
     def add_validation_adata(
@@ -336,9 +342,13 @@ class PCADecodedMetrics2(Metrics):
             conditions_adata = set(self.validation_adata[name].obs[self.condition_id_key].unique())
             conditions_pred = valid_pred_data[name].keys()
             for cond in conditions_adata & conditions_pred:
-                true_counts[name][cond] = self.validation_adata[name][
-                    self.validation_adata[name].obs[self.condition_id_key] == cond
-                ].X.toarray()
+                condition_mask = self.validation_adata[name].obs[self.condition_id_key] == cond
+                counts = (
+                    self.validation_adata[name][condition_mask].X
+                    if self.layers is None
+                    else self.validation_adata[name][condition_mask].layers[self.layers]
+                )
+                true_counts[name][cond] = counts.toarray() if scipy.sparse.issparse(counts) else counts
 
         predicted_data_decoded = jtu.tree_map(self.reconstruct_data, valid_pred_data)
 
