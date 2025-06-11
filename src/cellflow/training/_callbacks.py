@@ -406,7 +406,7 @@ class PCADecodedMetrics2(Metrics):
 
         predicted_data_decoded = jtu.tree_map(self.reconstruct_data, valid_pred_data)
 
-        metrics = super().on_log_iteration(true_counts, predicted_data_decoded)
+        metrics = super().on_log_iteration(valid_source_data, true_counts, predicted_data_decoded, solver)
         metrics = {f"{self.log_prefix}{k}": v for k, v in metrics.items()}
         return metrics
 
