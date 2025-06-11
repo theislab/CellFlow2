@@ -279,7 +279,7 @@ class PCADecodedMetrics2(Metrics):
         ``adata.varm["X_mean"]`` and ``adata.varm["PCs"]``.
     validation_adata
         Dictionary where the keys are the names of the datasets given in
-        :func:`~cellflow.model.prepare_validation_data` and the values are the corresponding
+        :func:`~cellflow.model.CellFlow.prepare_validation_data` and the values are the corresponding
         :class:`~anndata.AnnData` objects.
     metrics
         List of metrics to compute. Supported metrics are ``"r_squared"``, ``"mmd"``,
