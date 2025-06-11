@@ -10,7 +10,6 @@ from flax import linen as nn
 from flax.training import train_state
 from ott.neural.networks.layers import time_encoder
 
-from cellflow._logging import logger
 from cellflow._types import Layers_separate_input_t, Layers_t
 from cellflow.networks._set_encoders import ConditionEncoder
 from cellflow.networks._utils import FilmBlock, MLPBlock, ResNetBlock
@@ -39,13 +38,6 @@ class ConditionalVelocityField(nn.Module):
             - For deterministic mode, it is the strength of the L2 regularization.
             - For stochastic mode, it is the strength of the KL divergence regularization.
 
-        encode_conditions
-                Processes the embedding of the perturbation conditions if :obj:`True`. If
-                :obj:`False`, directly inputs the embedding of the perturbation conditions to the
-                generative velocity field. In the latter case, ``'condition_embedding_dim'``,
-                ``'condition_encoder_kwargs'``, ``'pooling'``, ``'pooling_kwargs'``,
-                ``'layers_before_pool'``, ``'layers_after_pool'``, ``'cond_output_dropout'``
-                are ignored.
         condition_embedding_dim
             Dimensions of the condition embedding.
         covariates_not_pooled
@@ -105,7 +97,6 @@ class ConditionalVelocityField(nn.Module):
     max_combination_length: int
     condition_mode: Literal["deterministic", "stochastic"] = "deterministic"
     regularization: float = 1.0
-    encode_conditions: bool = True
     condition_embedding_dim: int = 32
     covariates_not_pooled: Sequence[str] = dc_field(default_factory=lambda: [])
     pooling: Literal["mean", "attention_token", "attention_seed"] = "attention_token"
@@ -134,19 +125,18 @@ class ConditionalVelocityField(nn.Module):
             conditioning_kwargs = dict(self.conditioning_kwargs.default_factory())
         else:
             conditioning_kwargs = dict(self.conditioning_kwargs)
-        if self.encode_conditions:
-            self.condition_encoder = ConditionEncoder(
-                condition_mode=self.condition_mode,
-                regularization=self.regularization,
-                output_dim=self.condition_embedding_dim,
-                pooling=self.pooling,
-                pooling_kwargs=self.pooling_kwargs,
-                layers_before_pool=self.layers_before_pool,
-                layers_after_pool=self.layers_after_pool,
-                covariates_not_pooled=self.covariates_not_pooled,
-                mask_value=self.mask_value,
-                **self.condition_encoder_kwargs,
-            )
+        self.condition_encoder = ConditionEncoder(
+            condition_mode=self.condition_mode,
+            regularization=self.regularization,
+            output_dim=self.condition_embedding_dim,
+            pooling=self.pooling,
+            pooling_kwargs=self.pooling_kwargs,
+            layers_before_pool=self.layers_before_pool,
+            layers_after_pool=self.layers_after_pool,
+            covariates_not_pooled=self.covariates_not_pooled,
+            mask_value=self.mask_value,
+            **self.condition_encoder_kwargs,
+        )
 
         self.layer_cond_output_dropout = nn.Dropout(rate=self.cond_output_dropout)
         self.layer_norm_condition = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
@@ -202,14 +192,11 @@ class ConditionalVelocityField(nn.Module):
         train: bool = True,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         squeeze = x_t.ndim == 1
-        if not self.encode_conditions:
-            cond_embedding = jnp.concatenate(list(cond.values()), axis=-1)
+        cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
+        if self.condition_mode == "deterministic":
+            cond_embedding = cond_mean
         else:
-            cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
-            if self.condition_mode == "deterministic":
-                cond_embedding = cond_mean
-            else:
-                cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
+            cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
 
         cond_embedding = self.layer_cond_output_dropout(cond_embedding, deterministic=not train)
 
@@ -252,11 +239,7 @@ class ConditionalVelocityField(nn.Module):
             If :attr:`cellflow.model.CellFlow.condition_mode` is ``'deterministic'``, the log-variance
             is set to zero.
         """
-        if self.encode_conditions:
-            condition_mean, condition_logvar = self.condition_encoder(condition, training=False)
-        else:
-            condition = jnp.concatenate(list(condition.values()), axis=-1)
-            logger.warning("Condition encoder is not defined. Returning concatenated input as the embedding.")
+        condition_mean, condition_logvar = self.condition_encoder(condition, training=False)
         return condition_mean, condition_logvar
 
     def create_train_state(
@@ -357,13 +340,6 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
             - For deterministic mode, it is the strength of the L2 regularization.
             - For stochastic mode, it is the strength of the KL divergence regularization.
 
-        encode_conditions
-                Processes the embedding of the perturbation conditions if :obj:`True`. If
-                :obj:`False`, directly inputs the embedding of the perturbation conditions to the
-                generative velocity field. In the latter case, ``'condition_embedding_dim'``,
-                ``'condition_encoder_kwargs'``, ``'pooling'``, ``'pooling_kwargs'``,
-                ``'layers_before_pool'``, ``'layers_after_pool'``, ``'cond_output_dropout'``
-                are ignored.
         condition_embedding_dim
             Dimensions of the condition embedding.
         covariates_not_pooled
@@ -427,7 +403,6 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
     max_combination_length: int
     condition_mode: Literal["deterministic", "stochastic"] = "deterministic"
     regularization: float = 1.0
-    encode_conditions: bool = True
     condition_embedding_dim: int = 32
     covariates_not_pooled: Sequence[str] = dc_field(default_factory=lambda: [])
     pooling: Literal["mean", "attention_token", "attention_seed"] = "attention_token"
@@ -458,20 +433,19 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
             conditioning_kwargs = dict(self.conditioning_kwargs.default_factory())
         else:
             conditioning_kwargs = dict(self.conditioning_kwargs)
-        if self.encode_conditions:
-            self.condition_encoder = ConditionEncoder(
-                condition_mode=self.condition_mode,
-                regularization=self.regularization,
-                output_dim=self.condition_embedding_dim,
-                pooling=self.pooling,
-                pooling_kwargs=self.pooling_kwargs,
-                layers_before_pool=self.layers_before_pool,
-                layers_after_pool=self.layers_after_pool,
-                output_dropout=self.cond_output_dropout,
-                covariates_not_pooled=self.covariates_not_pooled,
-                mask_value=self.mask_value,
-                **self.condition_encoder_kwargs,
-            )
+        self.condition_encoder = ConditionEncoder(
+            condition_mode=self.condition_mode,
+            regularization=self.regularization,
+            output_dim=self.condition_embedding_dim,
+            pooling=self.pooling,
+            pooling_kwargs=self.pooling_kwargs,
+            layers_before_pool=self.layers_before_pool,
+            layers_after_pool=self.layers_after_pool,
+            output_dropout=self.cond_output_dropout,
+            covariates_not_pooled=self.covariates_not_pooled,
+            mask_value=self.mask_value,
+            **self.condition_encoder_kwargs,
+        )
         self.layer_cond_output_dropout = nn.Dropout(rate=self.cond_output_dropout)
         self.layer_norm_condition = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
 
@@ -534,14 +508,11 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
         train: bool = True,
     ):
         squeeze = x_t.ndim == 1
-        if not self.encode_conditions:
-            cond_embedding = jnp.concatenate(list(cond.values()), axis=-1)
+        cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
+        if self.condition_mode == "deterministic":
+            cond_embedding = cond_mean
         else:
-            cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
-            if self.condition_mode == "deterministic":
-                cond_embedding = cond_mean
-            else:
-                cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
+            cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
         cond_embedding = self.layer_cond_output_dropout(cond_embedding, deterministic=not train)
         t_encoded = time_encoder.cyclical_time_encoder(t, n_freqs=self.time_freqs)
         t_encoded = self.time_encoder(t_encoded, training=train)

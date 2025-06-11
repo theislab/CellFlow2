@@ -348,9 +348,7 @@ class DataManager:
             perturbation_covariates_mask = None
             control_mask = jnp.ones((len(covariate_data),))
 
-        condition_data: dict[str, list[jnp.ndarray]] = (
-            {i: [] for i in self._covar_to_idx.keys()} if self.is_conditional else {}
-        )
+        condition_data: dict[str, list[jnp.ndarray]] = {i: [] for i in self._covar_to_idx.keys()}
 
         control_to_perturbation: dict[int, ArrayLike] = {}
         split_idx_to_covariates: dict[int, tuple[Any]] = {}
@@ -401,14 +399,13 @@ class DataManager:
                     perturbation_idx_to_id[tgt_counter] = i
 
                 # get embeddings for conditions
-                if self.is_conditional:
-                    embedding = self._get_perturbation_covariates(
-                        condition_data=tgt_cond,
-                        rep_dict=rep_dict,
-                        perturb_covariates={k: _to_list(v) for k, v in self._perturbation_covariates.items()},
-                    )
-                    for pert_cov, emb in embedding.items():
-                        condition_data[pert_cov].append(emb)
+                embedding = self._get_perturbation_covariates(
+                    condition_data=tgt_cond,
+                    rep_dict=rep_dict,
+                    perturb_covariates={k: _to_list(v) for k, v in self._perturbation_covariates.items()},
+                )
+                for pert_cov, emb in embedding.items():
+                    condition_data[pert_cov].append(emb)
 
                 tgt_counter += 1
 
@@ -417,9 +414,8 @@ class DataManager:
             src_counter += 1
 
         # convert outputs to jax arrays
-        if self.is_conditional:
-            for pert_cov, emb in condition_data.items():
-                condition_data[pert_cov] = jnp.array(emb)
+        for pert_cov, emb in condition_data.items():
+            condition_data[pert_cov] = jnp.array(emb)
         split_covariates_mask = jnp.asarray(split_covariates_mask) if split_covariates_mask is not None else None
         perturbation_covariates_mask = (
             jnp.asarray(perturbation_covariates_mask) if perturbation_covariates_mask is not None else None
@@ -858,11 +854,6 @@ class DataManager:
     def is_categorical(self) -> bool:
         """Whether the primary covariate is categorical."""
         return self._is_categorical
-
-    @property
-    def is_conditional(self) -> bool:
-        """Whether the model is conditional."""
-        return (len(self._perturbation_covariates) > 0) or (len(self._sample_covariates) > 0)
 
     @property
     def adata(self) -> anndata.AnnData:

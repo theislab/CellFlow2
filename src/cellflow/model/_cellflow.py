@@ -229,7 +229,6 @@ class CellFlow:
 
     def prepare_model(
         self,
-        encode_conditions: bool = True,
         condition_mode: Literal["deterministic", "stochastic"] = "deterministic",
         regularization: float = 0.0,
         pooling: Literal["mean", "attention_token", "attention_seed"] = "attention_token",
@@ -268,13 +267,6 @@ class CellFlow:
 
         Parameters
         ----------
-        encode_conditions
-            Processes the embedding of the perturbation conditions if :obj:`True`. If :obj:`False`,
-            directly inputs the embedding of the perturbation conditions to the generative velocity
-            field. In the latter case, ``'condition_embedding_dim'``,
-            ``'condition_encoder_kwargs'``, ``'pooling'``, ``'pooling_kwargs'``,
-            ``'layers_before_pool'``, ``'layers_after_pool'``, ``'cond_output_dropout'``
-            are ignored.
         condition_mode
             Mode of the encoder, should be one of:
 
@@ -414,8 +406,6 @@ class CellFlow:
             raise ValueError("Dataloader not initialized. Please call `prepare_data` first.")
 
         if condition_mode == "stochastic":
-            if not encode_conditions:
-                raise ValueError("Stochastic condition embeddings require encoding conditions.")
             if regularization == 0.0:
                 raise ValueError("Stochastic condition embeddings require `regularization`>0.")
 
@@ -440,7 +430,6 @@ class CellFlow:
             max_combination_length=self.train_data.max_combination_length,
             condition_mode=condition_mode,
             regularization=regularization,
-            encode_conditions=encode_conditions,
             condition_embedding_dim=condition_embedding_dim,
             covariates_not_pooled=covariates_not_pooled,
             pooling=pooling,
@@ -630,7 +619,7 @@ class CellFlow:
         src = batch["source"]
         condition = batch.get("condition", None)
         out = jax.tree.map(
-            functools.partial(self.solver.predict, **kwargs),
+            functools.partial(self.solver.predict, rng=rng, **kwargs),
             src,
             condition,  # type: ignore[attr-defined]
         )
@@ -683,9 +672,6 @@ class CellFlow:
         """
         if self.solver is None or not self.solver.is_trained:
             raise ValueError("Model not trained. Please call `train` first.")
-
-        if not self._dm.is_conditional:
-            raise ValueError("Model is not conditional. Condition embeddings are not available.")
 
         if hasattr(covariate_data, "condition_data"):
             cond_data = covariate_data
