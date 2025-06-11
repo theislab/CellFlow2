@@ -56,7 +56,6 @@ class CellFlow:
         self._dataloader: TrainSampler | None = None
         self._trainer: CellFlowTrainer | None = None
         self._validation_data: dict[str, ValidationData] = {}
-        self._validation_adata: dict[str, ad.Anndata] = {}
         self._solver: _otfm.OTFlowMatching | _genot.GENOT | None = None
         self._condition_dim: int | None = None
         self._vf: _velocity_field.ConditionalVelocityField | _velocity_field.GENOTConditionalVelocityField | None = None
@@ -226,7 +225,6 @@ class CellFlow:
             n_conditions_on_log_iteration=n_conditions_on_log_iteration,
             n_conditions_on_train_end=n_conditions_on_train_end,
         )
-        self._validation_adata[name] = adata
         self._validation_data[name] = val_data
 
     def prepare_model(
@@ -500,8 +498,7 @@ class CellFlow:
             )
         else:
             raise NotImplementedError(f"Solver must be an instance of OTFlowMatching or GENOT, got {type(self.solver)}")
-        validation_adata = self._validation_adata or {}
-        self._trainer = CellFlowTrainer(solver=self.solver, validation_adata=validation_adata)  # type: ignore[arg-type]
+        self._trainer = CellFlowTrainer(solver=self.solver)  # type: ignore[arg-type]
 
     def train(
         self,

@@ -33,13 +33,12 @@ class TestCallbacks:
             adata_gt.layers[layers] = adata_gt.X.copy()
 
         decoded_metrics_callback = PCADecodedMetrics2(
-            ref_adata=adata_pca, metrics=["r_squared"], condition_id_key="condition", layers=layers
+            ref_adata=adata_pca,
+            validation_adata={"test": adata_gt},
+            metrics=["r_squared"],
+            condition_id_key="condition",
+            layers=layers,
         )
-
-        callbacks = [decoded_metrics_callback]
-        for e in callbacks:
-            if isinstance(e, PCADecodedMetrics2):
-                e.add_validation_adata({"test": adata_gt})
 
         valid_pred_data = {"test": {"A": np.random.random((2, 10)), "B": np.random.random((2, 10))}}
 

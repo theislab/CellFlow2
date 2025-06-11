@@ -277,6 +277,10 @@ class PCADecodedMetrics2(Metrics):
     ref_adata
         An :class:`~anndata.AnnData` object with the reference data containing
         ``adata.varm["X_mean"]`` and ``adata.varm["PCs"]``.
+    validation_adata
+        Dictionary where the keys are the names of the datasets given in
+        :func:`~cellflow.model.prepare_validation_data` and the values are the corresponding
+        :class:`~anndata.AnnData` objects.
     metrics
         List of metrics to compute. Supported metrics are ``"r_squared"``, ``"mmd"``,
         ``"sinkhorn_div"``, and ``"e_distance"``.
@@ -295,6 +299,7 @@ class PCADecodedMetrics2(Metrics):
     def __init__(
         self,
         ref_adata: ad.AnnData,
+        validation_adata: dict[str, ad.AnnData],
         metrics: list[Literal["r_squared", "mmd", "sinkhorn_div", "e_distance"]],
         metric_aggregations: list[Literal["mean", "median"]] = None,
         condition_id_key: str = "condition",
@@ -305,15 +310,10 @@ class PCADecodedMetrics2(Metrics):
         self.pcs = ref_adata.varm["PCs"]
         self.means = ref_adata.varm["X_mean"]
         self.reconstruct_data = lambda x: x @ np.transpose(self.pcs) + np.transpose(self.means)
+        self.validation_adata = validation_adata
         self.condition_id_key = condition_id_key
         self.layers = layers
         self.log_prefix = log_prefix
-
-    def add_validation_adata(
-        self,
-        validation_adata: dict[str, ad.AnnData],
-    ) -> None:
-        self.validation_adata = validation_adata
 
     def on_log_iteration(
         self,

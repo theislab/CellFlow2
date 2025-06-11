@@ -21,6 +21,5 @@ __all__ = [
     "CallbackRunner",
     "PCADecodedMetrics",
     "PCADecodedMetrics2",
-    "PCADecoder",
     "VAEDecodedMetrics",
 ]
