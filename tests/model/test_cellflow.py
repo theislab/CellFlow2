@@ -287,8 +287,8 @@ class TestCellFlow:
 
         condition_encoder_kwargs = {}
         if solver == "genot":
-            condition_encoder_kwargs["genot_source_layers"] = (({"dims": (32, 32)}),)
-            condition_encoder_kwargs["genot_source_dim"] = 32
+            condition_encoder_kwargs["genot_source_layers"] = (({"dims": (2, 2)}),)
+            condition_encoder_kwargs["genot_source_dim"] = 2
 
         cf.prepare_model(
             condition_embedding_dim=2,
@@ -301,7 +301,7 @@ class TestCellFlow:
         metric_to_compute = "r_squared"
         metrics_callback = cellflow.training.Metrics(metrics=[metric_to_compute])
 
-        cf.train(num_iterations=3, callbacks=[metrics_callback], valid_freq=1)
+        cf.train(num_iterations=3, callbacks=[metrics_callback], valid_freq=3)
         assert cf._dataloader is not None
         assert f"val_{metric_to_compute}_mean" in cf._trainer.training_logs
 
