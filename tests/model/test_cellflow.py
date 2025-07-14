@@ -34,8 +34,8 @@ class TestCellFlow:
         control_key = "control"
         perturbation_covariates = {"drug": ["drug1", "drug2"]}
         perturbation_covariate_reps = {"drug": "drug"}
-        condition_embedding_dim = 32
-        vf_kwargs = {"genot_source_dims": (32, 32), "genot_source_dropout": 0.1} if solver == "genot" else None
+        condition_embedding_dim = 2
+        vf_kwargs = {"genot_source_dims": (2, 2), "genot_source_dropout": 0.1} if solver == "genot" else None
 
         cf = cellflow.model.CellFlow(adata_perturbation, solver=solver)
         cf.prepare_data(
@@ -143,8 +143,8 @@ class TestCellFlow:
         control_key = "control"
         perturbation_covariates = {"drug": ["drug1"]}
         perturbation_covariate_reps = {"drug": "drug"}
-        condition_embedding_dim = 32
-        vf_kwargs = {"genot_source_dims": (32, 32), "genot_source_dropout": 0.1} if solver == "genot" else None
+        condition_embedding_dim = 2
+        vf_kwargs = {"genot_source_dims": (2, 2), "genot_source_dropout": 0.1} if solver == "genot" else None
 
         cf = cellflow.model.CellFlow(adata_perturbation, solver=solver)
         cf.prepare_data(
@@ -284,8 +284,8 @@ class TestCellFlow:
 
         condition_encoder_kwargs = {}
         if solver == "genot":
-            condition_encoder_kwargs["genot_source_layers"] = (({"dims": (32, 32)}),)
-            condition_encoder_kwargs["genot_source_dim"] = 32
+            condition_encoder_kwargs["genot_source_layers"] = (({"dims": (2, 2)}),)
+            condition_encoder_kwargs["genot_source_dim"] = 2
 
         cf.prepare_model(
             condition_embedding_dim=2,
