@@ -298,7 +298,7 @@ class TestCellFlow:
         metric_to_compute = "r_squared"
         metrics_callback = cellflow.training.Metrics(metrics=[metric_to_compute])
 
-        cf.train(num_iterations=3, callbacks=[metrics_callback], valid_freq=1)
+        cf.train(num_iterations=3, callbacks=[metrics_callback], valid_freq=2)
         assert cf._dataloader is not None
         assert f"val_{metric_to_compute}_mean" in cf._trainer.training_logs
 
