@@ -366,9 +366,12 @@ class ValidationSampler(BaseValidSampler):
         The validation data.
     seed
         Random seed.
+    validation_batch_size
+        Maximum number of cells to sample per condition during validation.
+        If None, uses all available cells.
     """
 
-    def __init__(self, val_data: ValidationData, seed: int = 0) -> None:
+    def __init__(self, val_data: ValidationData, seed: int = 0, validation_batch_size: int | None = None) -> None:
         self._data = val_data
         self.perturbation_to_control = self._get_perturbation_to_control(val_data)
         self.n_conditions_on_log_iteration = (
@@ -381,6 +384,7 @@ class ValidationSampler(BaseValidSampler):
             if val_data.n_conditions_on_train_end is not None
             else val_data.n_perturbations
         )
+        self.validation_batch_size = validation_batch_size
         self.rng = np.random.default_rng(seed)
         if self._data.condition_data is None:
             raise NotImplementedError("Validation data must have condition data.")
@@ -405,6 +409,12 @@ class ValidationSampler(BaseValidSampler):
         source_cells = [self._data.cell_data[mask] for mask in source_cells_mask]
         target_cells_mask = [cond_idx == self._data.perturbation_covariates_mask for cond_idx in condition_idcs]
         target_cells = [self._data.cell_data[mask] for mask in target_cells_mask]
+
+        # Apply validation batch size if specified
+        if self.validation_batch_size is not None:
+            source_cells = self._subsample_cells(source_cells)
+            target_cells = self._subsample_cells(target_cells)
+
         conditions = [self._get_condition_data(cond_idx) for cond_idx in condition_idcs]
         cell_rep_dict = {}
         cond_dict = {}
@@ -416,6 +426,17 @@ class ValidationSampler(BaseValidSampler):
             true_dict[k] = target_cells[i]
 
         return {"source": cell_rep_dict, "condition": cond_dict, "target": true_dict}
+
+    def _subsample_cells(self, cells_list: list[np.ndarray]) -> list[np.ndarray]:
+        """Subsample cells from each condition to validation_batch_size."""
+        subsampled_cells = []
+        for cells in cells_list:
+            if len(cells) > self.validation_batch_size:
+                indices = self.rng.choice(len(cells), size=self.validation_batch_size, replace=False)
+                subsampled_cells.append(cells[indices])
+            else:
+                subsampled_cells.append(cells)
+        return subsampled_cells
 
     @property
     def data(self) -> ValidationData:
