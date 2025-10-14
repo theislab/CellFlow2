@@ -4,12 +4,12 @@ from scaleflow.data._data import (
     PredictionData,
     TrainingData,
     ValidationData,
-    ZarrTrainingData,
+    MappedCellData,
 )
 from scaleflow.data._dataloader import (
     PredictionSampler,
     TrainSampler,
-    TrainSamplerWithPool,
+    ReservoirSampler,
     ValidationSampler,
 )
 from scaleflow.data._datamanager import DataManager
@@ -23,11 +23,11 @@ __all__ = [
     "PredictionData",
     "TrainingData",
     "ValidationData",
-    "ZarrTrainingData",
+    "MappedCellData",
     "TrainSampler",
     "ValidationSampler",
     "PredictionSampler",
     "TorchCombinedTrainSampler",
     "JaxOutOfCoreTrainSampler",
-    "TrainSamplerWithPool",
+    "ReservoirSampler",
 ]

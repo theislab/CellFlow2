@@ -8,7 +8,6 @@ import numpy as np
 
 from scaleflow.data._data import (
     TrainingData,
-    ZarrTrainingData,
 )
 from scaleflow.data._dataloader import TrainSampler
 
@@ -83,7 +82,7 @@ class JaxOutOfCoreTrainSampler:
 
     """
 
-    data: TrainingData | ZarrTrainingData
+    data: TrainingData
     seed: int
     batch_size: int = 1024
     num_workers: int = 4

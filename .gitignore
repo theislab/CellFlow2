@@ -157,3 +157,4 @@ tests/plotting/actual_figures/
 
 # huggingface
 hub/
+docs/notebooks/test.zarr

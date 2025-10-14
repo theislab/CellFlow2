@@ -13,7 +13,7 @@ from scaleflow._types import Layers_separate_input_t, Layers_t
 from scaleflow.networks._set_encoders import ConditionEncoder
 from scaleflow.networks._utils import FilmBlock, MLPBlock, ResNetBlock, sinusoidal_time_encoder
 
-__all__ = ["ConditionalVelocityField", "GENOTConditionalVelocityField", "MultiTaskConditionalVelocityField"]
+__all__ = ["ConditionalVelocityField", "GENOTConditionalVelocityField", "EquilibriumVelocityField"]
 
 
 class ConditionalVelocityField(nn.Module):
@@ -495,7 +495,7 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
         elif self.conditioning == "resnet":
             self.resnet_block = ResNetBlock(
                 input_dim=self.hidden_dims[-1],
-                **self.conditioning_kwargs,
+                **conditioning_kwargs,
             )
         elif self.conditioning == "concatenation":
             if len(conditioning_kwargs) > 0:
@@ -589,105 +589,158 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
         return train_state.TrainState.create(apply_fn=self.apply, params=params, tx=optimizer)
 
 
-class MultiTaskConditionalVelocityField(ConditionalVelocityField):
-    """Extended ConditionalVelocityField with phenotype prediction capability.
+class EquilibriumVelocityField(nn.Module):
+    """Parameterized neural gradient field for Equilibrium Matching (no time conditioning).
 
-    This class extends the standard velocity field to support both flow matching
-    and phenotype prediction tasks, enabling transfer learning between single-cell
-    and phenotypic data through shared condition encodings.
-
-    Parameters
-    ----------
-    phenotype_head_dims
-        Dimensions of the phenotype prediction head layers.
-    phenotype_output_dim
-        Output dimension for phenotype prediction (typically 1 for scalar outputs).
-    phenotype_dropout
-        Dropout rate for the phenotype prediction head.
-
-    All other parameters are inherited from ConditionalVelocityField.
+    Same as ConditionalVelocityField but without time encoder.
     """
 
-    phenotype_head_dims: tuple[int, ...] = (128, 64, 32)
-    phenotype_output_dim: int = 1
-    phenotype_dropout: float = 0.1
+    output_dim: int
+    max_combination_length: int
+    condition_mode: Literal["deterministic", "stochastic"] = "deterministic"
+    regularization: float = 1.0
+    condition_embedding_dim: int = 32
+    covariates_not_pooled: Sequence[str] = dc_field(default_factory=lambda: [])
+    pooling: Literal["mean", "attention_token", "attention_seed"] = "attention_token"
+    pooling_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
+    layers_before_pool: Layers_separate_input_t | Layers_t = dc_field(default_factory=lambda: [])
+    layers_after_pool: Layers_t = dc_field(default_factory=lambda: [])
+    cond_output_dropout: float = 0.0
+    mask_value: float = 0.0
+    condition_encoder_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
+    act_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
+    hidden_dims: Sequence[int] = (1024, 1024, 1024)
+    hidden_dropout: float = 0.0
+    conditioning: Literal["concatenation", "film", "resnet"] = "concatenation"
+    conditioning_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
+    decoder_dims: Sequence[int] = (1024, 1024, 1024)
+    decoder_dropout: float = 0.0
+    layer_norm_before_concatenation: bool = False
+    linear_projection_before_concatenation: bool = False
 
     def setup(self):
-        """Initialize both flow matching and phenotype prediction components."""
-        # Initialize parent components for flow matching
-        super().setup()
-
-        # Add phenotype prediction head
-        from scaleflow.networks._utils import MLPBlock
-        self.phenotype_head = MLPBlock(
-            dims=self.phenotype_head_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.phenotype_dropout,
-            act_last_layer=True,
+        """Initialize the network."""
+        if isinstance(self.conditioning_kwargs, dataclasses.Field):
+            conditioning_kwargs = dict(self.conditioning_kwargs.default_factory())
+        else:
+            conditioning_kwargs = dict(self.conditioning_kwargs)
+        self.condition_encoder = ConditionEncoder(
+            condition_mode=self.condition_mode,
+            regularization=self.regularization,
+            output_dim=self.condition_embedding_dim,
+            pooling=self.pooling,
+            pooling_kwargs=self.pooling_kwargs,
+            layers_before_pool=self.layers_before_pool,
+            layers_after_pool=self.layers_after_pool,
+            covariates_not_pooled=self.covariates_not_pooled,
+            mask_value=self.mask_value,
+            **self.condition_encoder_kwargs,
         )
+
+        self.layer_cond_output_dropout = nn.Dropout(rate=self.cond_output_dropout)
+        self.layer_norm_condition = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
+
+        self.x_encoder = MLPBlock(
+            dims=self.hidden_dims,
+            act_fn=self.act_fn,
+            dropout_rate=self.hidden_dropout,
+            act_last_layer=(False if self.linear_projection_before_concatenation else True),
+        )
+        self.layer_norm_x = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
+
+        self.decoder = MLPBlock(
+            dims=self.decoder_dims,
+            act_fn=self.act_fn,
+            dropout_rate=self.decoder_dropout,
+            act_last_layer=(False if self.linear_projection_before_concatenation else True),
+        )
+
+        self.output_layer = nn.Dense(self.output_dim)
+
+        if self.conditioning == "film":
+            self.film_block = FilmBlock(
+                input_dim=self.hidden_dims[-1],
+                cond_dim=self.condition_embedding_dim,  # No time encoder!
+                **conditioning_kwargs,
+            )
+        elif self.conditioning == "resnet":
+            self.resnet_block = ResNetBlock(
+                input_dim=self.hidden_dims[-1],
+                **conditioning_kwargs,
+            )
+        elif self.conditioning == "concatenation":
+            if len(conditioning_kwargs) > 0:
+                raise ValueError("If `conditioning=='concatenation' mode, no conditioning kwargs can be passed.")
+        else:
+            raise ValueError(f"Unknown conditioning mode: {self.conditioning}")
 
     def __call__(
         self,
-        t: jnp.ndarray,
-        x_t: jnp.ndarray,
+        x: jnp.ndarray,
         cond: dict[str, jnp.ndarray],
         encoder_noise: jnp.ndarray,
         train: bool = True,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Forward pass computing both flow matching and phenotype outputs.
-
-        Returns
-        -------
-        tuple
-            (flow_output, cond_mean, cond_logvar, phenotype_output)
-        """
-        # Get original flow matching outputs
-        flow_output, cond_mean, cond_logvar = super().__call__(t, x_t, cond, encoder_noise, train)
-
-        # Compute phenotype prediction using the same condition embedding
-        if self.condition_mode == "deterministic":
-            cond_embedding = cond_mean
-        else:
-            cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
-
-        # Apply dropout and phenotype head
-        phenotype_output = self.phenotype_head(cond_embedding, training=train)
-
-        return flow_output, cond_mean, cond_logvar, phenotype_output
-
-    def predict_phenotype(
-        self,
-        cond: dict[str, jnp.ndarray],
-        encoder_noise: jnp.ndarray | None = None,
-        train: bool = False
-    ) -> jnp.ndarray:
-        """Predict phenotype values directly from conditions.
-
-        Parameters
-        ----------
-        cond
-            Condition dictionary.
-        encoder_noise
-            Noise for stochastic condition encoding. If None, uses zeros.
-        train
-            Whether in training mode.
-
-        Returns
-        -------
-        Phenotype predictions.
-        """
-        # Get condition embeddings
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        squeeze = x.ndim == 1
         cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
-
-        # Handle encoder noise
-        if encoder_noise is None:
-            encoder_noise = jnp.zeros((cond_mean.shape[0], self.condition_embedding_dim))
-
-        # Compute condition embedding
         if self.condition_mode == "deterministic":
             cond_embedding = cond_mean
         else:
             cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
 
-        # Apply dropout and phenotype head
-        return self.phenotype_head(cond_embedding, training=train)
+        cond_embedding = self.layer_cond_output_dropout(cond_embedding, deterministic=not train)
+        x_encoded = self.x_encoder(x, training=train)
+
+        x_encoded = self.layer_norm_x(x_encoded)
+        cond_embedding = self.layer_norm_condition(cond_embedding)
+
+        if squeeze:
+            cond_embedding = jnp.squeeze(cond_embedding)
+        elif cond_embedding.shape[0] != x.shape[0]:
+            cond_embedding = jnp.tile(cond_embedding, (x.shape[0], 1))
+
+        if self.conditioning == "concatenation":
+            out = jnp.concatenate((x_encoded, cond_embedding), axis=-1)  # No time!
+        elif self.conditioning == "film":
+            out = self.film_block(x_encoded, cond_embedding)  # No time!
+        elif self.conditioning == "resnet":
+            out = self.resnet_block(x_encoded, cond_embedding)  # No time!
+        else:
+            raise ValueError(f"Unknown conditioning mode: {self.conditioning}.")
+
+        out = self.decoder(out, training=train)
+        return self.output_layer(out), cond_mean, cond_logvar
+
+    def get_condition_embedding(self, condition: dict[str, jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Get the embedding of the condition."""
+        condition_mean, condition_logvar = self.condition_encoder(condition, training=False)
+        return condition_mean, condition_logvar
+
+    def create_train_state(
+        self,
+        rng: jax.Array,
+        optimizer: optax.OptState,
+        input_dim: int,
+        conditions: dict[str, jnp.ndarray],
+    ) -> train_state.TrainState:
+        """Create the training state."""
+        x = jnp.ones((1, input_dim))  # No time variable!
+        encoder_noise = jnp.ones((1, self.condition_embedding_dim))
+        cond = {
+            pert_cov: jnp.ones((1, self.max_combination_length, condition.shape[-1]))
+            for pert_cov, condition in conditions.items()
+        }
+        params_rng, condition_encoder_rng = jax.random.split(rng, 2)
+        params = self.init(
+            {"params": params_rng, "condition_encoder": condition_encoder_rng},
+            x=x,
+            cond=cond,
+            encoder_noise=encoder_noise,
+            train=False,
+        )["params"]
+        return train_state.TrainState.create(apply_fn=self.apply, params=params, tx=optimizer)
+
+    @property
+    def output_dims(self):
+        """Dimensions of the output layers."""
+        return tuple(self.decoder_dims) + (self.output_dim,)

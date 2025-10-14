@@ -2,7 +2,7 @@ import anndata as ad
 import numpy as np
 import pytest
 
-from cellflow.data._datamanager import DataManager
+from scaleflow.data._datamanager import DataManager
 
 perturbation_covariates_args = [
     {"drug": ["drug1"]},
@@ -38,7 +38,7 @@ class TestDataManager:
         perturbation_covariate_reps,
         sample_covariates,
     ):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         dm = DataManager(
             adata_perturbation,
@@ -58,7 +58,7 @@ class TestDataManager:
 
     @pytest.mark.parametrize("el_to_delete", ["drug", "cell_type"])
     def test_raise_false_uns_dict(self, adata_perturbation: ad.AnnData, el_to_delete):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         sample_rep = "X"
         split_covariates = ["cell_type"]
@@ -87,7 +87,7 @@ class TestDataManager:
 
     @pytest.mark.parametrize("el_to_delete", ["drug_b", "dosage_a"])
     def test_raise_covar_mismatch(self, adata_perturbation: ad.AnnData, el_to_delete):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         sample_rep = "X"
         split_covariates = ["cell_type"]
@@ -113,7 +113,7 @@ class TestDataManager:
             )
 
     def test_raise_target_without_source(self, adata_perturbation: ad.AnnData):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         sample_rep = "X"
         split_covariates = ["cell_type"]
@@ -156,8 +156,8 @@ class TestDataManager:
         perturbation_covariate_reps,
         sample_covariates,
     ):
-        from cellflow.data._data import TrainingData
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._data import TrainingData
+        from scaleflow.data._datamanager import DataManager
 
         dm = DataManager(
             adata_perturbation,
@@ -211,7 +211,7 @@ class TestDataManager:
         perturbation_covariates,
         perturbation_covariate_reps,
     ):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         dm = DataManager(
             adata_perturbation,
@@ -300,7 +300,7 @@ class TestValidationData:
         perturbation_covariates,
         perturbation_covariate_reps,
     ):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         control_key = "control"
         sample_covariates = ["cell_type"]
@@ -338,7 +338,7 @@ class TestValidationData:
 
     @pytest.mark.skip(reason="To discuss: why should it raise an error?")
     def test_raises_wrong_max_combination_length(self, adata_perturbation):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         max_combination_length = 3
         adata = adata_perturbation
@@ -378,7 +378,7 @@ class TestPredictionData:
         perturbation_covariates,
         perturbation_covariate_reps,
     ):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         control_key = "control"
         sample_covariates = ["cell_type"]

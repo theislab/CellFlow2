@@ -517,6 +517,7 @@ class CallbackRunner:
         valid_data: dict[str, dict[str, ArrayLike]],
         pred_data: dict[str, dict[str, ArrayLike]],
         solver: _otfm.OTFlowMatching | _genot.GENOT,
+        additional_metrics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Called at each validation/log iteration to run callbacks. First computes metrics with computation callbacks and then logs data with logging callbacks.
 
@@ -531,12 +532,18 @@ class CallbackRunner:
         solver
             :class:`~scaleflow.solvers.OTFlowMatching` solver or :class:`~scaleflow.solvers.GENOT`
             solver with a conditional velocity field.
+        additional_metrics
+            Optional dictionary of metrics to include before computing validation metrics (e.g., train_loss)
 
         Returns
         -------
             ``dict_to_log``: Dictionary containing data to log
         """
         dict_to_log: dict[str, Any] = {}
+
+        # Add additional metrics first
+        if additional_metrics is not None:
+            dict_to_log.update(additional_metrics)
 
         for callback in self.computation_callbacks:
             results = callback.on_log_iteration(valid_source_data, valid_data, pred_data, solver)

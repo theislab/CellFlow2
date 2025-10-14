@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from cellflow.data._dataloader import ValidationSampler
+from scaleflow.data._dataloader import ValidationSampler
 
 
 @pytest.fixture

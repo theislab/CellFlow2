@@ -10,11 +10,12 @@ from scaleflow.networks._utils import (
     SelfAttentionBlock,
     TokenAttentionPooling,
 )
-from scaleflow.networks._velocity_field import ConditionalVelocityField, GENOTConditionalVelocityField
+from scaleflow.networks._velocity_field import ConditionalVelocityField, GENOTConditionalVelocityField, EquilibriumVelocityField
 
 __all__ = [
     "ConditionalVelocityField",
     "GENOTConditionalVelocityField",
+    "EquilibriumVelocityField",
     "ConditionEncoder",
     "MLPBlock",
     "SelfAttention",

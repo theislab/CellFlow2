@@ -4,8 +4,8 @@ from functools import partial
 import numpy as np
 
 from scaleflow.compat import TorchIterableDataset
-from scaleflow.data._data import ZarrTrainingData
-from scaleflow.data._dataloader import TrainSampler
+from scaleflow.data._data import MappedCellData
+from scaleflow.data._dataloader import TrainSampler, ReservoirSampler
 
 
 def _worker_init_fn_helper(worker_id, random_generators):
@@ -74,8 +74,8 @@ class TorchCombinedTrainSampler(TorchIterableDataset):
         seq = np.random.SeedSequence(seed)
         random_generators = [np.random.default_rng(s) for s in seq.spawn(num_workers)]
         worker_init_fn = partial(_worker_init_fn_helper, random_generators=random_generators)
-        data = [ZarrTrainingData.read_zarr(path) for path in data_paths]
-        samplers = [TrainSampler(data[i], batch_size) for i in range(len(data))]
+        data = [MappedCellData.read_zarr(path) for path in data_paths]
+        samplers = [ReservoirSampler(data[i], batch_size) for i in range(len(data))]
         combined_sampler = cls(samplers, weights=weights, dataset_names=dataset_names)
         return torch.utils.data.DataLoader(
             combined_sampler,

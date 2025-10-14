@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from cellflow.data import JaxOutOfCoreTrainSampler, PredictionSampler, TrainSampler
-from cellflow.data._data import ZarrTrainingData
-from cellflow.data._datamanager import DataManager
+from scaleflow.data import JaxOutOfCoreTrainSampler, PredictionSampler, TrainSampler
+from scaleflow.data._data import ZarrTrainingData
+from scaleflow.data._datamanager import DataManager
 
 
 class TestTrainSampler:
@@ -100,8 +100,8 @@ class TestJaxOutOfCoreTrainSampler:
 class TestValidationSampler:
     @pytest.mark.parametrize("n_conditions_on_log_iteration", [None, 1, 3])
     def test_valid_sampler(self, adata_perturbation, n_conditions_on_log_iteration):
-        from cellflow.data._dataloader import ValidationSampler
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._dataloader import ValidationSampler
+        from scaleflow.data._datamanager import DataManager
 
         control_key = "control"
         sample_covariates = ["cell_type"]
@@ -150,7 +150,7 @@ class TestPredictionSampler:
         split_covariates,
         perturbation_covariate_reps,
     ):
-        from cellflow.data._datamanager import DataManager
+        from scaleflow.data._datamanager import DataManager
 
         perturbation_covariates = {"drug": ["drug1", "drug2"]}
 

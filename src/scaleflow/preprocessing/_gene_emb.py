@@ -21,7 +21,7 @@ except ImportError as e:
     EsmModel = None
     raise ImportError(
         "To use gene embedding, please install `transformers` and `torch` \
-            e.g. via `pip install cellflow['embedding']`."
+            e.g. via `pip install scaleflow['embedding']`."
     ) from e
 
 __all__ = [

@@ -88,9 +88,9 @@ optional-dependencies.pp = [
   "rdkit",
 ]
 optional-dependencies.test = [
-  "cellflow-tools[embedding]",
-  "cellflow-tools[external]",
-  "cellflow-tools[pp]",
+  "scaleflow-tools[embedding]",
+  "scaleflow-tools[external]",
+  "scaleflow-tools[pp]",
   "coverage[toml]>=7",
   "pytest",
   "pytest-cov>=6",
@@ -98,9 +98,9 @@ optional-dependencies.test = [
   "pytest-xdist>=3",
 ]
 
-urls.Documentation = "https://cellflow.readthedocs.io/"
-urls.Home-page = "https://github.com/theislab/cellflow"
-urls.Source = "https://github.com/theislab/cellflow"
+urls.Documentation = "https://scaleflow.readthedocs.io/"
+urls.Home-page = "https://github.com/theislab/scaleflow"
+urls.Source = "https://github.com/theislab/scaleflow"
 
 [tool.hatch.build.targets.wheel]
 packages = [ 'src/scaleflow' ]
@@ -236,7 +236,7 @@ deps =
     leidenalg
 changedir = {tox_root}{/}docs
 commands =
-    python -m ipykernel install --user --name=cellflow
+    python -m ipykernel install --user --name=scaleflow
     bash {tox_root}/.run_notebooks.sh {tox_root}{/}docs/notebooks
 
 [testenv:clean-docs]

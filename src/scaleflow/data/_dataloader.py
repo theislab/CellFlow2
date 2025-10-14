@@ -3,18 +3,22 @@ from typing import Any, Literal
 
 import numpy as np
 import tqdm
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future
 
 from scaleflow.data._data import (
     PredictionData,
     TrainingData,
     ValidationData,
-    ZarrTrainingData,
+    MappedCellData,
 )
 
 __all__ = [
     "TrainSampler",
     "ValidationSampler",
     "PredictionSampler",
+    "ReservoirSampler",
 ]
 
 
@@ -30,7 +34,7 @@ class TrainSampler:
 
     """
 
-    def __init__(self, data: TrainingData | ZarrTrainingData, batch_size: int = 1024):
+    def __init__(self, data: TrainingData, batch_size: int = 1024):
         self._data = data
         self._data_idcs = np.arange(data.cell_data.shape[0])
         self.batch_size = batch_size
@@ -120,12 +124,11 @@ class TrainSampler:
         return res
 
     @property
-    def data(self) -> TrainingData | ZarrTrainingData:
+    def data(self) -> TrainingData:
         """The training data."""
         return self._data
 
-
-class TrainSamplerWithPool(TrainSampler):
+class ReservoirSampler(TrainSampler):
     """Data sampler with gradual pool replacement using reservoir sampling.
 
     This approach replaces pool elements one by one rather than refreshing
@@ -150,35 +153,30 @@ class TrainSamplerWithPool(TrainSampler):
 
     def __init__(
         self,
-        data: TrainingData | ZarrTrainingData,
+        data: MappedCellData,
         batch_size: int = 1024,
         pool_size: int = 100,
         replacement_prob: float = 0.01,
     ):
-        super().__init__(data, batch_size)
+        self.batch_size = batch_size
+        self.n_source_dists = data.n_controls
+        self.n_target_dists = data.n_perturbations
+        self._data = data
+
+        self._control_to_perturbation_keys = sorted(data.control_to_perturbation.keys())
+        self._has_condition_data = data.condition_data is not None
         self._pool_size = pool_size
         self._replacement_prob = replacement_prob
-        self._src_idx_pool = np.empty(self._pool_size, dtype=int)
         self._pool_usage_count = np.zeros(self.n_source_dists, dtype=int)
         self._initialized = False
 
-    def _compute_idx_mappings(self):
-        import cupy as cp
+        # Concurrency primitives
+        self._lock = threading.RLock()
+        self._executor = ThreadPoolExecutor(max_workers=2)
+        # Map pool position -> {"old": int, "new": int, "future": Future}
+        self._pending_replacements: dict[int, dict[str, Any]] = {}
 
-        self._tgt_to_cell_data_idcs = [None] * self.n_target_dists
-        gpu_per_cov_mask = cp.asarray(self._data.perturbation_covariates_mask)
-        gpu_spl_cov_mask = cp.asarray(self._data.split_covariates_mask)
-
-        for tgt_idx in tqdm.tqdm(range(self.n_target_dists), desc="Computing target to cell data idcs"):
-            mask = gpu_per_cov_mask == tgt_idx
-            self._tgt_to_cell_data_idcs[tgt_idx] = cp.where(mask)[0].get()
-        self._src_to_cell_data_idcs = [None] * self.n_source_dists
-        for src_idx in tqdm.tqdm(range(self.n_source_dists), desc="Computing source to cell data idcs"):
-            mask = gpu_spl_cov_mask == src_idx
-            self._src_to_cell_data_idcs[src_idx] = cp.where(mask)[0].get()
-
-    def init_pool_n_cache(self, rng):
-        self._compute_idx_mappings()
+    def init_pool(self, rng):
         self._init_pool(rng)
         self._init_cache_pool_elements()
 
@@ -191,57 +189,22 @@ class TrainSamplerWithPool(TrainSampler):
 
     def _init_cache_pool_elements(self):
         if not self._initialized:
-            raise ValueError("Pool not initialized. Call init_pool_n_cache(rng) first.")
+            raise ValueError("Pool not initialized. Call init_pool(rng) first.")
+        with self._lock:
+            self._cached_srcs = {i: self._data.src_cell_data[i][...] for i in self._src_idx_pool}
+            tgt_indices = sorted(
+                {int(j) for i in self._src_idx_pool for j in self._data.control_to_perturbation[i]}
+            )
 
-        # Build concatenated row indices and slice maps for sources
-        src_concat = []
-        src_slices: dict[int, slice] = {}
-        offset = 0
-        for src_idx in self._src_idx_pool:
-            idcs = self._src_to_cell_data_idcs[src_idx]
-            n = len(idcs)
-            src_slices[src_idx] = slice(offset, offset + n)
-            src_concat.append(idcs)
-            offset += n
-        src_concat = np.concatenate(src_concat) if len(src_concat) else np.empty((0,), dtype=int)
+        def _load_tgt(j: int):
+            return j, self._data.tgt_cell_data[j][...]
 
-        # Build concatenated row indices and slice maps for targets
-        tgt_pool = TrainSamplerWithPool._get_target_idx_pool(self._src_idx_pool, self._data.control_to_perturbation)
-        tgt_concat = []
-        tgt_slices: dict[int, slice] = {}
-        offset = 0
-        for tgt_idx in tqdm.tqdm(sorted(tgt_pool), desc="Caching target cells"):
-            idcs = self._tgt_to_cell_data_idcs[tgt_idx]
-            n = len(idcs)
-            tgt_slices[tgt_idx] = slice(offset, offset + n)
-            tgt_concat.append(idcs)
-            offset += n
-        tgt_concat = np.concatenate(tgt_concat) if len(tgt_concat) else np.empty((0,), dtype=int)
+        max_workers = min(32, (os.cpu_count() or 4))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            results = list(ex.map(_load_tgt, tgt_indices))
 
-        # Single orthogonal-index reads (fast path)
-        self._src_block = (
-            self._data.cell_data.oindex[src_concat, :]
-            if src_concat.size
-            else np.empty((0, self._data.cell_data.shape[1]), dtype=self._data.cell_data.dtype)
-        )
-        self._tgt_block = (
-            self._data.cell_data.oindex[tgt_concat, :]
-            if tgt_concat.size
-            else np.empty((0, self._data.cell_data.shape[1]), dtype=self._data.cell_data.dtype)
-        )
-
-        # Views into the blocks (no extra copies)
-        self._cached_srcs = {src_idx: self._src_block[sli] for src_idx, sli in src_slices.items()}
-        tgt_views = {tgt_idx: self._tgt_block[sli] for tgt_idx, sli in tgt_slices.items()}
-        self._cached_tgts = {
-            src_idx: {
-                tgt_idx: tgt_views[tgt_idx]
-                for tgt_idx in self._data.control_to_perturbation[src_idx]
-                if tgt_idx in tgt_views
-            }
-            for src_idx in self._src_idx_pool
-        }
-        self._initialized = True
+        with self._lock:
+            self._cached_tgts = {j: arr for j, arr in results}
 
     def _init_pool(self, rng):
         """Initialize the pool with random source distribution indices."""
@@ -251,38 +214,103 @@ class TrainSamplerWithPool(TrainSampler):
     def _sample_source_dist_idx(self, rng) -> int:
         """Sample a source distribution index with gradual pool replacement."""
         if not self._initialized:
-            self._init_pool(rng)
+            raise ValueError("Pool not initialized. Call init_pool(rng) first.")
+
+        # Opportunistically apply any ready replacements (non-blocking)
+        self._apply_ready_replacements()
 
         # Sample from current pool
-        pool_idx = rng.choice(self._pool_size)
-        source_idx = self._src_idx_pool[pool_idx]
+        with self._lock:
+            source_idx = rng.choice(sorted(self._cached_srcs.keys()))
 
         # Increment usage count for monitoring
         self._pool_usage_count[source_idx] += 1
 
-        # Gradually replace elements based on replacement probability
+        # Gradually replace elements based on replacement probability (schedule only)
         if rng.random() < self._replacement_prob:
-            self._replace_pool_element(rng)
+            self._schedule_replacement(rng)
 
         return source_idx
 
-    def _replace_pool_element(self, rng):
-        """Replace a single pool element with a new one."""
-        # instead sample weighted by usage count
-        # let's only consider the pool_usage_count.min() for least used
-        # and the pool_usage_count.max() for most used
+    def _schedule_replacement(self, rng):
+        """Schedule a single pool element replacement without blocking."""
+        # weights same as previous logic
         most_used_weight = (self._pool_usage_count == self._pool_usage_count.max()).astype(float)
+        if most_used_weight.sum() == 0:
+            return
         most_used_weight /= most_used_weight.sum()
-
-        # weight by most used
         replaced_pool_idx = rng.choice(self.n_source_dists, p=most_used_weight)
-        if replaced_pool_idx in set(self._src_idx_pool):
-            in_pool_idx = np.where(self._src_idx_pool == replaced_pool_idx)[0][0]
+
+        with self._lock:
+            pool_set = set(self._src_idx_pool.tolist())
+            if replaced_pool_idx not in pool_set:
+                return
+            in_pool_idx = int(np.where(self._src_idx_pool == replaced_pool_idx)[0][0])
+
+            # If there's already a pending replacement for this pool slot, skip
+            if in_pool_idx in self._pending_replacements:
+                return
+
             least_used_weight = (self._pool_usage_count == self._pool_usage_count.min()).astype(float)
+            if least_used_weight.sum() == 0:
+                return
             least_used_weight /= least_used_weight.sum()
-            new_pool_idx = rng.choice(self.n_source_dists, p=least_used_weight)
-            self._src_idx_pool[in_pool_idx] = new_pool_idx
-            print(f"replaced {replaced_pool_idx} with {new_pool_idx}")
+            new_pool_idx = int(rng.choice(self.n_source_dists, p=least_used_weight))
+
+            # Kick off background load for new indices
+            fut: Future = self._executor.submit(self._load_new_cache, new_pool_idx)
+            self._pending_replacements[in_pool_idx] = {
+                "old": replaced_pool_idx,
+                "new": new_pool_idx,
+                "future": fut,
+            }
+            print(f"scheduled replacement of {replaced_pool_idx} with {new_pool_idx} (slot {in_pool_idx})")
+
+    def _apply_ready_replacements(self):
+        """Apply any finished background loads; non-blocking."""
+        to_apply: list[int] = []
+        with self._lock:
+            for slot, info in self._pending_replacements.items():
+                fut: Future = info["future"]
+                if fut.done() and not fut.cancelled():
+                    to_apply.append(slot)
+
+        for slot in to_apply:
+            with self._lock:
+                info = self._pending_replacements.pop(slot, None)
+                if info is None:
+                    continue
+                old_idx = int(info["old"])
+                new_idx = int(info["new"])
+                fut: Future = info["future"]
+                try:
+                    prepared = fut.result(timeout=0)  # already done
+                except Exception as e:
+                    print(f"background load failed for {new_idx}: {e}")
+                    continue
+
+                # Swap pool index
+                self._src_idx_pool[slot] = new_idx
+
+                # Add new entries first
+                self._cached_srcs[new_idx] = prepared["src"]
+                for k, arr in prepared["tgts"].items():
+                    self._cached_tgts[k] = arr
+
+                # Remove old entries
+                if old_idx in self._cached_srcs:
+                    del self._cached_srcs[old_idx]
+                for k in self._data.control_to_perturbation[old_idx]:
+                    if k in self._cached_tgts:
+                        del self._cached_tgts[k]
+
+                print(f"applied replacement: {old_idx} -> {new_idx} (slot {slot})")
+
+    def _load_new_cache(self, src_idx: int) -> dict[str, Any]:
+        """Load new src and corresponding tgt arrays in the background."""
+        src_arr = self._data.src_cell_data[src_idx][...]
+        tgt_dict = {k: self._data.tgt_cell_data[k][...] for k in self._data.control_to_perturbation[src_idx]}
+        return {"src": src_arr, "tgts": tgt_dict}
 
     def get_pool_stats(self) -> dict:
         """Get statistics about the current pool state."""
@@ -297,10 +325,14 @@ class TrainSamplerWithPool(TrainSampler):
         }
 
     def _sample_source_cells(self, rng, source_dist_idx: int) -> np.ndarray:
-        return rng.choice(self._cached_srcs[source_dist_idx], size=self.batch_size, replace=True)
+        with self._lock:
+            arr = self._cached_srcs[source_dist_idx]
+        return rng.choice(arr, size=self.batch_size, replace=True)
 
     def _sample_target_cells(self, rng, source_dist_idx: int, target_dist_idx: int) -> np.ndarray:
-        return rng.choice(self._cached_tgts[source_dist_idx][target_dist_idx], size=self.batch_size, replace=True)
+        with self._lock:
+            arr = self._cached_tgts[target_dist_idx]
+        return rng.choice(arr, size=self.batch_size, replace=True)
 
 
 class BaseValidSampler(abc.ABC):

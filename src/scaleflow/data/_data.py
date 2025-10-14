@@ -17,7 +17,7 @@ __all__ = [
     "PredictionData",
     "TrainingData",
     "ValidationData",
-    "ZarrTrainingData",
+    "MappedCellData",
 ]
 
 
@@ -235,9 +235,7 @@ class ValidationData(BaseDataMixin):
     n_conditions_on_train_end: int | None = None
 
 
-def _read_dict(zgroup: zarr.Group, key: str) -> dict[int, Any]:
-    keys = zgroup[key].keys()
-    return {k: zgroup[key][k] for k in keys}
+
 
 
 @dataclass
@@ -275,7 +273,7 @@ class PredictionData(BaseDataMixin):
 
 
 @dataclass
-class ZarrTrainingData(BaseDataMixin):
+class MappedCellData(BaseDataMixin):
     """Lazy, Zarr-backed variant of :class:`TrainingData`.
 
     Fields mirror those in :class:`TrainingData`, but array-like members are
@@ -288,7 +286,10 @@ class ZarrTrainingData(BaseDataMixin):
 
     # Note: annotations use Any to allow zarr.Array and zarr groups without
     # importing zarr at module import time.
-    cell_data: Any
+    src_cell_data: dict[str, Any]
+    tgt_cell_data: dict[str, Any]
+    src_cell_idx: dict[str, Any]
+    tgt_cell_idx: dict[str, Any]
     split_covariates_mask: Any
     perturbation_covariates_mask: Any
     split_idx_to_covariates: dict[int, tuple[Any, ...]]
@@ -297,24 +298,44 @@ class ZarrTrainingData(BaseDataMixin):
     condition_data: dict[str, Any]
     control_to_perturbation: dict[int, Any]
     max_combination_length: int
+    mapping_data_full_cached: bool = False
 
     def __post_init__(self):
         # load everything except cell_data to memory
 
         # load masks as numpy arrays
-        self.split_covariates_mask = self.split_covariates_mask[...]
-        self.perturbation_covariates_mask = self.perturbation_covariates_mask[...]
-
         self.condition_data = {k: np.asarray(v) for k, v in self.condition_data.items()}
         self.control_to_perturbation = {int(k): np.asarray(v) for k, v in self.control_to_perturbation.items()}
-        self.perturbation_idx_to_id = {int(k): np.asarray(v) for k, v in self.perturbation_idx_to_id.items()}
-        self.perturbation_idx_to_covariates = {
-            int(k): np.asarray(v) for k, v in self.perturbation_idx_to_covariates.items()
-        }
-        self.split_idx_to_covariates = {int(k): np.asarray(v) for k, v in self.split_idx_to_covariates.items()}
+        if self.mapping_data_full_cached:
+            # used in validation usually
+            self.perturbation_idx_to_id = {int(k): np.asarray(v) for k, v in self.perturbation_idx_to_id.items()}
+            self.perturbation_idx_to_covariates = {
+                int(k): np.asarray(v) for k, v in self.perturbation_idx_to_covariates.items()
+            }
+            # not used in nested structure
+            self.src_cell_idx = self.src_cell_idx[...]
+            self.tgt_cell_idx = self.tgt_cell_idx[...]
+            self.split_covariates_mask = self.split_covariates_mask[...]
+            self.perturbation_covariates_mask = self.perturbation_covariates_mask[...]
+            self.split_idx_to_covariates = {int(k): np.asarray(v) for k, v in self.split_idx_to_covariates.items()}
+
+    @staticmethod
+    def _get_mapping_data(group: zarr.Group) -> dict[str, Any]:
+        return group["mapping_data"]["mapping_data"]
+
+    @staticmethod
+    def _read_dict(zgroup: zarr.Group, key: str) -> dict[int, Any]:
+        keys = zgroup[key].keys()
+        return {k: zgroup[key][k] for k in keys}
+
+    @staticmethod
+    def _read_cell_data(zgroup: zarr.Group, key: str) -> dict[int, Any]:
+        keys = sorted(zgroup[key].keys())
+        data_key = [k for k in keys if not k.endswith("_index")]
+        return {int(k): zgroup[key][k] for k in data_key}, {int(k): zgroup[key][f"{k}_index"] for k in data_key}
 
     @classmethod
-    def read_zarr(cls, path: str) -> ZarrTrainingData:
+    def read_zarr(cls, path: str) -> MappedCellData:
         if isinstance(path, str):
             path = LocalStore(path, read_only=True)
         group = zarr.open_group(path, mode="r")
@@ -327,14 +348,21 @@ class ZarrTrainingData(BaseDataMixin):
             except Exception:  # noqa: BLE001
                 max_combination_length = int(max_len_node)
 
+        mapping_group = cls._get_mapping_data(group)
+
+        src_cell_data, src_cell_idx = cls._read_cell_data(group, "src_cell_data")
+        tgt_cell_data, tgt_cell_idx = cls._read_cell_data(group, "tgt_cell_data")
         return cls(
-            cell_data=group["cell_data"],
-            split_covariates_mask=group["split_covariates_mask"],
-            perturbation_covariates_mask=group["perturbation_covariates_mask"],
-            split_idx_to_covariates=_read_dict(group, "split_idx_to_covariates"),
-            perturbation_idx_to_covariates=_read_dict(group, "perturbation_idx_to_covariates"),
-            perturbation_idx_to_id=_read_dict(group, "perturbation_idx_to_id"),
-            condition_data=_read_dict(group, "condition_data"),
-            control_to_perturbation=_read_dict(group, "control_to_perturbation"),
+            tgt_cell_data=tgt_cell_data,
+            tgt_cell_idx=tgt_cell_idx,
+            src_cell_data=src_cell_data,
+            src_cell_idx=src_cell_idx,
+            split_covariates_mask=mapping_group["split_covariates_mask"],
+            perturbation_covariates_mask=mapping_group["perturbation_covariates_mask"],
+            split_idx_to_covariates=cls._read_dict(mapping_group, "split_idx_to_covariates"),
+            perturbation_idx_to_covariates=cls._read_dict(mapping_group, "perturbation_idx_to_covariates"),
+            perturbation_idx_to_id=cls._read_dict(mapping_group, "perturbation_idx_to_id"),
+            condition_data=cls._read_dict(mapping_group, "condition_data"),
+            control_to_perturbation=cls._read_dict(mapping_group, "control_to_perturbation"),
             max_combination_length=max_combination_length,
         )

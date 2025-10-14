@@ -7,24 +7,26 @@ from numpy.typing import ArrayLike
 from tqdm import tqdm
 
 from scaleflow.data import JaxOutOfCoreTrainSampler, TrainSampler, ValidationSampler
-from scaleflow.solvers import _genot, _otfm
+from scaleflow.solvers import _eqm, _genot, _otfm
 from scaleflow.training._callbacks import BaseCallback, CallbackRunner
 
 
 class CellFlowTrainer:
-    """Trainer for the OTFM/GENOT solver with a conditional velocity field.
+    """Trainer for the OTFM/GENOT/EqM solver with a conditional velocity field.
 
     Parameters
     ----------
         dataloader
             Data sampler.
         solver
-            :class:`~scaleflow.solvers._otfm.OTFlowMatching` or
-            :class:`~scaleflow.solvers._genot.GENOT` solver with a conditional velocity field.
+            :class:`~scaleflow.solvers._otfm.OTFlowMatching`,
+            :class:`~scaleflow.solvers._genot.GENOT`, or
+            :class:`~scaleflow.solvers._eqm.EquilibriumMatching` solver with a conditional velocity field.
         predict_kwargs
             Keyword arguments for the prediction functions
-            :func:`scaleflow.solvers._otfm.OTFlowMatching.predict` or
-            :func:`scaleflow.solvers._genot.GENOT.predict` used during validation.
+            :func:`scaleflow.solvers._otfm.OTFlowMatching.predict`,
+            :func:`scaleflow.solvers._genot.GENOT.predict`, or
+            :func:`scaleflow.solvers._eqm.EquilibriumMatching.predict` used during validation.
         seed
             Random seed for subsampling validation data.
 
@@ -35,12 +37,12 @@ class CellFlowTrainer:
 
     def __init__(
         self,
-        solver: _otfm.OTFlowMatching | _genot.GENOT,
+        solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching,
         predict_kwargs: dict[str, Any] | None = None,
         seed: int = 0,
     ):
-        if not isinstance(solver, (_otfm.OTFlowMatching | _genot.GENOT)):
-            raise NotImplementedError(f"Solver must be an instance of OTFlowMatching or GENOT, got {type(solver)}")
+        if not isinstance(solver, (_otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching)):
+            raise NotImplementedError(f"Solver must be an instance of OTFlowMatching, GENOT, or EquilibriumMatching, got {type(solver)}")
 
         self.solver = solver
         self.predict_kwargs = predict_kwargs or {}
@@ -106,7 +108,7 @@ class CellFlowTrainer:
         valid_loaders: dict[str, ValidationSampler] | None = None,
         monitor_metrics: Sequence[str] = [],
         callbacks: Sequence[BaseCallback] = [],
-    ) -> _otfm.OTFlowMatching | _genot.GENOT:
+    ) -> _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching:
         """Trains the model.
 
         Parameters
@@ -155,14 +157,19 @@ class CellFlowTrainer:
                     valid_loaders, mode="on_log_iteration"
                 )
 
-                # Run callbacks
-                metrics = crun.on_log_iteration(valid_source_data, valid_true_data, valid_pred_data, self.solver)  # type: ignore[arg-type]
+                # Calculate mean loss
+                mean_loss = np.mean(self.training_logs["loss"][-valid_freq:])
+
+                # Run callbacks with loss as additional metric
+                metrics = crun.on_log_iteration(
+                    valid_source_data, valid_true_data, valid_pred_data, self.solver,
+                    additional_metrics={"train_loss": mean_loss}
+                )
                 self._update_logs(metrics)
 
                 # Update progress bar
-                mean_loss = np.mean(self.training_logs["loss"][-valid_freq:])
                 postfix_dict = {metric: round(self.training_logs[metric][-1], 3) for metric in monitor_metrics}
-                postfix_dict["loss"] = round(mean_loss, 3)
+                postfix_dict["train_loss"] = round(mean_loss, 3)  # or keep as "loss"
                 pbar.set_postfix(postfix_dict)
 
         if num_iterations > 0:

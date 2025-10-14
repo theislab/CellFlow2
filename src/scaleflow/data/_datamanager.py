@@ -2,17 +2,31 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from typing import Any
 
+import scipy.sparse as sp
+import sklearn.preprocessing as preprocessing
+
+import numpy as np
+import pandas as pd
+from pandas.api.types import is_numeric_dtype
+import tqdm
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future
+import os
 import anndata
 import dask
 import dask.dataframe as dd
-import dask.delayed
-import numpy as np
-import pandas as pd
-import scipy.sparse as sp
-import sklearn.preprocessing as preprocessing
 from dask.diagnostics import ProgressBar
-from pandas.api.types import is_numeric_dtype
 
+<<<<<<< HEAD
+from scaleflow.data._data import (
+    PredictionData,
+    TrainingData,
+    ValidationData,
+    MappedCellData,
+)
+
+=======
+>>>>>>> main
 from scaleflow._logging import logger
 from scaleflow._types import ArrayLike
 from scaleflow.data._data import ConditionData, PredictionData, ReturnData, TrainingData, ValidationData
@@ -759,15 +773,15 @@ class DataManager:
         if sample_rep == "X":
             sample_rep = adata.X
             if isinstance(sample_rep, sp.csr_matrix):
-                return np.asarray(sample_rep.toarray())
+                return sample_rep.toarray()
             else:
-                return np.asarray(sample_rep)
+                return sample_rep
         if isinstance(self._sample_rep, str):
             if self._sample_rep not in adata.obsm:
                 raise KeyError(f"Sample representation '{self._sample_rep}' not found in `adata.obsm`.")
-            return np.asarray(adata.obsm[self._sample_rep])
+            return adata.obsm[self._sample_rep]
         attr, key = next(iter(sample_rep.items()))  # type: ignore[union-attr]
-        return np.asarray(getattr(adata, attr)[key])
+        return getattr(adata, attr)[key]
 
     def _verify_control_data(self, adata: anndata.AnnData | None) -> None:
         if adata is None:

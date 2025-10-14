@@ -1,5 +1,5 @@
-import cellflow
-from cellflow.data import TorchCombinedTrainSampler
+import scaleflow
+from scaleflow.data import TorchCombinedTrainSampler
 
 
 class TestTorchDataloader:
@@ -15,7 +15,7 @@ class TestTorchDataloader:
         perturbation_covariate_reps = {"drug": "drug"}
         batch_size = 18
 
-        cf = cellflow.model.CellFlow(adata_perturbation, solver=solver)
+        cf = scaleflow.model.CellFlow(adata_perturbation, solver=solver)
         cf.prepare_data(
             sample_rep=sample_rep,
             control_key=control_key,
