@@ -235,9 +235,6 @@ class ValidationData(BaseDataMixin):
     n_conditions_on_train_end: int | None = None
 
 
-
-
-
 @dataclass
 class PredictionData(BaseDataMixin):
     """Data container to perform prediction.

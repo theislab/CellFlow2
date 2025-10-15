@@ -17,7 +17,6 @@ import dask
 import dask.dataframe as dd
 from dask.diagnostics import ProgressBar
 
-<<<<<<< HEAD
 from scaleflow.data._data import (
     PredictionData,
     TrainingData,
@@ -25,8 +24,6 @@ from scaleflow.data._data import (
     MappedCellData,
 )
 
-=======
->>>>>>> main
 from scaleflow._logging import logger
 from scaleflow._types import ArrayLike
 from scaleflow.data._data import ConditionData, PredictionData, ReturnData, TrainingData, ValidationData

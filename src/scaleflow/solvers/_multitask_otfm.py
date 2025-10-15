@@ -299,11 +299,7 @@ class MultiTaskOTFlowMatching:
         else:
             return self._predict_flow_matching(x, condition, rng, batched, **kwargs)
 
-    def _predict_phenotype(
-        self,
-        condition: dict[str, ArrayLike],
-        rng: jax.Array | None = None
-    ) -> ArrayLike:
+    def _predict_phenotype(self, condition: dict[str, ArrayLike], rng: jax.Array | None = None) -> ArrayLike:
         """Predict phenotype values."""
         use_mean = rng is None or self.condition_encoder_mode == "deterministic"
         rng = utils.default_prng_key(rng)
@@ -312,15 +308,18 @@ class MultiTaskOTFlowMatching:
         first_cond = next(iter(condition.values()))
         n_samples = first_cond.shape[0]
 
-        encoder_noise = jnp.zeros((n_samples, self.vf.condition_embedding_dim)) if use_mean else \
-                       jax.random.normal(rng, (n_samples, self.vf.condition_embedding_dim))
+        encoder_noise = (
+            jnp.zeros((n_samples, self.vf.condition_embedding_dim))
+            if use_mean
+            else jax.random.normal(rng, (n_samples, self.vf.condition_embedding_dim))
+        )
 
         phenotype_pred = self.vf_state_inference.apply_fn(
             {"params": self.vf_state_inference.params},
             method="predict_phenotype",
             cond=condition,
             encoder_noise=encoder_noise,
-            train=False
+            train=False,
         )
         return np.array(phenotype_pred)
 

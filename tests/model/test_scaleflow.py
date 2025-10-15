@@ -381,9 +381,7 @@ class TestCellFlow:
             cov_data_cell_type_1 = covariate_data_a[covariate_data_a["cell_type"] == "cell_line_a"]
             adata_pred_cell_type_2 = adata_pred[adata_pred.obs["cell_type"] == "cell_line_b"]
             adata_pred_cell_type_2.obs["control"] = True
-            cf.predict(
-                adata_pred_cell_type_2, sample_rep="X", covariate_data=cov_data_cell_type_1, **predict_kwargs
-            )
+            cf.predict(adata_pred_cell_type_2, sample_rep="X", covariate_data=cov_data_cell_type_1, **predict_kwargs)
 
     def test_raise_otfm_vf_kwargs_passed(self, adata_perturbation):
         vf_kwargs = {"genot_source_dims": (2, 2), "genot_source_dropouts": 0.1}

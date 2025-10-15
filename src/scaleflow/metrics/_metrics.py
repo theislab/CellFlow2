@@ -201,7 +201,9 @@ def maximum_mean_discrepancy(x: ArrayLike, y: ArrayLike, gamma: float = 1.0, exa
     return xx.mean() + yy.mean() - 2 * xy.mean()
 
 
-def compute_scalar_mmd(x: ArrayLike, y: ArrayLike, gammas: Sequence[float] | None = None) -> float:
+def compute_scalar_mmd(
+    x: ArrayLike, y: ArrayLike, gammas: Sequence[float] | None = None, max_samples: int = 5000
+) -> float:
     """Compute the Mean Maximum Discrepancy (MMD) across different length scales
 
     Parameters
@@ -212,11 +214,22 @@ def compute_scalar_mmd(x: ArrayLike, y: ArrayLike, gammas: Sequence[float] | Non
             An array of shape [num_samples, num_features].
         gammas
             A sequence of values for the paramater gamma of the rbf kernel.
+        max_samples
+            Maximum number of samples to use for MMD computation. Default is 5000.
+            If either x or y has more samples, they will be randomly subsampled.
 
     Returns
     -------
         A scalar denoting the average MMD over all gammas.
     """
+    if x.shape[0] > max_samples:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(x.shape[0], max_samples, replace=False)
+        x = x[idx]
+    if y.shape[0] > max_samples:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(y.shape[0], max_samples, replace=False)
+        y = y[idx]
     if gammas is None:
         gammas = [2, 1, 0.5, 0.1, 0.01, 0.005]
     mmds = [maximum_mean_discrepancy(x, y, gamma=gamma) for gamma in gammas]  # type: ignore[union-attr]

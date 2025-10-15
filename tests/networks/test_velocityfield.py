@@ -19,7 +19,12 @@ class TestVelocityField:
     @pytest.mark.parametrize("linear_projection_before_concatenation", [True, False])
     @pytest.mark.parametrize("condition_mode", ["deterministic", "stochastic"])
     @pytest.mark.parametrize(
-        "velocity_field_cls", [_velocity_field.ConditionalVelocityField, _velocity_field.GENOTConditionalVelocityField, _velocity_field.EquilibriumVelocityField]
+        "velocity_field_cls",
+        [
+            _velocity_field.ConditionalVelocityField,
+            _velocity_field.GENOTConditionalVelocityField,
+            _velocity_field.EquilibriumVelocityField,
+        ],
     )
     @pytest.mark.parametrize("conditioning", ["concatenation", "film", "resnet"])
     def test_velocity_field_init(
@@ -93,7 +98,12 @@ class TestVelocityField:
 
     @pytest.mark.parametrize("condition_mode", ["deterministic", "stochastic"])
     @pytest.mark.parametrize(
-        "velocity_field_cls", [_velocity_field.ConditionalVelocityField, _velocity_field.GENOTConditionalVelocityField, _velocity_field.EquilibriumVelocityField]
+        "velocity_field_cls",
+        [
+            _velocity_field.ConditionalVelocityField,
+            _velocity_field.GENOTConditionalVelocityField,
+            _velocity_field.EquilibriumVelocityField,
+        ],
     )
     @pytest.mark.parametrize("conditioning", ["concatenation", "film", "resnet"])
     def test_velocityfield_conditioning_kwargs(self, condition_mode, velocity_field_cls, conditioning):
@@ -163,7 +173,12 @@ class TestVelocityField:
 
     @pytest.mark.parametrize("condition_mode", ["deterministic", "stochastic"])
     @pytest.mark.parametrize(
-        "velocity_field_cls", [_velocity_field.ConditionalVelocityField, _velocity_field.GENOTConditionalVelocityField, _velocity_field.EquilibriumVelocityField]
+        "velocity_field_cls",
+        [
+            _velocity_field.ConditionalVelocityField,
+            _velocity_field.GENOTConditionalVelocityField,
+            _velocity_field.EquilibriumVelocityField,
+        ],
     )
     @pytest.mark.parametrize("conditioning", ["concatenation", "film", "resnet"])
     def test_velocityfield_conditioning_raises(self, condition_mode, velocity_field_cls, conditioning):

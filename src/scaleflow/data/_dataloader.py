@@ -128,6 +128,7 @@ class TrainSampler:
         """The training data."""
         return self._data
 
+
 class ReservoirSampler(TrainSampler):
     """Data sampler with gradual pool replacement using reservoir sampling.
 
@@ -192,9 +193,7 @@ class ReservoirSampler(TrainSampler):
             raise ValueError("Pool not initialized. Call init_pool(rng) first.")
         with self._lock:
             self._cached_srcs = {i: self._data.src_cell_data[i][...] for i in self._src_idx_pool}
-            tgt_indices = sorted(
-                {int(j) for i in self._src_idx_pool for j in self._data.control_to_perturbation[i]}
-            )
+            tgt_indices = sorted({int(j) for i in self._src_idx_pool for j in self._data.control_to_perturbation[i]})
 
         def _load_tgt(j: int):
             return j, self._data.tgt_cell_data[j][...]

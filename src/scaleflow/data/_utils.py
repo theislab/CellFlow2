@@ -60,7 +60,7 @@ def write_sharded(
             # or use smallest dimension as chunk size
 
             chunk_size_used, shard_size_used = get_size(elem.shape, chunk_size, shard_size)
-            
+
             dataset_kwargs = {
                 "shards": (shard_size_used,) + (elem.shape[1:]),  # only shard over 1st dim
                 "chunks": (chunk_size_used,) + (elem.shape[1:]),  # only chunk over 1st dim

@@ -94,8 +94,11 @@ class JaxOutOfCoreTrainSampler:
 
     def set_sampler(self, num_iterations: int) -> None:
         self._iterator = _prefetch_to_device(
-            sampler=self.inner, seed=self.seed, num_iterations=num_iterations,
-            prefetch_factor=self.prefetch_factor, num_workers=self.num_workers
+            sampler=self.inner,
+            seed=self.seed,
+            num_iterations=num_iterations,
+            prefetch_factor=self.prefetch_factor,
+            num_workers=self.num_workers,
         )
 
     def sample(self, rng=None) -> dict[str, Any]:

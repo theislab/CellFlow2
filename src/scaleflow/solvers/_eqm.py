@@ -237,7 +237,9 @@ class EquilibriumMatching:
         rng = utils.default_prng_key(rng)
         encoder_noise = jnp.zeros(noise_dim) if use_mean else jax.random.normal(rng, noise_dim)
 
-        def gradient_field(x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray) -> jnp.ndarray:
+        def gradient_field(
+            x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray
+        ) -> jnp.ndarray:
             params = self.vf_state_inference.params
             return self.vf_state_inference.apply_fn({"params": params}, x, condition, encoder_noise, train=False)[0]
 

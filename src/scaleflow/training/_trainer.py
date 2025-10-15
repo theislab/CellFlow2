@@ -42,7 +42,9 @@ class CellFlowTrainer:
         seed: int = 0,
     ):
         if not isinstance(solver, (_otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching)):
-            raise NotImplementedError(f"Solver must be an instance of OTFlowMatching, GENOT, or EquilibriumMatching, got {type(solver)}")
+            raise NotImplementedError(
+                f"Solver must be an instance of OTFlowMatching, GENOT, or EquilibriumMatching, got {type(solver)}"
+            )
 
         self.solver = solver
         self.predict_kwargs = predict_kwargs or {}
@@ -69,25 +71,12 @@ class CellFlowTrainer:
         for val_key, vdl in val_pbar:
             batch = vdl.sample(mode=mode)
             src = batch["source"]
-            print(len(src))
-            key0 = list(src.keys())[0]
-            key1 = list(src.keys())[1]
-            key2 = list(src.keys())[2]
-            print(key0)
-            print(key1)
-            print(key2)
-            print(src[key0].shape)
-            print(src[key1].shape)
-            print(src[key2].shape)
-            print(batch["condition"][key0])
-            print(batch["condition"][key1])
             condition = batch.get("condition", None)
             true_tgt = batch["target"]
             valid_source_data[val_key] = src
             valid_pred_data[val_key] = self.solver.predict(src, condition=condition, **self.predict_kwargs)
             valid_true_data[val_key] = true_tgt
 
-            print("Predictions done")
             # Update progress bar description with current validation set
             val_pbar.set_description(f"Validation ({val_key})")
 
@@ -162,8 +151,11 @@ class CellFlowTrainer:
 
                 # Run callbacks with loss as additional metric
                 metrics = crun.on_log_iteration(
-                    valid_source_data, valid_true_data, valid_pred_data, self.solver,
-                    additional_metrics={"train_loss": mean_loss}
+                    valid_source_data,
+                    valid_true_data,
+                    valid_pred_data,
+                    self.solver,
+                    additional_metrics={"train_loss": mean_loss},
                 )
                 self._update_logs(metrics)
 

@@ -421,19 +421,22 @@ class TestHoldoutCombinations:
 
         # Create cell line assignments
         import pandas as pd
+
         cell_type_list = np.random.choice(cell_lines, n_obs)
         dosages = np.random.choice([10.0, 100.0, 1000.0], n_obs)
 
-        obs_data = pd.DataFrame({
-            "cell_type": cell_type_list,
-            "dosage": dosages,
-            "drug1": drug1_list,
-            "drug2": drug2_list,
-            "drug3": ["control"] * n_obs,
-            "dosage_a": np.random.choice([10.0, 100.0, 1000.0], n_obs),
-            "dosage_b": np.random.choice([10.0, 100.0, 1000.0], n_obs),
-            "dosage_c": np.random.choice([10.0, 100.0, 1000.0], n_obs),
-        })
+        obs_data = pd.DataFrame(
+            {
+                "cell_type": cell_type_list,
+                "dosage": dosages,
+                "drug1": drug1_list,
+                "drug2": drug2_list,
+                "drug3": ["control"] * n_obs,
+                "dosage_a": np.random.choice([10.0, 100.0, 1000.0], n_obs),
+                "dosage_b": np.random.choice([10.0, 100.0, 1000.0], n_obs),
+                "dosage_c": np.random.choice([10.0, 100.0, 1000.0], n_obs),
+            }
+        )
 
         # Create an AnnData object
         adata_combinations = ad.AnnData(X=X_data, obs=obs_data)
@@ -443,14 +446,13 @@ class TestHoldoutCombinations:
         # Add boolean columns for each drug
         for drug in drugs:
             adata_combinations.obs[drug] = (
-                (adata_combinations.obs["drug1"] == drug) |
-                (adata_combinations.obs["drug2"] == drug) |
-                (adata_combinations.obs["drug3"] == drug)
+                (adata_combinations.obs["drug1"] == drug)
+                | (adata_combinations.obs["drug2"] == drug)
+                | (adata_combinations.obs["drug3"] == drug)
             )
 
-        adata_combinations.obs["control"] = (
-            (adata_combinations.obs["drug1"] == "control") &
-            (adata_combinations.obs["drug2"] == "control")
+        adata_combinations.obs["control"] = (adata_combinations.obs["drug1"] == "control") & (
+            adata_combinations.obs["drug2"] == "control"
         )
 
         # Convert to categorical EXCEPT for control and boolean drug columns

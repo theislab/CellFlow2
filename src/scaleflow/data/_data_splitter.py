@@ -100,9 +100,9 @@ class DataSplitter:
     ...         split_ratios=[[0.6, 0.2, 0.2]],
     ...         split_type="holdout_groups",
     ...         split_key=["drug"],
-    ...         test_random_state=999,      # Fixed: same test drugs across all runs
-    ...         val_random_state=seed,      # Varies: different validation drugs per run
-    ...         random_state=seed,          # Varies: different training randomness
+    ...         test_random_state=999,  # Fixed: same test drugs across all runs
+    ...         val_random_state=seed,  # Varies: different validation drugs per run
+    ...         random_state=seed,  # Varies: different training randomness
     ...     )
     ...     results = splitter.split_all_datasets()
     ...     # Train model with this split...
@@ -230,9 +230,7 @@ class DataSplitter:
             "n_cells": n_cells,
         }
 
-    def _get_unique_perturbation_values(
-        self, perturbation_idx_to_covariates: dict[int, tuple[str, ...]]
-    ) -> list[str]:
+    def _get_unique_perturbation_values(self, perturbation_idx_to_covariates: dict[int, tuple[str, ...]]) -> list[str]:
         """Get all unique covariate values from perturbation dictionary."""
         all_unique_vals = set()
         for covariates in perturbation_idx_to_covariates.values():
@@ -389,7 +387,9 @@ class DataSplitter:
 
         # Log overlap information (important for combination treatments)
         total_assigned = len(set(train_idx) | set(val_idx) | set(test_idx))
-        logger.info(f"Total observations assigned to splits: {total_assigned} out of {len(perturbation_covariates_mask)}")
+        logger.info(
+            f"Total observations assigned to splits: {total_assigned} out of {len(perturbation_covariates_mask)}"
+        )
 
         overlaps = []
         if len(set(train_idx) & set(val_idx)) > 0:
@@ -523,7 +523,9 @@ class DataSplitter:
                     [tuple(p) for p in shuffled_for_val[-n_val_perturbations:]] if n_val_perturbations > 0 else []
                 )
                 train_perturbations = (
-                    [tuple(p) for p in shuffled_for_val[:-n_val_perturbations]] if n_val_perturbations > 0 else [tuple(p) for p in shuffled_for_val]
+                    [tuple(p) for p in shuffled_for_val[:-n_val_perturbations]]
+                    if n_val_perturbations > 0
+                    else [tuple(p) for p in shuffled_for_val]
                 )
 
                 # Assign all cells with same perturbation to same split
@@ -871,9 +873,7 @@ class DataSplitter:
                     "val": sorted(split_info["split_values"]["val"]),
                     "test": sorted(split_info["split_values"]["test"]),
                 }
-                dataset_summary["statistics"]["total_unique_conditions"] = len(
-                    split_info["split_values"]["all_unique"]
-                )
+                dataset_summary["statistics"]["total_unique_conditions"] = len(split_info["split_values"]["all_unique"])
                 dataset_summary["statistics"]["train_conditions"] = len(split_info["split_values"]["train"])
                 dataset_summary["statistics"]["val_conditions"] = len(split_info["split_values"]["val"])
                 dataset_summary["statistics"]["test_conditions"] = len(split_info["split_values"]["test"])

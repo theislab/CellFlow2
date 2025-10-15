@@ -64,7 +64,12 @@ class CellFlow:
         self._validation_data: dict[str, ValidationData] = {"predict_kwargs": {}}
         self._solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching | None = None
         self._condition_dim: int | None = None
-        self._vf: _velocity_field.ConditionalVelocityField | _velocity_field.GENOTConditionalVelocityField | _velocity_field.EquilibriumVelocityField | None = None
+        self._vf: (
+            _velocity_field.ConditionalVelocityField
+            | _velocity_field.GENOTConditionalVelocityField
+            | _velocity_field.EquilibriumVelocityField
+            | None
+        ) = None
 
     def prepare_data(
         self,
@@ -440,7 +445,9 @@ class CellFlow:
                 raise ValueError("Stochastic condition embeddings require `regularization`>0.")
 
         condition_encoder_kwargs = condition_encoder_kwargs or {}
-        if (self._solver_class == _otfm.OTFlowMatching or self._solver_class == _eqm.EquilibriumMatching) and vf_kwargs is not None:
+        if (
+            self._solver_class == _otfm.OTFlowMatching or self._solver_class == _eqm.EquilibriumMatching
+        ) and vf_kwargs is not None:
             raise ValueError("For `solver='otfm'` or `solver='eqm'`, `vf_kwargs` must be `None`.")
         if self._solver_class == _genot.GENOT:
             if vf_kwargs is None:
@@ -552,7 +559,9 @@ class CellFlow:
                 **solver_kwargs,
             )
         else:
-            raise NotImplementedError(f"Solver must be an instance of OTFlowMatching, EquilibriumMatching, or GENOT, got {type(self.solver)}")
+            raise NotImplementedError(
+                f"Solver must be an instance of OTFlowMatching, EquilibriumMatching, or GENOT, got {type(self.solver)}"
+            )
 
         self._trainer = CellFlowTrainer(solver=self.solver, predict_kwargs=self.validation_data["predict_kwargs"])  # type: ignore[arg-type]
 
@@ -614,7 +623,7 @@ class CellFlow:
                 batch_size=batch_size,
                 seed=self._seed,
                 num_workers=num_workers,
-                prefetch_factor=prefetch_factor
+                prefetch_factor=prefetch_factor,
             )
         else:
             self._dataloader = TrainSampler(data=self.train_data, batch_size=batch_size)
@@ -902,7 +911,12 @@ class CellFlow:
     @property
     def velocity_field(
         self,
-    ) -> _velocity_field.ConditionalVelocityField | _velocity_field.GENOTConditionalVelocityField | _velocity_field.EquilibriumVelocityField | None:
+    ) -> (
+        _velocity_field.ConditionalVelocityField
+        | _velocity_field.GENOTConditionalVelocityField
+        | _velocity_field.EquilibriumVelocityField
+        | None
+    ):
         """The conditional velocity field."""
         return self._vf
 

@@ -24,11 +24,12 @@ with h5py.File("/lustre/groups/ml01/workspace/100mil/100m_int_indices.h5ad", "r"
     adata_all = ad.AnnData(
         obs=ad.io.read_elem(f["obs"]),
         var=read_lazy(f["var"]),
-        uns = read_lazy(f["uns"]),
-        obsm = read_lazy(f["obsm"]),
+        uns=read_lazy(f["uns"]),
+        obsm=read_lazy(f["obsm"]),
     )
 
-dm = DataManager(adata_all,  
+dm = DataManager(
+    adata_all,
     sample_rep="X_pca",
     control_key="control",
     perturbation_covariates={"drugs": ("drug",), "dosage": ("dosage",)},
@@ -37,7 +38,7 @@ dm = DataManager(adata_all,
     sample_covariate_reps={"cell_line": "cell_line_embeddings"},
     split_covariates=["cell_line"],
     max_combination_length=None,
-    null_value=0.0
+    null_value=0.0,
 )
 print("data loaded")
 
@@ -115,6 +116,7 @@ shard_size = chunk_size * 8
 
 ad.settings.zarr_write_format = 3  # Needed to support sharding in Zarr
 
+
 def get_size(shape: tuple[int, ...], chunk_size: int, shard_size: int) -> tuple[int, int]:
     shard_size_used = shard_size
     chunk_size_used = chunk_size
@@ -125,12 +127,10 @@ def get_size(shape: tuple[int, ...], chunk_size: int, shard_size: int) -> tuple[
     return chunk_size_used, shard_size_used
 
 
-
-
 def write_single_array(group, key, arr, idxs, chunk_size, shard_size):
     """Write a single array - designed for threading"""
     chunk_size_used, shard_size_used = get_size(arr.shape, chunk_size, shard_size)
-    
+
     group.create_array(
         name=key,
         data=arr,
@@ -148,30 +148,38 @@ def write_single_array(group, key, arr, idxs, chunk_size, shard_size):
     )
     return key
 
+
 def write_cell_data_threaded(group, cell_data, chunk_size, shard_size, max_workers=8):
     """Write cell data using threading for I/O parallelism"""
-    
+
     write_func = partial(write_single_array, group, chunk_size=chunk_size, shard_size=shard_size)
-    
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all write tasks
         future_to_key = {
-            executor.submit(write_single_array, group, k, cell_data[k]["cell_data"], cell_data[k]["cell_data_index"], chunk_size, shard_size): k
+            executor.submit(
+                write_single_array,
+                group,
+                k,
+                cell_data[k]["cell_data"],
+                cell_data[k]["cell_data_index"],
+                chunk_size,
+                shard_size,
+            ): k
             for k in cell_data.keys()
         }
-        
+
         # Process results with progress bar
         for future in tqdm.tqdm(
-            concurrent.futures.as_completed(future_to_key), 
-            total=len(future_to_key),
-            desc=f"Writing {group.name}"
+            concurrent.futures.as_completed(future_to_key), total=len(future_to_key), desc=f"Writing {group.name}"
         ):
             key = future_to_key[future]
             try:
                 future.result()  # This will raise any exceptions
             except Exception as exc:
-                print(f'Array {key} generated an exception: {exc}')
+                print(f"Array {key} generated an exception: {exc}")
                 raise
+
 
 # %%
 
@@ -185,10 +193,6 @@ write_cell_data_threaded(src_group, src_cell_data, chunk_size, shard_size, max_w
 print("done writing src_cell_data")
 write_cell_data_threaded(tgt_group, tgt_cell_data, chunk_size, shard_size, max_workers=24)
 print("done writing tgt_cell_data")
-
-
-
-
 
 
 # %%
@@ -206,5 +210,3 @@ write_sharded(
     compressors=None,
 )
 print("done")
-
-
