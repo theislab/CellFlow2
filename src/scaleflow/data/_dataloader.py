@@ -1,4 +1,5 @@
 import abc
+import math
 from typing import Any, Literal
 
 import numpy as np
@@ -142,21 +143,20 @@ class ReservoirSampler(TrainSampler):
         The training data.
     batch_size
         The batch size.
-    pool_size
-        The size of the pool of source distribution indices.
+    pool_fraction
+        Fraction of source distributions to cache (0 < pool_fraction <= 1).
+        If 1.0, all sources are cached and no replacement is performed.
     replacement_prob
         Probability of replacing a pool element after each sample.
         Lower values = longer cache retention, less randomness.
         Higher values = faster cache turnover, more randomness.
-    replace_in_pool
-        Whether to allow replacement when sampling from the pool.
     """
 
     def __init__(
         self,
         data: MappedCellData,
         batch_size: int = 1024,
-        pool_size: int = 100,
+        pool_fraction: float = 0.1,
         replacement_prob: float = 0.01,
     ):
         self.batch_size = batch_size
@@ -166,44 +166,57 @@ class ReservoirSampler(TrainSampler):
 
         self._control_to_perturbation_keys = sorted(data.control_to_perturbation.keys())
         self._has_condition_data = data.condition_data is not None
-        self._pool_size = pool_size
+
+        # Compute pool size from fraction
+        if not (0 < pool_fraction <= 1):
+            raise ValueError("pool_fraction must be in (0, 1].")
+        self._pool_fraction = pool_fraction
+        self._pool_size = math.ceil(pool_fraction * self.n_source_dists)
         self._replacement_prob = replacement_prob
         self._pool_usage_count = np.zeros(self.n_source_dists, dtype=int)
         self._initialized = False
 
-        # Concurrency primitives
-        self._lock = threading.RLock()
-        self._executor = ThreadPoolExecutor(max_workers=2)
-        # Map pool position -> {"old": int, "new": int, "future": Future}
-        self._pending_replacements: dict[int, dict[str, Any]] = {}
+        # If caching everything, skip concurrency and replacement logic
+        self._cache_all = self._pool_size >= self.n_source_dists
+
+        if not self._cache_all:
+            self._lock = threading.RLock()
+            self._executor = ThreadPoolExecutor(max_workers=2)
+            self._pending_replacements: dict[int, dict[str, Any]] = {}
 
     def init_pool(self, rng):
-        self._init_pool(rng)
-        self._init_cache_pool_elements()
-
-    @staticmethod
-    def _get_target_idx_pool(src_idx_pool: np.ndarray, control_to_perturbation: dict[int, np.ndarray]) -> set[int]:
-        tgt_idx_pool = set()
-        for src_idx in src_idx_pool:
-            tgt_idx_pool.update(control_to_perturbation[src_idx].tolist())
-        return tgt_idx_pool
+        if self._cache_all:
+            self._src_idx_pool = np.arange(self.n_source_dists)
+            self._initialized = True
+            self._init_cache_pool_elements()
+        else:
+            self._init_pool(rng)
+            self._init_cache_pool_elements()
 
     def _init_cache_pool_elements(self):
         if not self._initialized:
             raise ValueError("Pool not initialized. Call init_pool(rng) first.")
-        with self._lock:
-            self._cached_srcs = {i: self._data.src_cell_data[i][...] for i in self._src_idx_pool}
-            tgt_indices = sorted({int(j) for i in self._src_idx_pool for j in self._data.control_to_perturbation[i]})
-
-        def _load_tgt(j: int):
-            return j, self._data.tgt_cell_data[j][...]
-
-        max_workers = min(32, (os.cpu_count() or 4))
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            results = list(ex.map(_load_tgt, tgt_indices))
-
-        with self._lock:
+        if self._cache_all:
+            # Cache all sources and all targets
+            self._cached_srcs = {i: self._data.src_cell_data[i][...] for i in range(self.n_source_dists)}
+            tgt_indices = sorted({int(j) for i in range(self.n_source_dists) for j in self._data.control_to_perturbation[i]})
+            def _load_tgt(j: int):
+                return j, self._data.tgt_cell_data[j][...]
+            max_workers = min(32, (os.cpu_count() or 4))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                results = list(ex.map(_load_tgt, tgt_indices))
             self._cached_tgts = {j: arr for j, arr in results}
+        else:
+            with self._lock:
+                self._cached_srcs = {i: self._data.src_cell_data[i][...] for i in self._src_idx_pool}
+                tgt_indices = sorted({int(j) for i in self._src_idx_pool for j in self._data.control_to_perturbation[i]})
+            def _load_tgt(j: int):
+                return j, self._data.tgt_cell_data[j][...]
+            max_workers = min(32, (os.cpu_count() or 4))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                results = list(ex.map(_load_tgt, tgt_indices))
+            with self._lock:
+                self._cached_tgts = {j: arr for j, arr in results}
 
     def _init_pool(self, rng):
         """Initialize the pool with random source distribution indices."""
@@ -214,6 +227,12 @@ class ReservoirSampler(TrainSampler):
         """Sample a source distribution index with gradual pool replacement."""
         if not self._initialized:
             raise ValueError("Pool not initialized. Call init_pool(rng) first.")
+
+        if self._cache_all:
+            # Just sample from all sources, no replacement logic
+            source_idx = rng.choice(sorted(self._cached_srcs.keys()))
+            self._pool_usage_count[source_idx] += 1
+            return source_idx
 
         # Opportunistically apply any ready replacements (non-blocking)
         self._apply_ready_replacements()
@@ -232,7 +251,8 @@ class ReservoirSampler(TrainSampler):
         return source_idx
 
     def _schedule_replacement(self, rng):
-        """Schedule a single pool element replacement without blocking."""
+        if self._cache_all:
+            return  # No replacement if everything is cached
         # weights same as previous logic
         most_used_weight = (self._pool_usage_count == self._pool_usage_count.max()).astype(float)
         if most_used_weight.sum() == 0:
@@ -266,6 +286,8 @@ class ReservoirSampler(TrainSampler):
             print(f"scheduled replacement of {replaced_pool_idx} with {new_pool_idx} (slot {in_pool_idx})")
 
     def _apply_ready_replacements(self):
+        if self._cache_all:
+            return  # No replacement if everything is cached
         """Apply any finished background loads; non-blocking."""
         to_apply: list[int] = []
         with self._lock:
@@ -312,8 +334,7 @@ class ReservoirSampler(TrainSampler):
         return {"src": src_arr, "tgts": tgt_dict}
 
     def get_pool_stats(self) -> dict:
-        """Get statistics about the current pool state."""
-        if self._src_idx_pool is None:
+        if not hasattr(self, "_src_idx_pool") or self._src_idx_pool is None:
             return {"pool_size": 0, "avg_usage": 0, "unique_sources": 0}
         return {
             "pool_size": self._pool_size,
@@ -321,16 +342,28 @@ class ReservoirSampler(TrainSampler):
             "unique_sources": len(set(self._src_idx_pool)),
             "pool_elements": self._src_idx_pool.copy(),
             "usage_counts": self._pool_usage_count.copy(),
+            "cache_all": self._cache_all,
         }
 
     def _sample_source_cells(self, rng, source_dist_idx: int) -> np.ndarray:
-        with self._lock:
+        if self._cache_all:
+            # No lock needed - cache is immutable after initialization
             arr = self._cached_srcs[source_dist_idx]
+        else:
+            # Lock needed - cache can be modified by replacements
+            with self._lock:
+                arr = self._cached_srcs[source_dist_idx]
         return rng.choice(arr, size=self.batch_size, replace=True)
 
     def _sample_target_cells(self, rng, source_dist_idx: int, target_dist_idx: int) -> np.ndarray:
-        with self._lock:
+        del source_dist_idx  # unused
+        if self._cache_all:
+            # No lock needed - cache is immutable after initialization
             arr = self._cached_tgts[target_dist_idx]
+        else:
+            # Lock needed - cache can be modified by replacements
+            with self._lock:
+                arr = self._cached_tgts[target_dist_idx]
         return rng.choice(arr, size=self.batch_size, replace=True)
 
 
