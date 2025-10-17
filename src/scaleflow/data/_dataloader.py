@@ -43,6 +43,9 @@ class TrainSampler:
 
         self._control_to_perturbation_keys = sorted(data.control_to_perturbation.keys())
         self._has_condition_data = data.condition_data is not None
+        self._has_phenotype_data = data.phenotype_data is not None
+        if self._has_phenotype_data:
+            self._phenotype_perturbation_idcs = sorted(data.phenotype_data.keys())
 
     def _sample_target_dist_idx(self, rng, source_dist_idx: int) -> int:
         """Sample a target distribution index given the source distribution index."""
@@ -97,31 +100,82 @@ class TrainSampler:
         target_batch_idcs = self._sample_from_mask(rng, target_cells_mask)
         return self._data.cell_data[target_batch_idcs]
 
-    def sample(self, rng) -> dict[str, Any]:
-        """Sample a batch of data.
+    def sample_gex(self, rng) -> dict[str, Any]:
+        """Sample a batch for gene expression (flow matching) task.
 
         Parameters
         ----------
-        seed : int, optional
-            Random seed
+        rng
+            Random number generator
 
         Returns
         -------
-        Dictionary with source and target data
+        Dictionary with source cells, target cells, condition, and task type
         """
-        # Sample source and target
         source_dist_idx = self._sample_source_dist_idx(rng)
         target_dist_idx = self._sample_target_dist_idx(rng, source_dist_idx)
 
-        # Sample source and target cells
         source_batch = self._sample_source_cells(rng, source_dist_idx)
         target_batch = self._sample_target_cells(rng, source_dist_idx, target_dist_idx)
 
-        res = {"src_cell_data": source_batch, "tgt_cell_data": target_batch}
+        res = {
+            "task": "gex",
+            "src_cell_data": source_batch,
+            "tgt_cell_data": target_batch
+        }
         if self._has_condition_data:
             condition_batch = self._get_embeddings(target_dist_idx, self._data.condition_data)
             res["condition"] = condition_batch
         return res
+
+    def sample_functional(self, rng) -> dict[str, Any]:
+        """Sample a batch for functional (phenotype prediction) task.
+
+        Parameters
+        ----------
+        rng
+            Random number generator
+
+        Returns
+        -------
+        Dictionary with conditions, phenotypes, and task type
+        """
+        perturbation_idcs = rng.choice(self._phenotype_perturbation_idcs, size=self.batch_size, replace=True)
+
+        conditions = {}
+        for key, arr in self._data.condition_data.items():
+            conditions[key] = arr[perturbation_idcs]
+
+        phenotypes = np.array([self._data.phenotype_data[idx] for idx in perturbation_idcs])
+
+        return {
+            "task": "functional",
+            "condition": conditions,
+            "phenotype": phenotypes
+        }
+
+    def sample(self, rng, task: str = "gex") -> dict[str, Any]:
+        """Sample a batch of data.
+
+        Parameters
+        ----------
+        rng
+            Random number generator
+        task
+            Task type: 'gex' for gene expression or 'functional' for phenotype prediction
+
+        Returns
+        -------
+        Dictionary with task-specific data
+        """
+        if task == "gex":
+            return self.sample_gex(rng)
+        elif task == "functional":
+            if not self._has_phenotype_data:
+                raise ValueError("Cannot sample functional task: no phenotype data available")
+            return self.sample_functional(rng)
+        else:
+            raise ValueError(f"Unknown task type: {task}. Must be 'gex' or 'functional'.")
 
     @property
     def data(self) -> TrainingData:

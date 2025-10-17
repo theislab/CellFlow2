@@ -103,7 +103,8 @@ class CellFlowTrainer:
         Parameters
         ----------
             dataloader
-                Dataloader used.
+                Dataloader used. The dataloader is responsible for returning batches
+                with appropriate 'task' field ('gex' or 'functional').
             num_iterations
                 Number of iterations to train the model.
             valid_freq
@@ -119,7 +120,7 @@ class CellFlowTrainer:
         -------
             The trained model.
         """
-        self.training_logs = {"loss": []}
+        self.training_logs = {"loss": [], "loss_gex": [], "loss_functional": []}
         rng_jax = jax.random.PRNGKey(0)
         rng_np = np.random.default_rng(0)
 
@@ -136,9 +137,15 @@ class CellFlowTrainer:
             dataloader.set_sampler(num_iterations=num_iterations)
         for it in pbar:
             rng_jax, rng_step_fn = jax.random.split(rng_jax, 2)
+
+            # Sample batch (dataloader controls which task)
             batch = sampler.sample(rng_np)
             loss = self.solver.step_fn(rng_step_fn, batch)
+
+            # Track losses
+            task = batch.get("task", "gex")
             self.training_logs["loss"].append(float(loss))
+            self.training_logs[f"loss_{task}"].append(float(loss))
 
             if ((it - 1) % valid_freq == 0) and (it > 1):
                 # Get predictions from validation data
@@ -146,8 +153,17 @@ class CellFlowTrainer:
                     valid_loaders, mode="on_log_iteration"
                 )
 
-                # Calculate mean loss
+                # Calculate mean losses
                 mean_loss = np.mean(self.training_logs["loss"][-valid_freq:])
+                additional_metrics = {"train_loss": mean_loss}
+
+                # Add task-specific losses if available
+                if self.training_logs["loss_gex"]:
+                    mean_loss_gex = np.mean([l for l in self.training_logs["loss_gex"][-valid_freq:] if l is not None])
+                    additional_metrics["train_loss_gex"] = mean_loss_gex
+                if self.training_logs["loss_functional"]:
+                    mean_loss_func = np.mean([l for l in self.training_logs["loss_functional"][-valid_freq:] if l is not None])
+                    additional_metrics["train_loss_functional"] = mean_loss_func
 
                 # Run callbacks with loss as additional metric
                 metrics = crun.on_log_iteration(
@@ -155,13 +171,16 @@ class CellFlowTrainer:
                     valid_true_data,
                     valid_pred_data,
                     self.solver,
-                    additional_metrics={"train_loss": mean_loss},
+                    additional_metrics=additional_metrics,
                 )
                 self._update_logs(metrics)
-
                 # Update progress bar
                 postfix_dict = {metric: round(self.training_logs[metric][-1], 3) for metric in monitor_metrics}
-                postfix_dict["train_loss"] = round(mean_loss, 3)  # or keep as "loss"
+                postfix_dict["train_loss"] = round(mean_loss, 3)
+                if "train_loss_gex" in additional_metrics:
+                    postfix_dict["loss_gex"] = round(additional_metrics["train_loss_gex"], 3)
+                if "train_loss_functional" in additional_metrics:
+                    postfix_dict["loss_func"] = round(additional_metrics["train_loss_functional"], 3)
                 pbar.set_postfix(postfix_dict)
 
         if num_iterations > 0:
