@@ -10,7 +10,7 @@ import time
 import numpy as np
 from contextlib import contextmanager
 
-__all__ = ["DataManager"]
+__all__ = ["DataManager", "AnnDataLocation", "GroupedDistribution"]
 
 @contextmanager
 def timer(description: str, verbose: bool = True):
@@ -84,12 +84,24 @@ class AnnDataLocation:
 
     
 @dataclass
-class MappedData:
-    old_obs_index: np.ndarray
-    src_to_tgt_dist_map: dict[int, list[int]]
-    src_data: dict[int, np.ndarray]
-    tgt_data: dict[int, np.ndarray]
+class GroupedDistributionData:
+    src_to_tgt_dist_map: dict[int, list[int]] # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
+    src_data: dict[int, np.ndarray] # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
+    tgt_data: dict[int, np.ndarray] # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
 
+
+@dataclass
+class GroupedDistributionAnnotation:
+    old_obs_index: np.ndarray # (n_cells,) to be able to map back to the original index
+
+    src_dist_idx_to_labels: dict[int, Any] # (n_src_dists) → Any (e.g. list of strings)
+    tgt_dist_idx_to_labels: dict[int, Any] # (n_tgt_dists) → Any (e.g. list of strings)
+
+
+@dataclass
+class GroupedDistribution:
+    data: GroupedDistributionData
+    annotation: GroupedDistributionAnnotation
 
 
 class DataManager:
@@ -115,12 +127,12 @@ class DataManager:
         assert len(set(dist_keys)) == len(dist_keys), "Distributions must be unique."
 
 
-    def prepare_mapped_data(
+    def prepare_data(
         self, 
         adata: anndata.AnnData,
         data_location: AnnDataLocation,
         verbose: bool = False,
-    ) -> MappedData:
+    ) -> GroupedDistribution:
         """
         Distribution flag key must be a boolean column.
         The src and tgt distribution keys are recommended to be categorical columns otherwise sorting will be slow.
@@ -146,12 +158,24 @@ class DataManager:
         obs["tgt_dist_idx"] = obs["tgt_dist_idx"].fillna(-1).astype(np.int32)
 
 
+        # preparing for src_to_tgt_dist_map
         src_tgt_dist_df = obs.loc[~obs[self._dist_flag_key]]
         src_tgt_dist_df = src_tgt_dist_df[['src_dist_idx', 'tgt_dist_idx']]
         src_tgt_dist_df.drop_duplicates(inplace=True)
 
         src_to_tgt_dist_map = src_tgt_dist_df.groupby('src_dist_idx')['tgt_dist_idx'].apply(list).to_dict()
-        
+
+        # preparing src_dist_labels
+        src_dist_labels = obs.loc[obs[self._dist_flag_key]][[*self._src_dist_keys, 'src_dist_idx']]\
+            .drop_duplicates().set_index('src_dist_idx')
+        src_dist_labels = dict(zip(src_dist_labels.index, src_dist_labels.itertuples(index=False, name=None)))
+
+        # preparing tgt_dist_labels
+        tgt_dist_labels = obs.loc[~obs[self._dist_flag_key]][[*self._tgt_dist_keys, 'tgt_dist_idx']]\
+            .drop_duplicates().set_index('tgt_dist_idx')
+        tgt_dist_labels = dict(zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None)))
+
+
         arr = data_location(adata)
         if isinstance(arr, da.Array):
             arr = arr.compute()
@@ -170,10 +194,16 @@ class DataManager:
             }
         
 
-        return MappedData(
-            old_obs_index=old_index_mapping,
-            src_to_tgt_dist_map=src_to_tgt_dist_map,
-            src_data=src_data,
-            tgt_data=tgt_data,
+        return GroupedDistribution(
+            data=GroupedDistributionData(
+                src_to_tgt_dist_map=src_to_tgt_dist_map,
+                src_data=src_data,
+                tgt_data=tgt_data,
+            ),
+            annotation=GroupedDistributionAnnotation(
+                old_obs_index=old_index_mapping,
+                src_dist_idx_to_labels=src_dist_labels,
+                tgt_dist_idx_to_labels=tgt_dist_labels,
+            ),
         )
     
