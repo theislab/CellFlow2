@@ -23,6 +23,7 @@ class GroupedDistributionData:
     src_to_tgt_dist_map: dict[int, list[int]] # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
     src_data: dict[int, np.ndarray] # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
     tgt_data: dict[int, np.ndarray] # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
+    conditions: dict[int, np.ndarray] # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
 
 
 @dataclass
@@ -86,7 +87,9 @@ class DataManager:
         """
         DataManager._verify_rep_keys_exists(self.rep_keys, adata)
 
-        cols = [self.dist_flag_key, *self.src_dist_keys, *self.tgt_dist_keys]
+        src_tgt_dist_keys = [*self.src_dist_keys, *self.tgt_dist_keys]
+
+        cols = [self.dist_flag_key, *src_tgt_dist_keys]
         obs = adata.obs[cols].copy()
         old_index_mapping = obs.index.to_numpy()
         obs.reset_index(drop=True, inplace=True)
@@ -100,7 +103,7 @@ class DataManager:
             obs.sort_values(cols, inplace=True)
 
         obs["src_dist_idx"] = obs.groupby(self.src_dist_keys, observed=False).ngroup()
-        obs["tgt_dist_idx"] = obs.groupby([*self.src_dist_keys, *self.tgt_dist_keys], observed=False).ngroup()
+        obs["tgt_dist_idx"] = obs.groupby(src_tgt_dist_keys, observed=False).ngroup()
         # Fill NaN indices with a specific value before casting
         obs["src_dist_idx"] = obs["src_dist_idx"].fillna(-1).astype(np.int32)
         obs["tgt_dist_idx"] = obs["tgt_dist_idx"].fillna(-1).astype(np.int32)
@@ -144,20 +147,28 @@ class DataManager:
         col_to_repr = {
             key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()
         }
-        for col in [*self.src_dist_keys, *self.tgt_dist_keys]:
-            for k,vs in tgt_dist_labels.items():
-                for v in vs:
-                    print(k, v, col, col_to_repr[col].keys())
-        conditions = {
-            k:tuple(col_to_repr[col][v] for v in vs) for k,vs in tgt_dist_labels.items() for col in [*self.src_dist_keys, *self.tgt_dist_keys]
-        }
-        print(conditions)
 
+        with timer("Getting conditions", verbose=verbose):
+            conditions = {}
+            for src_dist_idx, tgt_dist_idxs in src_to_tgt_dist_map.items():
+                src_label = src_dist_labels[src_dist_idx]
+                src_repr = [
+                    col_to_repr[col][label] for col, label in zip(self.src_dist_keys, src_label)
+                ]
+                for tgt_dist_idx in tgt_dist_idxs:
+                    tgt_label = tgt_dist_labels[tgt_dist_idx]
+                    tgt_repr = [
+                        col_to_repr[col][label] for col, label in zip(self.tgt_dist_keys, tgt_label)
+                    ]
+                    conditions[tgt_dist_idx] = np.concatenate([*src_repr, *tgt_repr])
+
+            
         return GroupedDistribution(
             data=GroupedDistributionData(
                 src_to_tgt_dist_map=src_to_tgt_dist_map,
                 src_data=src_data,
                 tgt_data=tgt_data,
+                conditions=conditions,
             ),
             annotation=GroupedDistributionAnnotation(
                 old_obs_index=old_index_mapping,
