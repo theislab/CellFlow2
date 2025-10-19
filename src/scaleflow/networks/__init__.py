@@ -2,6 +2,8 @@ from scaleflow.networks._set_encoders import (
     ConditionEncoder,
 )
 from scaleflow.networks._utils import (
+    AdaLNModulation,
+    AdaLNZeroBlock,
     FilmBlock,
     MLPBlock,
     ResNetBlock,
@@ -15,12 +17,16 @@ from scaleflow.networks._velocity_field import (
     GENOTConditionalVelocityField,
     EquilibriumVelocityField,
 )
+from scaleflow.networks._phenotype_predictor import (
+    PhenotypePredictor,
+)
 
 __all__ = [
     "ConditionalVelocityField",
     "GENOTConditionalVelocityField",
     "EquilibriumVelocityField",
     "ConditionEncoder",
+    "PhenotypePredictor",
     "MLPBlock",
     "SelfAttention",
     "SeedAttentionPooling",
@@ -28,5 +34,6 @@ __all__ = [
     "SelfAttentionBlock",
     "FilmBlock",
     "ResNetBlock",
-    "SelfAttentionBlock",
+    "AdaLNModulation",
+    "AdaLNZeroBlock",
 ]

@@ -79,7 +79,8 @@ class ConditionalVelocityField(nn.Module):
         conditioning_kwargs
             Keyword arguments for the conditioning method.
         decoder_dims
-            Dimensions of the output layers.
+            Dimensions of the output layers (or attention dimensions for adaln_zero).
+            For adaln_zero, MLP dimensions are automatically set to match hidden_dims[-1].
         decoder_dropout
             Dropout rate for the output layers.
         layer_norm_before_concatenation
@@ -114,7 +115,12 @@ class ConditionalVelocityField(nn.Module):
     time_encoder_dropout: float = 0.0
     hidden_dims: Sequence[int] = (1024, 1024, 1024)
     hidden_dropout: float = 0.0
-    conditioning: Literal["concatenation", "film", "resnet"] = "concatenation"
+    cell_transformer_layers: int = 0
+    cell_transformer_heads: int = 8
+    cell_transformer_dim: int = 128
+    cell_transformer_dropout: float = 0.1
+    cell_transformer_mode: Literal["before_condition", "after_condition"] = "before_condition"
+    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
     conditioning_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
     decoder_dims: Sequence[int] = (1024, 1024, 1024)
     decoder_dropout: float = 0.0
@@ -159,6 +165,17 @@ class ConditionalVelocityField(nn.Module):
         )
         self.layer_norm_x = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
 
+        if self.cell_transformer_layers > 0:
+            from scaleflow.networks._utils import SelfAttentionBlock
+            self.cell_transformer = SelfAttentionBlock(
+                num_heads=[self.cell_transformer_heads] * self.cell_transformer_layers,
+                qkv_dim=[self.cell_transformer_dim] * self.cell_transformer_layers,
+                dropout_rate=self.cell_transformer_dropout,
+                transformer_block=True,
+                layer_norm=True,
+                act_fn=self.act_fn,
+            )
+
         self.decoder = MLPBlock(
             dims=self.decoder_dims,
             act_fn=self.act_fn,
@@ -179,6 +196,27 @@ class ConditionalVelocityField(nn.Module):
                 input_dim=self.hidden_dims[-1],
                 **conditioning_kwargs,
             )
+        elif self.conditioning == "adaln_zero":
+            from scaleflow.networks._utils import AdaLNZeroBlock
+            cond_dim = self.time_encoder_dims[-1] + self.condition_embedding_dim
+
+            # Compute mlp_dim to match hidden_dims[-1] (cell encoder output)
+            # This ensures MLP in each DiT block outputs the same dimension as cell encoder
+            target_mlp_dim = self.hidden_dims[-1]
+
+            self.adaln_blocks = [
+                AdaLNZeroBlock(
+                    hidden_dim=dim,
+                    cond_dim=cond_dim,
+                    num_heads=conditioning_kwargs.get("num_heads", 8),
+                    qkv_dim=conditioning_kwargs.get("qkv_dim", None),
+                    mlp_dim=target_mlp_dim,  # Fixed to match cell encoder output
+                    dropout_rate=self.decoder_dropout,
+                    use_attention=True,
+                    act_fn=self.act_fn,
+                )
+                for dim in self.decoder_dims
+            ]
         elif self.conditioning == "concatenation":
             if len(conditioning_kwargs) > 0:
                 raise ValueError("If `conditioning=='concatenation' mode, no conditioning kwargs can be passed.")
@@ -206,6 +244,15 @@ class ConditionalVelocityField(nn.Module):
         t_encoded = self.time_encoder(t_encoded, training=train)
         x_encoded = self.x_encoder(x_t, training=train)
 
+        if self.cell_transformer_layers > 0 and self.cell_transformer_mode == "before_condition":
+            if squeeze:
+                x_encoded_expanded = jnp.expand_dims(x_encoded, 0)
+                x_encoded = self.cell_transformer(x_encoded_expanded, mask=None, training=train)
+                x_encoded = jnp.squeeze(x_encoded, 0)
+            else:
+                x_encoded_expanded = jnp.expand_dims(x_encoded, 0) if x_encoded.ndim == 1 else x_encoded
+                x_encoded = self.cell_transformer(x_encoded_expanded, mask=None, training=train)
+
         t_encoded = self.layer_norm_time(t_encoded)
         x_encoded = self.layer_norm_x(x_encoded)
         cond_embedding = self.layer_norm_condition(cond_embedding)
@@ -221,11 +268,42 @@ class ConditionalVelocityField(nn.Module):
             out = self.film_block(x_encoded, jnp.concatenate((t_encoded, cond_embedding), axis=-1))
         elif self.conditioning == "resnet":
             out = self.resnet_block(x_encoded, jnp.concatenate((t_encoded, cond_embedding), axis=-1))
+        elif self.conditioning == "adaln_zero":
+            out = x_encoded
         else:
             raise ValueError(f"Unknown conditioning mode: {self.conditioning}.")
 
-        out = self.decoder(out, training=train)
-        return self.output_layer(out), cond_mean, cond_logvar
+        if self.cell_transformer_layers > 0 and self.cell_transformer_mode == "after_condition":
+            if squeeze:
+                out_expanded = jnp.expand_dims(out, 0)
+                out = self.cell_transformer(out_expanded, mask=None, training=train)
+                out = jnp.squeeze(out, 0)
+            else:
+                out_expanded = jnp.expand_dims(out, 0) if out.ndim == 1 else out
+                out = self.cell_transformer(out_expanded, mask=None, training=train)
+
+        if self.conditioning == "adaln_zero":
+            conditioning_vec = jnp.concatenate((t_encoded, cond_embedding), axis=-1)
+            if squeeze:
+                out = jnp.expand_dims(out, 0)
+                out = jnp.expand_dims(out, 0)
+                conditioning_vec = jnp.expand_dims(conditioning_vec, 0)
+            else:
+                out = jnp.expand_dims(out, 0)
+                conditioning_vec = conditioning_vec[0:1]
+            for block in self.adaln_blocks:
+                out = block(out, conditioning_vec, mask=None, training=train)
+            if squeeze:
+                out = jnp.squeeze(out, 0)
+                out = jnp.squeeze(out, 0)
+            else:
+                out = jnp.squeeze(out, 0)
+            out = self.output_layer(out)
+        else:
+            out = self.decoder(out, training=train)
+            out = self.output_layer(out)
+
+        return out, cond_mean, cond_logvar
 
     def get_condition_embedding(self, condition: dict[str, jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Get the embedding of the condition.
@@ -384,7 +462,8 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
         conditioning_kwargs
             Keyword arguments for the conditioning method.
         decoder_dims
-            Dimensions of the output layers.
+            Dimensions of the output layers (or attention dimensions for adaln_zero).
+            For adaln_zero, MLP dimensions are automatically set to match hidden_dims[-1].
         decoder_dropout
             Dropout rate for the output layers.
         genot_source_dims
@@ -423,7 +502,7 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
     time_encoder_dropout: float = 0.0
     hidden_dims: Sequence[int] = (1024, 1024, 1024)
     hidden_dropout: float = 0.0
-    conditioning: Literal["concatenation", "film", "resnet"] = "concatenation"
+    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
     conditioning_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
     decoder_dims: Sequence[int] = (1024, 1024, 1024)
     decoder_dropout: float = 0.0
@@ -611,7 +690,12 @@ class EquilibriumVelocityField(nn.Module):
     act_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
     hidden_dims: Sequence[int] = (1024, 1024, 1024)
     hidden_dropout: float = 0.0
-    conditioning: Literal["concatenation", "film", "resnet"] = "concatenation"
+    cell_transformer_layers: int = 0
+    cell_transformer_heads: int = 8
+    cell_transformer_dim: int = 128
+    cell_transformer_dropout: float = 0.1
+    cell_transformer_mode: Literal["before_condition", "after_condition"] = "before_condition"
+    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
     conditioning_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
     decoder_dims: Sequence[int] = (1024, 1024, 1024)
     decoder_dropout: float = 0.0
@@ -648,6 +732,17 @@ class EquilibriumVelocityField(nn.Module):
         )
         self.layer_norm_x = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
 
+        if self.cell_transformer_layers > 0:
+            from scaleflow.networks._utils import SelfAttentionBlock
+            self.cell_transformer = SelfAttentionBlock(
+                num_heads=[self.cell_transformer_heads] * self.cell_transformer_layers,
+                qkv_dim=[self.cell_transformer_dim] * self.cell_transformer_layers,
+                dropout_rate=self.cell_transformer_dropout,
+                transformer_block=True,
+                layer_norm=True,
+                act_fn=self.act_fn,
+            )
+
         self.decoder = MLPBlock(
             dims=self.decoder_dims,
             act_fn=self.act_fn,
@@ -668,6 +763,27 @@ class EquilibriumVelocityField(nn.Module):
                 input_dim=self.hidden_dims[-1],
                 **conditioning_kwargs,
             )
+        elif self.conditioning == "adaln_zero":
+            from scaleflow.networks._utils import AdaLNZeroBlock
+            cond_dim = self.condition_embedding_dim
+
+            # Compute mlp_dim to match hidden_dims[-1] (cell encoder output)
+            # This ensures MLP in each DiT block outputs the same dimension as cell encoder
+            target_mlp_dim = self.hidden_dims[-1]
+
+            self.adaln_blocks = [
+                AdaLNZeroBlock(
+                    hidden_dim=dim,
+                    cond_dim=cond_dim,
+                    num_heads=conditioning_kwargs.get("num_heads", 8),
+                    qkv_dim=conditioning_kwargs.get("qkv_dim", None),
+                    mlp_dim=target_mlp_dim,  # Fixed to match cell encoder output
+                    dropout_rate=self.decoder_dropout,
+                    use_attention=True,
+                    act_fn=self.act_fn,
+                )
+                for dim in self.decoder_dims
+            ]
         elif self.conditioning == "concatenation":
             if len(conditioning_kwargs) > 0:
                 raise ValueError("If `conditioning=='concatenation' mode, no conditioning kwargs can be passed.")
@@ -691,6 +807,15 @@ class EquilibriumVelocityField(nn.Module):
         cond_embedding = self.layer_cond_output_dropout(cond_embedding, deterministic=not train)
         x_encoded = self.x_encoder(x, training=train)
 
+        if self.cell_transformer_layers > 0 and self.cell_transformer_mode == "before_condition":
+            if squeeze:
+                x_encoded_expanded = jnp.expand_dims(x_encoded, 0)
+                x_encoded = self.cell_transformer(x_encoded_expanded, mask=None, training=train)
+                x_encoded = jnp.squeeze(x_encoded, 0)
+            else:
+                x_encoded_expanded = jnp.expand_dims(x_encoded, 0) if x_encoded.ndim == 1 else x_encoded
+                x_encoded = self.cell_transformer(x_encoded_expanded, mask=None, training=train)
+
         x_encoded = self.layer_norm_x(x_encoded)
         cond_embedding = self.layer_norm_condition(cond_embedding)
 
@@ -705,11 +830,42 @@ class EquilibriumVelocityField(nn.Module):
             out = self.film_block(x_encoded, cond_embedding)  # No time!
         elif self.conditioning == "resnet":
             out = self.resnet_block(x_encoded, cond_embedding)  # No time!
+        elif self.conditioning == "adaln_zero":
+            out = x_encoded
         else:
             raise ValueError(f"Unknown conditioning mode: {self.conditioning}.")
 
-        out = self.decoder(out, training=train)
-        return self.output_layer(out), cond_mean, cond_logvar
+        if self.cell_transformer_layers > 0 and self.cell_transformer_mode == "after_condition":
+            if squeeze:
+                out_expanded = jnp.expand_dims(out, 0)
+                out = self.cell_transformer(out_expanded, mask=None, training=train)
+                out = jnp.squeeze(out, 0)
+            else:
+                out_expanded = jnp.expand_dims(out, 0) if out.ndim == 1 else out
+                out = self.cell_transformer(out_expanded, mask=None, training=train)
+
+        if self.conditioning == "adaln_zero":
+            conditioning_vec = cond_embedding
+            if squeeze:
+                out = jnp.expand_dims(out, 0)
+                out = jnp.expand_dims(out, 0)
+                conditioning_vec = jnp.expand_dims(conditioning_vec, 0)
+            else:
+                out = jnp.expand_dims(out, 0)
+                conditioning_vec = conditioning_vec[0:1]
+            for block in self.adaln_blocks:
+                out = block(out, conditioning_vec, mask=None, training=train)
+            if squeeze:
+                out = jnp.squeeze(out, 0)
+                out = jnp.squeeze(out, 0)
+            else:
+                out = jnp.squeeze(out, 0)
+            out = self.output_layer(out)
+        else:
+            out = self.decoder(out, training=train)
+            out = self.output_layer(out)
+
+        return out, cond_mean, cond_logvar
 
     def get_condition_embedding(self, condition: dict[str, jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Get the embedding of the condition."""

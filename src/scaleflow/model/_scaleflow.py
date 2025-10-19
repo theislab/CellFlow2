@@ -273,6 +273,11 @@ class CellFlow:
         time_encoder_dropout: float = 0.0,
         hidden_dims: Sequence[int] = (2048, 2048, 2048),
         hidden_dropout: float = 0.0,
+        cell_transformer_layers: int = 0,
+        cell_transformer_heads: int = 8,
+        cell_transformer_dim: int = 128,
+        cell_transformer_dropout: float = 0.1,
+        cell_transformer_mode: Literal["before_condition", "after_condition"] = "before_condition",
         conditioning: Literal["concatenation", "film", "resnet"] = "concatenation",
         conditioning_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {}),
         decoder_dims: Sequence[int] = (4096, 4096, 4096),
@@ -285,6 +290,12 @@ class CellFlow:
         solver_kwargs: dict[str, Any] | None = None,
         layer_norm_before_concatenation: bool = False,
         linear_projection_before_concatenation: bool = False,
+        use_phenotype_predictor: bool = False,
+        phenotype_hidden_dims: Sequence[int] = (256, 128, 64),
+        phenotype_dropout: float = 0.0,
+        phenotype_output_dim: int = 1,
+        loss_weight_gex: float = 1.0,
+        loss_weight_functional: float = 1.0,
         seed=0,
     ) -> None:
         """Prepare the model for training.
@@ -479,6 +490,11 @@ class CellFlow:
                 act_fn=vf_act_fn,
                 hidden_dims=hidden_dims,
                 hidden_dropout=hidden_dropout,
+                cell_transformer_layers=cell_transformer_layers,
+                cell_transformer_heads=cell_transformer_heads,
+                cell_transformer_dim=cell_transformer_dim,
+                cell_transformer_dropout=cell_transformer_dropout,
+                cell_transformer_mode=cell_transformer_mode,
                 conditioning=conditioning,
                 conditioning_kwargs=conditioning_kwargs,
                 decoder_dims=decoder_dims,
@@ -507,6 +523,11 @@ class CellFlow:
                 time_encoder_dropout=time_encoder_dropout,
                 hidden_dims=hidden_dims,
                 hidden_dropout=hidden_dropout,
+                cell_transformer_layers=cell_transformer_layers,
+                cell_transformer_heads=cell_transformer_heads,
+                cell_transformer_dim=cell_transformer_dim,
+                cell_transformer_dropout=cell_transformer_dropout,
+                cell_transformer_mode=cell_transformer_mode,
                 conditioning=conditioning,
                 conditioning_kwargs=conditioning_kwargs,
                 decoder_dims=decoder_dims,
@@ -526,11 +547,23 @@ class CellFlow:
                 f"The key of `probability_path` must be `'constant_noise'` or `'bridge'` but found {probability_path}."
             )
 
+        phenotype_predictor = None
+        if use_phenotype_predictor:
+            from scaleflow.networks import PhenotypePredictor
+            phenotype_predictor = PhenotypePredictor(
+                hidden_dims=phenotype_hidden_dims,
+                dropout_rate=phenotype_dropout,
+                output_dim=phenotype_output_dim,
+            )
+
         if self._solver_class == _otfm.OTFlowMatching:
             self._solver = self._solver_class(
                 vf=self.vf,
                 match_fn=match_fn,
                 probability_path=probability_path,
+                phenotype_predictor=phenotype_predictor,
+                loss_weight_gex=loss_weight_gex,
+                loss_weight_functional=loss_weight_functional,
                 optimizer=optimizer,
                 conditions=self.train_data.condition_data,
                 rng=jax.random.PRNGKey(seed),
@@ -541,6 +574,9 @@ class CellFlow:
             self._solver = self._solver_class(
                 vf=self.vf,
                 match_fn=match_fn,
+                phenotype_predictor=phenotype_predictor,
+                loss_weight_gex=loss_weight_gex,
+                loss_weight_functional=loss_weight_functional,
                 optimizer=optimizer,
                 conditions=self.train_data.condition_data,
                 rng=jax.random.PRNGKey(seed),
@@ -574,8 +610,8 @@ class CellFlow:
         callbacks: Sequence[BaseCallback] = [],
         monitor_metrics: Sequence[str] = [],
         out_of_core_dataloading: bool = False,
-        num_workers: int = 8,  # Increased from default 4
-        prefetch_factor: int = 4,  # Increased from default 2
+        num_workers: int = 8,
+        prefetch_factor: int = 4,
     ) -> None:
         """Train the model.
 
@@ -583,6 +619,9 @@ class CellFlow:
         ----
         A low value of ``'valid_freq'`` results in long training
         because predictions are time-consuming compared to training steps.
+
+        For multi-task training with functional assays, create a custom dataloader
+        that returns batches with the appropriate 'task' field ('gex' or 'functional').
 
         Parameters
         ----------

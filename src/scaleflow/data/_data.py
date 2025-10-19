@@ -110,6 +110,8 @@ class TrainingData(BaseDataMixin):
         Maximum number of covariates in a combination.
     data_manager
         The data manager
+    phenotype_data
+        Optional dictionary mapping perturbation_idx to phenotype values.
     """
 
     cell_data: np.ndarray  # (n_cells, n_features)
@@ -125,6 +127,7 @@ class TrainingData(BaseDataMixin):
     max_combination_length: int
     null_value: Any
     data_manager: Any
+    phenotype_data: dict[int, np.ndarray] | None = None  # (n_targets,) phenotype values for each perturbation
 
     # --- Zarr export helpers -------------------------------------------------
     def write_zarr(
