@@ -15,6 +15,7 @@ from scaleflow.data._dataloader import (
 from scaleflow.data._datamanager import DataManager
 from scaleflow.data._jax_dataloader import JaxOutOfCoreTrainSampler
 from scaleflow.data._torch_dataloader import TorchCombinedTrainSampler
+from scaleflow.data._data_splitter import DataSplitter
 
 __all__ = [
     "DataManager",
@@ -30,4 +31,5 @@ __all__ = [
     "TorchCombinedTrainSampler",
     "JaxOutOfCoreTrainSampler",
     "ReservoirSampler",
+    "DataSplitter",
 ]
