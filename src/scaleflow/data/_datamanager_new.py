@@ -75,6 +75,15 @@ class DataManager:
             if value not in adata.uns:
                 raise ValueError(f"Representation key {value} not found in adata.uns.")
 
+
+    @staticmethod
+    def _col_to_repr(col_to_repr: dict[str, dict[str, np.ndarray]], col: str, label: Any) -> np.ndarray:
+        if col not in col_to_repr:
+            raise ValueError(f"Column {col} not found in col_to_repr.")
+        if label not in col_to_repr[col]:
+            raise ValueError(f"Label {label} not found in col_to_repr[{col}].")
+        return col_to_repr[col][label]
+
     def prepare_data(
         self, 
         adata: anndata.AnnData,
@@ -153,12 +162,14 @@ class DataManager:
             for src_dist_idx, tgt_dist_idxs in src_to_tgt_dist_map.items():
                 src_label = src_dist_labels[src_dist_idx]
                 src_repr = [
-                    col_to_repr[col][label] for col, label in zip(self.src_dist_keys, src_label)
+                    DataManager._col_to_repr(col_to_repr, col, label) 
+                    for col, label in zip(self.src_dist_keys, src_label)
                 ]
                 for tgt_dist_idx in tgt_dist_idxs:
                     tgt_label = tgt_dist_labels[tgt_dist_idx]
                     tgt_repr = [
-                        col_to_repr[col][label] for col, label in zip(self.tgt_dist_keys, tgt_label)
+                        DataManager._col_to_repr(col_to_repr, col, label) 
+                        for col, label in zip(self.tgt_dist_keys, tgt_label)
                     ]
                     conditions[tgt_dist_idx] = np.concatenate([*src_repr, *tgt_repr])
 
