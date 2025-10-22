@@ -10,34 +10,13 @@ import time
 import numpy as np
 
 from scaleflow.logging import timer
-
 from ._anndata_location import AnnDataLocation
 
-__all__ = ["DataManager", "GroupedDistribution"]
+from scaleflow.data._data import GroupedDistribution, GroupedDistributionData, GroupedDistributionAnnotation
+
+__all__ = ["DataManager"]
 
 
-
-    
-@dataclass
-class GroupedDistributionData:
-    src_to_tgt_dist_map: dict[int, list[int]] # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
-    src_data: dict[int, np.ndarray] # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
-    tgt_data: dict[int, np.ndarray] # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
-    conditions: dict[int, np.ndarray] # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
-
-
-@dataclass
-class GroupedDistributionAnnotation:
-    old_obs_index: np.ndarray # (n_cells,) to be able to map back to the original index
-
-    src_dist_idx_to_labels: dict[int, Any] # (n_src_dists) → Any (e.g. list of strings)
-    tgt_dist_idx_to_labels: dict[int, Any] # (n_tgt_dists) → Any (e.g. list of strings)
-
-
-@dataclass
-class GroupedDistribution:
-    data: GroupedDistributionData
-    annotation: GroupedDistributionAnnotation
 
 
 @dataclass
@@ -79,6 +58,9 @@ class DataManager:
     @staticmethod
     def _col_to_repr(col_to_repr: dict[str, dict[str, np.ndarray]], col: str, label: Any) -> np.ndarray:
         if col not in col_to_repr:
+            # for example in case of dosage, we have a float label
+            if isinstance(label, float):
+                return np.array([label])
             raise ValueError(f"Column {col} not found in col_to_repr.")
         if label not in col_to_repr[col]:
             raise ValueError(f"Label {label} not found in col_to_repr[{col}].")
@@ -135,24 +117,6 @@ class DataManager:
             .drop_duplicates().set_index('tgt_dist_idx')
         tgt_dist_labels = dict(zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None)))
 
-
-        arr = self.data_location(adata)
-        if isinstance(arr, da.Array):
-            arr = arr.compute()
-        
-
-        # return obs
-        with timer("Getting source and target distribution data", verbose=verbose):
-            src_dist_map = obs[control_mask].groupby('src_dist_idx', observed=False).groups
-            tgt_dist_map = obs[~control_mask].groupby('tgt_dist_idx', observed=False).groups
-
-            tgt_data = {
-                int(k): arr[v.to_numpy()] for k, v in tgt_dist_map.items()
-            }
-            src_data = {
-                int(k): arr[v.to_numpy()] for k, v in src_dist_map.items()
-            }
-        
         col_to_repr = {
             key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()
         }
@@ -173,6 +137,23 @@ class DataManager:
                     ]
                     conditions[tgt_dist_idx] = np.concatenate([*src_repr, *tgt_repr])
 
+
+        arr = self.data_location(adata)
+        if isinstance(arr, da.Array):
+            arr = arr.compute()
+        
+
+        with timer("Getting source and target distribution data", verbose=verbose):
+            src_dist_map = obs[control_mask].groupby('src_dist_idx', observed=False).groups
+            tgt_dist_map = obs[~control_mask].groupby('tgt_dist_idx', observed=False).groups
+
+            tgt_data = {
+                int(k): arr[v.to_numpy()] for k, v in tgt_dist_map.items()
+            }
+            src_data = {
+                int(k): arr[v.to_numpy()] for k, v in src_dist_map.items()
+            }
+        
             
         return GroupedDistribution(
             data=GroupedDistributionData(

@@ -8,8 +8,9 @@ import numpy as np
 import zarr
 from zarr.storage import LocalStore
 
+import anndata as ad
 from scaleflow._types import ArrayLike
-from scaleflow.data._utils import write_sharded
+from scaleflow.data._utils import write_sharded, write_dist_data_threaded
 
 __all__ = [
     "BaseDataMixin",
@@ -18,6 +19,9 @@ __all__ = [
     "TrainingData",
     "ValidationData",
     "MappedCellData",
+    "GroupedDistribution",
+    "GroupedDistributionData",
+    "GroupedDistributionAnnotation",
 ]
 
 
@@ -363,3 +367,178 @@ class MappedCellData(BaseDataMixin):
             control_to_perturbation=cls._read_dict(mapping_group, "control_to_perturbation"),
             max_combination_length=max_combination_length,
         )
+
+
+
+
+
+    
+@dataclass
+class GroupedDistributionData:
+    src_to_tgt_dist_map: dict[int, list[int]] # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
+    src_data: dict[int, np.ndarray] # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
+    tgt_data: dict[int, np.ndarray] # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
+    conditions: dict[int, np.ndarray] # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
+
+
+    @classmethod
+    def read_zarr(
+        cls,
+        group: zarr.Group,
+    ) -> GroupedDistributionData:
+        """
+        Read the grouped distribution data from a Zarr group.
+        """
+        return cls(
+            src_to_tgt_dist_map={int(k): np.array(group["src_to_tgt_dist_map"][k]) for k in group["src_to_tgt_dist_map"].keys()},
+            src_data={int(k): group["src_data"][k] for k in group["src_data"].keys()},
+            tgt_data={int(k): group["tgt_data"][k] for k in group["tgt_data"].keys()},
+            conditions={int(k): np.array(group["conditions"][k]) for k in group["conditions"].keys()},
+        )
+
+
+    def write_zarr_group(
+        self,
+        group: zarr.Group,
+        chunk_size: int,
+        shard_size: int,
+        max_workers: int,
+    ) -> None:
+        """
+        Write the grouped distribution data to a Zarr group.
+        """
+        data = group.create_group("data")
+        write_sharded(
+            group=data,
+            name="src_to_tgt_dist_map",
+            data={str(k): np.array(v) for k, v in self.src_to_tgt_dist_map.items()},
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            compressors=None,
+        )
+        to_write = {
+            "src_data": self.src_data,
+            "tgt_data": self.tgt_data,
+            "conditions": self.conditions,
+        }
+        for key, value in to_write.items():
+            sub_group = data.create_group(key)
+            write_dist_data_threaded(
+                group=sub_group,
+                dist_data=value,
+                chunk_size=chunk_size,
+                shard_size=shard_size,
+                max_workers=max_workers,
+            )
+        return None
+
+@dataclass
+class GroupedDistributionAnnotation:
+    old_obs_index: np.ndarray # (n_cells,) to be able to map back to the original index
+
+    src_dist_idx_to_labels: dict[int, Any] # (n_src_dists) → Any (e.g. list of strings)
+    tgt_dist_idx_to_labels: dict[int, Any] # (n_tgt_dists) → Any (e.g. list of strings)
+
+
+    @classmethod
+    def read_zarr(
+        cls,
+        group: zarr.Group,
+    ) -> GroupedDistributionAnnotation:
+        """
+        Read the grouped distribution annotation from a Zarr group.
+        """
+        return cls(
+            old_obs_index=group["old_obs_index"][:],
+            src_dist_idx_to_labels={int(k): np.array(group["src_dist_idx_to_labels"][k]) for k in group["src_dist_idx_to_labels"].keys()},
+            tgt_dist_idx_to_labels={int(k): np.array(group["tgt_dist_idx_to_labels"][k]) for k in group["tgt_dist_idx_to_labels"].keys()},
+        )
+
+    def write_zarr_group(
+        self,
+        group: zarr.Group,
+        chunk_size: int,
+        shard_size: int,
+    ) -> None:
+        """
+        Write the grouped distribution annotation to a Zarr group.
+        """
+        sub_group = group.create_group("annotation")
+        write_sharded(
+            group=sub_group,
+            name="old_obs_index",
+            data=self.old_obs_index,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            compressors=None,
+        )
+        write_sharded(
+            group=sub_group,
+            name="src_dist_idx_to_labels",
+            data={str(k): np.array(v) for k, v in self.src_dist_idx_to_labels.items()},
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            compressors=None,
+        )
+        write_sharded(
+            group=sub_group,
+            name="tgt_dist_idx_to_labels",
+            data={str(k): np.array(v) for k, v in self.tgt_dist_idx_to_labels.items()},
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            compressors=None,
+        )
+        return None
+
+@dataclass
+class GroupedDistribution:
+    data: GroupedDistributionData
+    annotation: GroupedDistributionAnnotation
+
+
+    def write_zarr(
+        self, 
+        path: str, 
+        *, 
+        chunk_size: int = 4096, 
+        shard_size: int = 65536, 
+        max_workers: int = 8,
+    ) -> None:
+        """
+        Write the grouped distribution to a Zarr group.
+        """
+        ad.settings.zarr_write_format = 3  # Needed to support sharding in Zarr
+
+        zgroup = zarr.open_group(path, mode="w")
+        
+        self.data.write_zarr_group(
+            group=zgroup,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            max_workers=max_workers,
+        )
+        self.annotation.write_zarr_group(
+            group=zgroup,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+        )
+        return None
+
+
+
+    @classmethod
+    def read_zarr(
+        cls,
+        path: str,
+    ) -> GroupedDistribution:
+        """
+        Read the grouped distribution from a Zarr group.
+        """
+        zgroup = zarr.open_group(path, mode="r")
+        annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        data = GroupedDistributionData.read_zarr(zgroup["data"])
+        return cls(
+            annotation=annotation,
+            data=data,
+        )
+
