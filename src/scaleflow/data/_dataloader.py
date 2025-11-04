@@ -13,6 +13,7 @@ from scaleflow.data._data import (
     TrainingData,
     ValidationData,
     MappedCellData,
+    GroupedDistribution,
 )
 
 __all__ = [
@@ -154,17 +155,17 @@ class ReservoirSampler(TrainSampler):
 
     def __init__(
         self,
-        data: MappedCellData,
+        data: GroupedDistribution,
         batch_size: int = 1024,
         pool_fraction: float = 0.1,
         replacement_prob: float = 0.01,
     ):
         self.batch_size = batch_size
-        self.n_source_dists = data.n_controls
-        self.n_target_dists = data.n_perturbations
+        self.n_source_dists = len(data.data.src_data)
+        self.n_target_dists = len(data.data.tgt_data)
         self._data = data
 
-        self._control_to_perturbation_keys = sorted(data.control_to_perturbation.keys())
+        self._control_to_perturbation_keys = sorted(data.data.src_to_tgt_dist_map.keys())
         self._has_condition_data = data.condition_data is not None
 
         # Compute pool size from fraction
@@ -198,20 +199,20 @@ class ReservoirSampler(TrainSampler):
             raise ValueError("Pool not initialized. Call init_pool(rng) first.")
         if self._cache_all:
             # Cache all sources and all targets
-            self._cached_srcs = {i: self._data.src_cell_data[i][...] for i in range(self.n_source_dists)}
+            self._cached_srcs = {i: self._data.data.src_data[i][...] for i in range(self.n_source_dists)}
             tgt_indices = sorted({int(j) for i in range(self.n_source_dists) for j in self._data.control_to_perturbation[i]})
             def _load_tgt(j: int):
-                return j, self._data.tgt_cell_data[j][...]
+                return j, self._data.data.tgt_data[j][...]
             max_workers = min(32, (os.cpu_count() or 4))
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 results = list(ex.map(_load_tgt, tgt_indices))
             self._cached_tgts = {j: arr for j, arr in results}
         else:
             with self._lock:
-                self._cached_srcs = {i: self._data.src_cell_data[i][...] for i in self._src_idx_pool}
-                tgt_indices = sorted({int(j) for i in self._src_idx_pool for j in self._data.control_to_perturbation[i]})
+                self._cached_srcs = {i: self._data.data.src_data[i][...] for i in self._src_idx_pool}
+                tgt_indices = sorted({int(j) for i in self._src_idx_pool for j in self._data.data.src_to_tgt_dist_map[i]})
             def _load_tgt(j: int):
-                return j, self._data.tgt_cell_data[j][...]
+                return j, self._data.data.tgt_data[j][...]
             max_workers = min(32, (os.cpu_count() or 4))
             with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 results = list(ex.map(_load_tgt, tgt_indices))
@@ -220,7 +221,7 @@ class ReservoirSampler(TrainSampler):
 
     def _init_pool(self, rng):
         """Initialize the pool with random source distribution indices."""
-        self._src_idx_pool = rng.choice(self.n_source_dists, size=self._pool_size, replace=False)
+        self._src_idx_pool = rng.choice(self._data.data.src_to_tgt_dist_map.keys(), size=self._pool_size, replace=False)
         self._initialized = True
 
     def _sample_source_dist_idx(self, rng) -> int:

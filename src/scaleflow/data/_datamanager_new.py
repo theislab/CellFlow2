@@ -102,10 +102,10 @@ class DataManager:
 
         # preparing for src_to_tgt_dist_map
         src_tgt_dist_df = obs.loc[~obs[self.dist_flag_key]]
-        src_tgt_dist_df = src_tgt_dist_df[['src_dist_idx', 'tgt_dist_idx']]
+        src_tgt_dist_df = src_tgt_dist_df[['src_dist_idx', 'tgt_dist_idx', *src_tgt_dist_keys]]
         src_tgt_dist_df.drop_duplicates(inplace=True)
 
-        src_to_tgt_dist_map = src_tgt_dist_df.groupby('src_dist_idx')['tgt_dist_idx'].apply(list).to_dict()
+        src_to_tgt_dist_map = src_tgt_dist_df[['src_dist_idx', 'tgt_dist_idx']].groupby('src_dist_idx')['tgt_dist_idx'].apply(list).to_dict()
 
         # preparing src_dist_labels
         src_dist_labels = obs.loc[obs[self.dist_flag_key]][[*self.src_dist_keys, 'src_dist_idx']]\
@@ -163,6 +163,7 @@ class DataManager:
                 conditions=conditions,
             ),
             annotation=GroupedDistributionAnnotation(
+                src_tgt_dist_df=src_tgt_dist_df,
                 old_obs_index=old_index_mapping,
                 src_dist_idx_to_labels=src_dist_labels,
                 tgt_dist_idx_to_labels=tgt_dist_labels,

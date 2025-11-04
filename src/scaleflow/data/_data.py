@@ -12,6 +12,8 @@ import anndata as ad
 from scaleflow._types import ArrayLike
 from scaleflow.data._utils import write_sharded, write_dist_data_threaded
 
+import pandas as pd
+
 __all__ = [
     "BaseDataMixin",
     "ConditionData",
@@ -438,6 +440,7 @@ class GroupedDistributionAnnotation:
 
     src_dist_idx_to_labels: dict[int, Any] # (n_src_dists) → Any (e.g. list of strings)
     tgt_dist_idx_to_labels: dict[int, Any] # (n_tgt_dists) → Any (e.g. list of strings)
+    src_tgt_dist_df: pd.DataFrame
 
 
     @classmethod
@@ -449,9 +452,10 @@ class GroupedDistributionAnnotation:
         Read the grouped distribution annotation from a Zarr group.
         """
         return cls(
-            old_obs_index=group["old_obs_index"][:],
+            old_obs_index=ad.io.read_elem(group["old_obs_index"]),
             src_dist_idx_to_labels={int(k): np.array(group["src_dist_idx_to_labels"][k]) for k in group["src_dist_idx_to_labels"].keys()},
             tgt_dist_idx_to_labels={int(k): np.array(group["tgt_dist_idx_to_labels"][k]) for k in group["tgt_dist_idx_to_labels"].keys()},
+            src_tgt_dist_df=ad.io.read_elem(group["src_tgt_dist_df"])
         )
 
     def write_zarr_group(
@@ -463,27 +467,16 @@ class GroupedDistributionAnnotation:
         """
         Write the grouped distribution annotation to a Zarr group.
         """
-        sub_group = group.create_group("annotation")
+        to_write = {
+            "old_obs_index": self.old_obs_index,
+            "src_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.src_dist_idx_to_labels.items()},
+            "tgt_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.tgt_dist_idx_to_labels.items()},
+            "src_tgt_dist_df": self.src_tgt_dist_df,
+        }
         write_sharded(
-            group=sub_group,
-            name="old_obs_index",
-            data=self.old_obs_index,
-            chunk_size=chunk_size,
-            shard_size=shard_size,
-            compressors=None,
-        )
-        write_sharded(
-            group=sub_group,
-            name="src_dist_idx_to_labels",
-            data={str(k): np.array(v) for k, v in self.src_dist_idx_to_labels.items()},
-            chunk_size=chunk_size,
-            shard_size=shard_size,
-            compressors=None,
-        )
-        write_sharded(
-            group=sub_group,
-            name="tgt_dist_idx_to_labels",
-            data={str(k): np.array(v) for k, v in self.tgt_dist_idx_to_labels.items()},
+            group=group,
+            name="annotation",
+            data=to_write,
             chunk_size=chunk_size,
             shard_size=shard_size,
             compressors=None,
@@ -542,3 +535,32 @@ class GroupedDistribution:
             data=data,
         )
 
+    def split_by_dist_df(self, dist_df: pd.DataFrame, column: str) -> dict[str, GroupedDistributionData]:
+        """
+        Split the grouped distribution by the given distribution dataframe.
+        """
+        if column not in dist_df.columns:
+            raise ValueError(f"Column {column} not found in dist_df.")
+        # assert categorical,boolean, or string
+        if not pd.api.types.is_categorical_dtype(dist_df[column]) \
+            and not pd.api.types.is_bool_dtype(dist_df[column]) \
+            and not pd.api.types.is_string_dtype(dist_df[column]):
+            raise ValueError(f"Column {column} must be categorical, boolean, or string.")
+
+        split_values = dist_df[column].unique()
+        # get the src_dist_idx and tgt_dist_idx for each value
+        split_data = {}
+        for value in split_values:
+            filtered_df = dist_df.loc[dist_df[column] == value]
+            # group by to map src_dist_idx and tgt_dist_idx
+            src_tgt_dist_map = filtered_df[['src_dist_idx', 'tgt_dist_idx']].groupby('src_dist_idx')['tgt_dist_idx'].apply(list).to_dict()
+            src_data = {int(k): self.data.src_data[k] for k in src_tgt_dist_map.keys()}
+            tgt_data = {int(k): self.data.tgt_data[k] for k in src_tgt_dist_map.keys()}
+            conditions = {int(k): self.data.conditions[k] for k in src_tgt_dist_map.keys()}
+            split_data[value] = GroupedDistributionData(
+                src_to_tgt_dist_map=src_tgt_dist_map,
+                src_data=src_data,
+                tgt_data=tgt_data,
+                conditions=conditions,
+            )
+        return split_data
