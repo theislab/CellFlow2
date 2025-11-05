@@ -361,20 +361,23 @@ class EquilibriumMatching:
 
         def sample_gd(x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray) -> jnp.ndarray:
             """Basic gradient descent sampler."""
-            for _ in range(max_steps):
-                f = gradient_field(x, condition, encoder_noise)
-                x = x - eta * f
-            return x
+            def gd_step(i, x_val):
+                f = gradient_field(x_val, condition, encoder_noise)
+                return x_val - eta * f
+            return jax.lax.fori_loop(0, max_steps, gd_step, x)
 
         def sample_nag(x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray) -> jnp.ndarray:
             """Nesterov accelerated gradient descent sampler."""
-            velocity = jnp.zeros_like(x)
-            for _ in range(max_steps):
-                x_lookahead = x - mu * velocity
+            def nag_step(i, state):
+                x_val, velocity = state
+                x_lookahead = x_val - mu * velocity
                 f = gradient_field(x_lookahead, condition, encoder_noise)
-                velocity = mu * velocity + eta * f
-                x = x - velocity
-            return x
+                new_velocity = mu * velocity + eta * f
+                new_x = x_val - new_velocity
+                return (new_x, new_velocity)
+            init_state = (x, jnp.zeros_like(x))
+            final_x, _ = jax.lax.fori_loop(0, max_steps, nag_step, init_state)
+            return final_x
 
         sampler = sample_nag if use_nesterov else sample_gd
         x_pred = jax.jit(jax.vmap(sampler, in_axes=[0, None, None]))(x, condition, encoder_noise)
@@ -390,6 +393,7 @@ class EquilibriumMatching:
         max_steps: int = 250,
         use_nesterov: bool = True,
         mu: float = 0.35,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
         """Predict the translated source ``x`` under condition ``condition``.
@@ -419,6 +423,8 @@ class EquilibriumMatching:
             Whether to use Nesterov accelerated gradient (recommended).
         mu
             Momentum parameter for Nesterov (default: 0.35 as in paper).
+        show_progress
+            Whether to show a progress bar when predicting over multiple conditions.
         kwargs
             Additional keyword arguments (for compatibility).
 
@@ -455,11 +461,19 @@ class EquilibriumMatching:
             pred_targets = batched_predict(src_inputs, batched_conditions)
             return {k: pred_targets[i] for i, k in enumerate(keys)}
         elif isinstance(x, dict):
-            return jax.tree.map(
-                predict_fn,
-                x,
-                condition,
-            )
+            if show_progress:
+                from tqdm import tqdm
+                results = {}
+                keys = sorted(x.keys())
+                for key in tqdm(keys, desc="Predicting conditions", leave=False):
+                    results[key] = predict_fn(x[key], condition[key])
+                return results
+            else:
+                return jax.tree.map(
+                    predict_fn,
+                    x,
+                    condition,
+                )
         else:
             x_pred = predict_fn(x, condition)
             return np.array(x_pred)

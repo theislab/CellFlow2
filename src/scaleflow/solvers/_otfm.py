@@ -341,6 +341,7 @@ class OTFlowMatching:
         condition: dict[str, ArrayLike] | dict[str, dict[str, ArrayLike]],
         rng: jax.Array | None = None,
         batched: bool = False,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
         """Predict the translated source ``x`` under condition ``condition``.
@@ -365,6 +366,8 @@ class OTFlowMatching:
             Whether to use batched prediction. This is only supported if the input has
             the same number of cells for each condition. For example, this works when using
             :class:`~scaleflow.data.ValidationSampler` to sample the validation data.
+        show_progress
+            Whether to show a progress bar when predicting over multiple conditions.
         kwargs
             Keyword arguments for :func:`diffrax.diffeqsolve`.
 
@@ -392,11 +395,20 @@ class OTFlowMatching:
             pred_targets = batched_predict(src_inputs, batched_conditions)
             return {k: pred_targets[i] for i, k in enumerate(keys)}
         elif isinstance(x, dict):
-            return jax.tree.map(
-                partial(self._predict_jit, rng=rng, **kwargs),
-                x,
-                condition,  # type: ignore[attr-defined]
-            )
+            if show_progress:
+                from tqdm import tqdm
+                predict_fn = partial(self._predict_jit, rng=rng, **kwargs)
+                results = {}
+                keys = sorted(x.keys())
+                for key in tqdm(keys, desc="Predicting conditions", leave=False):
+                    results[key] = predict_fn(x[key], condition[key])
+                return results
+            else:
+                return jax.tree.map(
+                    partial(self._predict_jit, rng=rng, **kwargs),
+                    x,
+                    condition,  # type: ignore[attr-defined]
+                )
         else:
             x_pred = self._predict_jit(x, condition, rng, **kwargs)
             return np.array(x_pred)

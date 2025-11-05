@@ -271,6 +271,7 @@ class MultiTaskOTFlowMatching:
         rng: jax.Array | None = None,
         batched: bool = False,
         task: str = "flow_matching",
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
         """Predict either flow matching or phenotype outcomes.
@@ -287,6 +288,8 @@ class MultiTaskOTFlowMatching:
             Whether to use batched prediction.
         task
             Either "flow_matching" or "phenotype".
+        show_progress
+            Whether to show a progress bar when predicting over multiple conditions.
         kwargs
             Additional arguments for ODE solver.
 
@@ -297,7 +300,7 @@ class MultiTaskOTFlowMatching:
         if task == "phenotype":
             return self._predict_phenotype(condition, rng)
         else:
-            return self._predict_flow_matching(x, condition, rng, batched, **kwargs)
+            return self._predict_flow_matching(x, condition, rng, batched, show_progress, **kwargs)
 
     def _predict_phenotype(self, condition: dict[str, ArrayLike], rng: jax.Array | None = None) -> ArrayLike:
         """Predict phenotype values."""
@@ -329,6 +332,7 @@ class MultiTaskOTFlowMatching:
         condition: dict[str, ArrayLike] | dict[str, dict[str, ArrayLike]],
         rng: jax.Array | None = None,
         batched: bool = False,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
         """Predict flow matching outcomes (same as original OTFM)."""
@@ -349,6 +353,20 @@ class MultiTaskOTFlowMatching:
                 batched_conditions[cond_key] = jnp.stack([condition[k][cond_key] for k in keys])
             pred_targets = batched_predict(src_inputs, batched_conditions)
             return {k: pred_targets[i] for i, k in enumerate(keys)}
+        elif isinstance(x, dict):
+            if show_progress:
+                from tqdm import tqdm
+                results = {}
+                keys = sorted(x.keys())
+                for key in tqdm(keys, desc="Predicting conditions", leave=False):
+                    results[key] = self._predict_jit(x[key], condition[key], rng, **kwargs)
+                return results
+            else:
+                return jax.tree.map(
+                    lambda xi, ci: self._predict_jit(xi, ci, rng, **kwargs),
+                    x,
+                    condition,
+                )
         else:
             x_pred = self._predict_jit(x, condition, rng, **kwargs)
             return np.array(x_pred)

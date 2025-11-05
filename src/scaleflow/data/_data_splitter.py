@@ -143,7 +143,7 @@ class DataSplitter:
         self.dataset_names = dataset_names
         self.split_ratios = split_ratios
         self.split_type = split_type
-        self.split_key = split_key
+        self.split_key = [split_key] if isinstance(split_key, str) else split_key
         self.force_training_values = force_training_values or []
         self.control_value = [control_value] if isinstance(control_value, str) else control_value
         self.hard_test_split = hard_test_split
@@ -152,6 +152,8 @@ class DataSplitter:
         self.val_random_state = val_random_state if val_random_state is not None else random_state
 
         self._validate_inputs()
+
+        self._extract_covariate_orderings()
 
         self.split_results: dict[str, dict] = {}
 
@@ -195,6 +197,22 @@ class DataSplitter:
             if not isinstance(td, (TrainingData, MappedCellData)):
                 raise ValueError(f"training_datasets[{i}] must be a TrainingData or MappedCellData object")
 
+    def _extract_covariate_orderings(self) -> None:
+        self.covariate_orderings = []
+        for i, td in enumerate(self.training_datasets):
+            if hasattr(td, 'data_manager') and td.data_manager is not None:
+                covar_keys = td.data_manager.perturb_covar_keys
+                covar_name_to_positions = {}
+                for pos, key in enumerate(covar_keys):
+                    if key not in covar_name_to_positions:
+                        covar_name_to_positions[key] = []
+                    covar_name_to_positions[key].append(pos)
+                self.covariate_orderings.append(covar_name_to_positions)
+                logger.info(f"Dataset {i}: Covariate ordering: {covar_keys}")
+            else:
+                self.covariate_orderings.append({})
+                logger.warning(f"Dataset {i}: No data_manager found, cannot extract covariate ordering")
+
     def extract_perturbation_info(self, training_data: TrainingData | MappedCellData) -> dict:
         """
         Extract condition information from TrainingData or MappedCellData.
@@ -230,11 +248,31 @@ class DataSplitter:
             "n_cells": n_cells,
         }
 
-    def _get_unique_perturbation_values(self, perturbation_idx_to_covariates: dict[int, tuple[str, ...]]) -> list[str]:
-        """Get all unique covariate values from perturbation dictionary."""
+    def _get_unique_perturbation_values(
+        self,
+        perturbation_idx_to_covariates: dict[int, tuple[str, ...]],
+        dataset_index: int = 0,
+    ) -> list[str]:
         all_unique_vals = set()
-        for covariates in perturbation_idx_to_covariates.values():
-            all_unique_vals.update(covariates)
+        if self.split_key is None or not self.covariate_orderings or not self.covariate_orderings[dataset_index]:
+            for covariates in perturbation_idx_to_covariates.values():
+                all_unique_vals.update(covariates)
+        else:
+            covar_name_to_positions = self.covariate_orderings[dataset_index]
+            positions_to_extract = []
+            for key in self.split_key:
+                if key in covar_name_to_positions:
+                    positions_to_extract.extend(covar_name_to_positions[key])
+                else:
+                    logger.warning(f"split_key '{key}' not found in covariate ordering for dataset {dataset_index}")
+            if positions_to_extract:
+                for covariates in perturbation_idx_to_covariates.values():
+                    for pos in positions_to_extract:
+                        if pos < len(covariates):
+                            all_unique_vals.add(covariates[pos])
+            else:
+                for covariates in perturbation_idx_to_covariates.values():
+                    all_unique_vals.update(covariates)
         return list(all_unique_vals)
 
     def _split_random(self, n_cells: int, split_ratios: list[float]) -> dict[str, np.ndarray]:
@@ -276,18 +314,82 @@ class DataSplitter:
 
         return {"train": train_idx, "val": val_idx, "test": test_idx}
 
+    def _add_control_cells_to_splits(
+        self,
+        train_idx: np.ndarray,
+        val_idx: np.ndarray,
+        test_idx: np.ndarray,
+        train_values: list,
+        val_values: list,
+        test_values: list,
+        perturbation_covariates_mask: np.ndarray,
+        dataset_index: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        training_data = self.training_datasets[dataset_index]
+        if not hasattr(training_data, 'split_covariates_mask') or not hasattr(training_data, 'split_idx_to_covariates'):
+            return train_idx, val_idx, test_idx
+
+        split_covariates_mask = np.asarray(training_data.split_covariates_mask)
+        split_idx_to_covariates = training_data.split_idx_to_covariates
+
+        control_cell_indices = np.where(split_covariates_mask >= 0)[0]
+        if len(control_cell_indices) == 0:
+            logger.info("No control cells found to assign")
+            return train_idx, val_idx, test_idx
+
+        covar_name_to_positions = self.covariate_orderings[dataset_index] if self.covariate_orderings else {}
+        positions_to_check = []
+        if self.split_key and covar_name_to_positions:
+            for key in self.split_key:
+                if key in covar_name_to_positions:
+                    positions_to_check.extend(covar_name_to_positions[key])
+
+        def get_control_cells_for_values(values_set):
+            if len(values_set) == 0:
+                return np.array([], dtype=int)
+
+            values_set_normalized = {str(v) for v in values_set}
+
+            matching_control_indices = []
+            for control_group_idx, covariates in split_idx_to_covariates.items():
+                if positions_to_check:
+                    if any(str(covariates[pos]) in values_set_normalized for pos in positions_to_check if pos < len(covariates)):
+                        matching_control_indices.append(control_group_idx)
+                else:
+                    if any(str(cov) in values_set_normalized for cov in covariates):
+                        matching_control_indices.append(control_group_idx)
+
+            if len(matching_control_indices) == 0:
+                return np.array([], dtype=int)
+
+            control_cells_mask = np.isin(split_covariates_mask, matching_control_indices)
+            return np.where(control_cells_mask)[0]
+
+        train_control_cells = get_control_cells_for_values(train_values)
+        val_control_cells = get_control_cells_for_values(val_values)
+        test_control_cells = get_control_cells_for_values(test_values)
+
+        logger.info(f"Adding control cells - Train: {len(train_control_cells)}, Val: {len(val_control_cells)}, Test: {len(test_control_cells)}")
+
+        train_idx = np.concatenate([train_idx, train_control_cells])
+        val_idx = np.concatenate([val_idx, val_control_cells])
+        test_idx = np.concatenate([test_idx, test_control_cells])
+
+        return train_idx, val_idx, test_idx
+
     def _split_by_values(
         self,
         perturbation_covariates_mask: np.ndarray,
         perturbation_idx_to_covariates: dict[int, tuple[str, ...]],
         split_ratios: list[float],
+        dataset_index: int = 0,
     ) -> dict[str, np.ndarray]:
         """Split by holding out specific condition groups."""
         if self.split_key is None:
             raise ValueError("split_key must be provided for holdout_groups splitting")
 
         # Get all unique covariate values
-        unique_values = self._get_unique_perturbation_values(perturbation_idx_to_covariates)
+        unique_values = self._get_unique_perturbation_values(perturbation_idx_to_covariates, dataset_index)
 
         # Remove forced training values from consideration for val/test splits
         available_values = [v for v in unique_values if v not in self.force_training_values]
@@ -339,19 +441,33 @@ class DataSplitter:
         logger.info(f"Val values: {val_values}")
         logger.info(f"Test values: {test_values}")
 
+        print(f"Split values - Train: {len(train_values)}, Val: {len(val_values)}, Test: {len(test_values)}")
+        print(f"Train values: {train_values}")
+        print(f"Val values: {val_values}")
+        print(f"Test values: {test_values}")
+
+        # Get positions to check based on split_key
+        covar_name_to_positions = self.covariate_orderings[dataset_index] if self.covariate_orderings else {}
+        positions_to_check = []
+        if self.split_key and covar_name_to_positions:
+            for key in self.split_key:
+                if key in covar_name_to_positions:
+                    positions_to_check.extend(covar_name_to_positions[key])
+
         # Create masks by checking which perturbation indices contain which values
         def _get_cells_with_values(values_set):
-            """Get cell indices for perturbations containing any of the specified values."""
             if len(values_set) == 0:
                 return np.array([], dtype=int)
 
-            # Find perturbation indices that contain any of these values
             matching_pert_indices = []
             for pert_idx, covariates in perturbation_idx_to_covariates.items():
-                if any(val in covariates for val in values_set):
-                    matching_pert_indices.append(pert_idx)
+                if positions_to_check:
+                    if any(covariates[pos] in values_set for pos in positions_to_check if pos < len(covariates)):
+                        matching_pert_indices.append(pert_idx)
+                else:
+                    if any(val in covariates for val in values_set):
+                        matching_pert_indices.append(pert_idx)
 
-            # Get cells with these perturbation indices
             if len(matching_pert_indices) == 0:
                 return np.array([], dtype=int)
 
@@ -384,6 +500,14 @@ class DataSplitter:
                 test_idx = np.array([])
 
             logger.info("SOFT HOLDOUT GROUPS: Val/test can share values")
+
+        # Also assign control cells to splits based on their cell_line
+        train_idx, val_idx, test_idx = self._add_control_cells_to_splits(
+            train_idx, val_idx, test_idx,
+            train_values, val_values, test_values,
+            perturbation_covariates_mask,
+            dataset_index
+        )
 
         # Log overlap information (important for combination treatments)
         total_assigned = len(set(train_idx) | set(val_idx) | set(test_idx))
@@ -715,7 +839,7 @@ class DataSplitter:
             split_indices = self._split_random(n_cells, current_split_ratios)
         elif self.split_type == "holdout_groups":
             split_indices = self._split_by_values(
-                perturbation_covariates_mask, perturbation_idx_to_covariates, current_split_ratios
+                perturbation_covariates_mask, perturbation_idx_to_covariates, current_split_ratios, dataset_index
             )
         elif self.split_type == "holdout_combinations":
             split_indices = self._split_holdout_combinations(
@@ -749,17 +873,28 @@ class DataSplitter:
 
         # Add split values information if applicable
         if self.split_type in ["holdout_groups", "holdout_combinations"] and self.split_key:
-            unique_values = self._get_unique_perturbation_values(perturbation_idx_to_covariates)
+            unique_values = self._get_unique_perturbation_values(perturbation_idx_to_covariates, dataset_index)
+
+            covar_name_to_positions = self.covariate_orderings[dataset_index] if self.covariate_orderings else {}
+            positions_to_extract = []
+            if self.split_key and covar_name_to_positions:
+                for key in self.split_key:
+                    if key in covar_name_to_positions:
+                        positions_to_extract.extend(covar_name_to_positions[key])
 
             def _get_split_values(indices):
-                """Get all unique covariate values for cells in this split."""
                 if len(indices) == 0:
                     return []
                 split_vals = set()
                 for idx in indices:
                     pert_idx = perturbation_covariates_mask[idx]
                     covariates = perturbation_idx_to_covariates[pert_idx]
-                    split_vals.update(covariates)
+                    if positions_to_extract:
+                        for pos in positions_to_extract:
+                            if pos < len(covariates):
+                                split_vals.add(covariates[pos])
+                    else:
+                        split_vals.update(covariates)
                 return list(split_vals)
 
             train_values = _get_split_values(split_indices["train"])

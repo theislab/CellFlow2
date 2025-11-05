@@ -26,6 +26,7 @@ __all__ = [
     "ComputationCallback",
     "Metrics",
     "WandbLogger",
+    "LearningRateMonitor",
     "CallbackRunner",
     "PCADecodedMetrics",
     "VAEDecodedMetrics",
@@ -437,6 +438,41 @@ class VAEDecodedMetrics(Metrics):
         return adata
 
 
+class LearningRateMonitor(LoggingCallback):
+    """Callback to monitor and log learning rate during training
+
+    Parameters
+    ----------
+    schedule
+        The learning rate schedule function (e.g., from optax.warmup_cosine_decay_schedule).
+        Should be a callable that takes a step count and returns a learning rate.
+
+    Returns
+    -------
+        :obj:`None`
+    """
+
+    def __init__(self, schedule: Callable[[int], float]):
+        self.schedule = schedule
+        self.step_count = 0
+
+    def on_train_begin(self) -> Any:
+        """Called at the beginning of training"""
+        self.step_count = 0
+
+    def on_log_iteration(self, dict_to_log: dict[str, float], iteration: int = None, **_: Any) -> Any:
+        """Called at each validation/log iteration to add learning rate to logs"""
+        if iteration is not None:
+            self.step_count = iteration
+        lr = float(self.schedule(self.step_count))
+        dict_to_log["learning_rate"] = lr
+        return dict_to_log
+
+    def on_train_end(self, dict_to_log: dict[str, float]) -> Any:
+        """Called at the end of training"""
+        pass
+
+
 class WandbLogger(LoggingCallback):
     """Callback to log data to Weights and Biases
 
@@ -549,6 +585,7 @@ class CallbackRunner:
         pred_data: dict[str, dict[str, ArrayLike]],
         solver: _otfm.OTFlowMatching | _genot.GENOT,
         additional_metrics: dict[str, Any] | None = None,
+        iteration: int | None = None,
     ) -> dict[str, Any]:
         """Called at each validation/log iteration to run callbacks. First computes metrics with computation callbacks and then logs data with logging callbacks.
 
@@ -565,6 +602,8 @@ class CallbackRunner:
             solver with a conditional velocity field.
         additional_metrics
             Optional dictionary of metrics to include before computing validation metrics (e.g., train_loss)
+        iteration
+            Current training iteration number
 
         Returns
         -------
@@ -581,7 +620,7 @@ class CallbackRunner:
             dict_to_log.update(results)
 
         for callback in self.logging_callbacks:
-            callback.on_log_iteration(dict_to_log)  # type: ignore[call-arg]
+            callback.on_log_iteration(dict_to_log, iteration=iteration)  # type: ignore[call-arg]
 
         return dict_to_log
 

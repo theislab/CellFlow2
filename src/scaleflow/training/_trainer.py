@@ -172,6 +172,7 @@ class CellFlowTrainer:
                     valid_pred_data,
                     self.solver,
                     additional_metrics=additional_metrics,
+                    iteration=it,
                 )
                 self._update_logs(metrics)
                 # Update progress bar

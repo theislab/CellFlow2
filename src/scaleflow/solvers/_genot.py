@@ -235,6 +235,7 @@ class GENOT:
         rng: ArrayLike | None = None,
         rng_genot: ArrayLike | None = None,
         batched: bool = False,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | tuple[ArrayLike, diffrax.Solution]:
         """Generate the push-forward of ``x`` under condition ``condition``.
@@ -258,6 +259,8 @@ class GENOT:
             Whether to use batched prediction. This is only supported if the input has
             the same number of cells for each condition. For example, this works when using
             :class:`~scaleflow.data.ValidationSampler` to sample the validation data.
+        show_progress
+            Whether to show a progress bar when predicting over multiple conditions.
         kwargs
             Keyword arguments for :func:`diffrax.diffeqsolve`.
 
@@ -285,12 +288,21 @@ class GENOT:
             pred_targets = batched_predict(src_inputs, batched_conditions)
             return {k: pred_targets[i] for i, k in enumerate(keys)}
         elif isinstance(x, dict):
-            predict_fn = functools.partial(self._predict_jit, rng=rng, rng_genot=rng_genot, **kwargs)
-            return jax.tree.map(
-                predict_fn,
-                x,
-                condition,
-            )
+            if show_progress:
+                from tqdm import tqdm
+                predict_fn = functools.partial(self._predict_jit, rng=rng, rng_genot=rng_genot, **kwargs)
+                results = {}
+                keys = sorted(x.keys())
+                for key in tqdm(keys, desc="Predicting conditions", leave=False):
+                    results[key] = predict_fn(x[key], condition[key])
+                return results
+            else:
+                predict_fn = functools.partial(self._predict_jit, rng=rng, rng_genot=rng_genot, **kwargs)
+                return jax.tree.map(
+                    predict_fn,
+                    x,
+                    condition,
+                )
         else:
             x_pred = self._predict_jit(x, condition, rng, rng_genot, **kwargs)
             return np.array(x_pred)
