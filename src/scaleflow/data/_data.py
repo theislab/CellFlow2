@@ -10,7 +10,7 @@ from zarr.storage import LocalStore
 
 import anndata as ad
 from scaleflow._types import ArrayLike
-from scaleflow.data._utils import write_sharded, write_dist_data_threaded
+from scaleflow.data._utils import write_sharded, write_dist_data_threaded, write_nested_dist_data_threaded
 
 import pandas as pd
 
@@ -383,7 +383,7 @@ class GroupedDistributionData:
     src_to_tgt_dist_map: dict[int, list[int]] # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
     src_data: dict[int, np.ndarray] # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
     tgt_data: dict[int, np.ndarray] # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
-    conditions: dict[int, np.ndarray] # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
+    conditions: dict[int, dict[str, np.ndarray]] # (n_tgt_dists) → {col: (n_cells_{tgt_dist_idx}, n_cond_features_{col})}
 
 
     @classmethod
@@ -394,11 +394,35 @@ class GroupedDistributionData:
         """
         Read the grouped distribution data from a Zarr group.
         """
+        # Read conditions from nested structure with keys and positions stored in attrs
+        conditions = {}
+        if "conditions" in group:
+            cond_group = group["conditions"]
+            # Iterate through each distribution group
+            for dist_id_str in cond_group.keys():
+                dist_id = int(dist_id_str)
+                dist_group = cond_group[dist_id_str]
+                
+                # Get metadata from attrs
+                if 'keys' in dist_group.attrs and 'positions' in dist_group.attrs:
+                    sorted_keys = dist_group.attrs['keys']
+                    positions = dist_group.attrs['positions']
+                    
+                    # Read the concatenated array
+                    concatenated = np.array(dist_group["data"])
+                    
+                    # Split back into individual arrays
+                    conditions[dist_id] = {}
+                    for i, col_name in enumerate(sorted_keys):
+                        start = positions[i]
+                        end = positions[i + 1]
+                        conditions[dist_id][col_name] = concatenated[start:end]
+        
         return cls(
             src_to_tgt_dist_map={int(k): np.array(group["src_to_tgt_dist_map"][k]) for k in group["src_to_tgt_dist_map"].keys()},
             src_data={int(k): group["src_data"][k] for k in group["src_data"].keys()},
             tgt_data={int(k): group["tgt_data"][k] for k in group["tgt_data"].keys()},
-            conditions={int(k): np.array(group["conditions"][k]) for k in group["conditions"].keys()},
+            conditions=conditions,
         )
 
 
@@ -421,13 +445,11 @@ class GroupedDistributionData:
             shard_size=shard_size,
             compressors=None,
         )
-        to_write = {
-            "src_data": self.src_data,
-            "tgt_data": self.tgt_data,
-            "conditions": self.conditions,
-        }
-        for key, value in to_write.items():
+        
+        # Write src_data and tgt_data using simple writer
+        for key in ["src_data", "tgt_data"]:
             sub_group = data.create_group(key)
+            value = getattr(self, key)
             write_dist_data_threaded(
                 group=sub_group,
                 dist_data=value,
@@ -435,6 +457,17 @@ class GroupedDistributionData:
                 shard_size=shard_size,
                 max_workers=max_workers,
             )
+        
+        # Write conditions using nested writer (concatenates arrays per distribution)
+        conditions_group = data.create_group("conditions")
+        write_nested_dist_data_threaded(
+            group=conditions_group,
+            dist_data=self.conditions,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            max_workers=max_workers,
+        )
+        
         return None
 
 @dataclass
@@ -513,6 +546,7 @@ class GroupedDistribution:
             shard_size=shard_size,
             max_workers=max_workers,
         )
+        print("writing annotation")
         self.annotation.write_zarr_group(
             group=zgroup,
             chunk_size=chunk_size,
