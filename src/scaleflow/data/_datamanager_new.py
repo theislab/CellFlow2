@@ -125,17 +125,17 @@ class DataManager:
             conditions = {}
             for src_dist_idx, tgt_dist_idxs in src_to_tgt_dist_map.items():
                 src_label = src_dist_labels[src_dist_idx]
-                src_repr = [
-                    DataManager._col_to_repr(col_to_repr, col, label) 
+                src_repr = {
+                    col: DataManager._col_to_repr(col_to_repr, col, label) 
                     for col, label in zip(self.src_dist_keys, src_label)
-                ]
+                }
                 for tgt_dist_idx in tgt_dist_idxs:
                     tgt_label = tgt_dist_labels[tgt_dist_idx]
-                    tgt_repr = [
-                        DataManager._col_to_repr(col_to_repr, col, label) 
+                    tgt_repr = {
+                        col: DataManager._col_to_repr(col_to_repr, col, label) 
                         for col, label in zip(self.tgt_dist_keys, tgt_label)
-                    ]
-                    conditions[tgt_dist_idx] = np.concatenate([*src_repr, *tgt_repr])
+                    }
+                    conditions[tgt_dist_idx] = {**src_repr, **tgt_repr}
 
 
         arr = self.data_location(adata)
