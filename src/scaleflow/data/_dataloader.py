@@ -11,12 +11,23 @@ from scaleflow.data._data import (
 )
 
 from contextlib import nullcontext
+from abc import ABC, abstractmethod
 
 __all__ = [
     "ReservoirSampler",
+    "SamplerABC",
 ]
 
 
+
+class SamplerABC(ABC):
+    @abstractmethod
+    def sample(self, rng: np.random.Generator) -> dict[str, Any]:
+        pass
+
+    @abstractmethod
+    def init_sampler(self, rng: np.random.Generator) -> None:
+        pass
 
 class ReservoirSampler:
     """Data sampler with gradual pool replacement using reservoir sampling.

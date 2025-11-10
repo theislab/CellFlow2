@@ -1,3 +1,4 @@
+from __future__ import annotations
 import abc
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
@@ -18,7 +19,10 @@ from scaleflow.metrics._metrics import (
     compute_scalar_mmd_gpu,
     compute_sinkhorn_div,
 )
-from scaleflow.solvers import _genot, _otfm
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from scaleflow.solvers import _genot, _otfm
+
 
 __all__ = [
     "BaseCallback",

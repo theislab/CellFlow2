@@ -5,6 +5,7 @@ from scaleflow.data._data import (
 )
 from scaleflow.data._dataloader import (
     ReservoirSampler,
+    SamplerABC,
 )
 
 from scaleflow.data._datamanager_new import DataManager
@@ -15,4 +16,5 @@ __all__ = [
     "GroupedDistributionAnnotation",
     "ReservoirSampler",
     "DataManager",
+    "SamplerABC",
 ]

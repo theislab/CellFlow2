@@ -6,7 +6,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 from tqdm import tqdm
 
-from scaleflow.data import JaxOutOfCoreTrainSampler, TrainSampler, ValidationSampler
+from scaleflow.data import SamplerABC
 from scaleflow.solvers import _eqm, _genot, _otfm
 from scaleflow.training._callbacks import BaseCallback, CallbackRunner
 
@@ -53,7 +53,7 @@ class CellFlowTrainer:
 
     def _validation_step(
         self,
-        val_data: dict[str, ValidationSampler],
+        val_data: dict[str, SamplerABC],
         mode: Literal["on_log_iteration", "on_train_end"] = "on_log_iteration",
     ) -> tuple[
         dict[str, dict[str, ArrayLike]],
@@ -69,7 +69,7 @@ class CellFlowTrainer:
         # Add progress bar for validation
         val_pbar = tqdm(val_data.items(), desc="Validation", leave=False)
         for val_key, vdl in val_pbar:
-            batch = vdl.sample(mode=mode)
+            batch = vdl.sample(mode=mode) # TODO: remove mode
             src = batch["source"]
             condition = batch.get("condition", None)
             true_tgt = batch["target"]
@@ -91,10 +91,10 @@ class CellFlowTrainer:
 
     def train(
         self,
-        dataloader: TrainSampler | JaxOutOfCoreTrainSampler,
+        dataloader: SamplerABC,
         num_iterations: int,
         valid_freq: int,
-        valid_loaders: dict[str, ValidationSampler] | None = None,
+        valid_loaders: dict[str, SamplerABC] | None = None,
         monitor_metrics: Sequence[str] = [],
         callbacks: Sequence[BaseCallback] = [],
     ) -> _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching:
@@ -133,8 +133,7 @@ class CellFlowTrainer:
 
         pbar = tqdm(range(num_iterations))
         sampler = dataloader
-        if isinstance(dataloader, JaxOutOfCoreTrainSampler):
-            dataloader.set_sampler(num_iterations=num_iterations)
+        sampler.init_sampler(rng_np)
         for it in pbar:
             rng_jax, rng_step_fn = jax.random.split(rng_jax, 2)
 

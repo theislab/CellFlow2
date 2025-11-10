@@ -18,9 +18,9 @@ from ott.neural.methods.flows import dynamics
 from scaleflow.data import DataManager
 from scaleflow import _constants
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
-from scaleflow.data import GroupedDistribution, GroupedDistributionData, GroupedDistributionAnnotation
+from scaleflow.data import GroupedDistribution
 from scaleflow.model._utils import _write_predictions
-from scaleflow.data._dataloader import ReservoirSampler
+from scaleflow.data import SamplerABC
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
 from scaleflow.solvers import _genot, _otfm, _eqm
@@ -59,7 +59,7 @@ class CellFlow:
             self._vf_class = _velocity_field.EquilibriumVelocityField
         else:
             raise ValueError(f"Unknown solver: {solver}. Must be 'otfm', 'genot', or 'eqm'.")
-        self._dataloader: ReservoirSampler | None = None
+        self._dataloader: SamplerABC | None = None
         self._trainer: CellFlowTrainer | None = None
         self._validation_data: dict[str, GroupedDistribution] = {"predict_kwargs": {}}
         self._solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching | None = None
@@ -934,7 +934,7 @@ class CellFlow:
         return self._solver
 
     @property
-    def dataloader(self) -> ReservoirSampler | None:
+    def dataloader(self) -> SamplerABC | None:
         """The dataloader used for training."""
         return self._dataloader
 
@@ -966,15 +966,15 @@ class CellFlow:
         return self._vf
 
     @property
-    def train_data(self) -> TrainingData | None:
+    def train_data(self) -> GroupedDistribution | None:
         """The training data."""
         return self._train_data
 
     @train_data.setter
-    def train_data(self, data: TrainingData) -> None:
+    def train_data(self, data: GroupedDistribution) -> None:
         """Set the training data."""
-        if not isinstance(data, TrainingData):
-            raise ValueError(f"Expected `data` to be an instance of `TrainingData`, found `{type(data)}`.")
+        if not isinstance(data, GroupedDistribution):
+            raise ValueError(f"Expected `data` to be an instance of `GroupedDistribution`, found `{type(data)}`.")
         self._train_data = data
 
     @velocity_field.setter  # type: ignore[attr-defined,no-redef]

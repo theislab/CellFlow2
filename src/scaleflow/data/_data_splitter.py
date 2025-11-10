@@ -8,7 +8,7 @@ from typing import Literal
 import numpy as np
 from sklearn.model_selection import train_test_split
 
-from scaleflow.data._data import MappedCellData, TrainingData
+from scaleflow.data._data import GroupedDistribution
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +17,9 @@ SplitType = Literal["holdout_groups", "holdout_combinations", "random", "stratif
 
 class DataSplitter:
     """
-    A lightweight class for creating train/validation/test splits from TrainingData objects.
+    A lightweight class for creating train/validation/test splits from GroupedDistribution objects.
 
-    This class extracts metadata from TrainingData objects and returns split indices,
+    This class extracts metadata from GroupedDistribution objects and returns split indices,
     making it memory-efficient for large datasets.
 
     Supports various splitting strategies:
@@ -30,8 +30,8 @@ class DataSplitter:
 
     Parameters
     ----------
-    training_datasets : list[TrainingData | MappedCellData]
-        List of TrainingData or MappedCellData objects to process
+    training_datasets : list[GroupedDistribution]
+        List of GroupedDistribution objects to process
     dataset_names : list[str]
         List of names for each dataset (for saving/loading)
     split_ratios : list[list[float]]
@@ -127,7 +127,7 @@ class DataSplitter:
 
     def __init__(
         self,
-        training_datasets: list[TrainingData | MappedCellData],
+        training_datasets: list[GroupedDistribution],
         dataset_names: list[str],
         split_ratios: list[list[float]],
         split_type: SplitType = "random",
@@ -194,8 +194,8 @@ class DataSplitter:
             raise ValueError("control_value must be provided for split_type 'holdout_combinations'")
 
         for i, td in enumerate(self.training_datasets):
-            if not isinstance(td, (TrainingData, MappedCellData)):
-                raise ValueError(f"training_datasets[{i}] must be a TrainingData or MappedCellData object")
+            if not isinstance(td, GroupedDistribution):
+                raise ValueError(f"training_datasets[{i}] must be a GroupedDistribution object")
 
     def _extract_covariate_orderings(self) -> None:
         self.covariate_orderings = []
@@ -213,7 +213,7 @@ class DataSplitter:
                 self.covariate_orderings.append({})
                 logger.warning(f"Dataset {i}: No data_manager found, cannot extract covariate ordering")
 
-    def extract_perturbation_info(self, training_data: TrainingData | MappedCellData) -> dict:
+    def extract_perturbation_info(self, training_data: GroupedDistribution) -> dict:
         """
         Extract condition information from TrainingData or MappedCellData.
 
@@ -223,7 +223,7 @@ class DataSplitter:
 
         Parameters
         ----------
-        training_data : TrainingData | MappedCellData
+        training_data : GroupedDistribution
             Training data object
 
         Returns
@@ -809,13 +809,13 @@ class DataSplitter:
 
         return {"train": train_idx, "val": val_idx, "test": test_idx}
 
-    def split_single_dataset(self, training_data: TrainingData | MappedCellData, dataset_index: int) -> dict:
+    def split_single_dataset(self, training_data: GroupedDistribution, dataset_index: int) -> dict:
         """
-        Split a single TrainingData or MappedCellData object according to the specified strategy.
+        Split a single GroupedDistribution object according to the specified strategy.
 
         Parameters
         ----------
-        training_data : TrainingData | MappedCellData
+        training_data : GroupedDistribution
             Training data object to split
         dataset_index : int
             Index of the dataset to get the correct split ratios
@@ -918,7 +918,7 @@ class DataSplitter:
 
     def split_all_datasets(self) -> dict[str, dict]:
         """
-        Split all TrainingData objects according to the specified strategy.
+        Split all GroupedDistribution objects according to the specified strategy.
 
         Returns
         -------

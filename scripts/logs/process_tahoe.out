@@ -1,4 +1,0 @@
-]2;mamba activate lpert]1;]2;python /home/icb/selman.ozleyen/projects/CellFlow2/scripts/process_tahoe.py]1;loading data
-data loaded
-writing annotation
-data written
