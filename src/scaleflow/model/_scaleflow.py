@@ -17,10 +17,9 @@ from ott.neural.methods.flows import dynamics
 
 from scaleflow import _constants
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
-from scaleflow.data import JaxOutOfCoreTrainSampler, PredictionSampler, TrainSampler, ValidationSampler
-from scaleflow.data._data import ConditionData, TrainingData, ValidationData
-from scaleflow.data._datamanager import DataManager
+from scaleflow.data import GroupedDistribution, GroupedDistributionData, GroupedDistributionAnnotation
 from scaleflow.model._utils import _write_predictions
+from scaleflow.data._dataloader import ReservoirSampler
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
 from scaleflow.solvers import _genot, _otfm, _eqm
@@ -59,9 +58,9 @@ class CellFlow:
             self._vf_class = _velocity_field.EquilibriumVelocityField
         else:
             raise ValueError(f"Unknown solver: {solver}. Must be 'otfm', 'genot', or 'eqm'.")
-        self._dataloader: TrainSampler | JaxOutOfCoreTrainSampler | None = None
+        self._dataloader: ReservoirSampler | None = None
         self._trainer: CellFlowTrainer | None = None
-        self._validation_data: dict[str, ValidationData] = {"predict_kwargs": {}}
+        self._validation_data: dict[str, GroupedDistribution] = {"predict_kwargs": {}}
         self._solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching | None = None
         self._condition_dim: int | None = None
         self._vf: (
