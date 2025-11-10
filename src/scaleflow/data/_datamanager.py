@@ -1,31 +1,31 @@
-import anndata
-from typing import Any
-import time
-
-import dask.array as da
-import pandas as pd
-
 from dataclasses import dataclass
 import time
-import numpy as np
+import time
+from typing import Any
+from typing import TYPE_CHECKING
 
-from scaleflow.logging import timer
-from ._anndata_location import AnnDataLocation
+import anndata
+import dask.array as da
+import numpy as np
+import pandas as pd
 
 from scaleflow.data import (
     GroupedDistribution,
-    GroupedDistributionData,
     GroupedDistributionAnnotation,
+    GroupedDistributionData,
 )
+from scaleflow.logging import timer
+
+from ._anndata_location import AnnDataLocation
 
 __all__ = ["DataManager"]
 
-
+if TYPE_CHECKING:
+    import anndata
 
 
 @dataclass
 class DataManager:
-
     dist_flag_key: str
     src_dist_keys: list[str]
     tgt_dist_keys: list[str]
@@ -42,17 +42,18 @@ class DataManager:
             raise ValueError("Source and target distributions must not overlap.")
         if self.rep_keys is not None:
             if not set(self.rep_keys.keys()).issubset(set(self.src_dist_keys) | set(self.tgt_dist_keys)):
-                raise ValueError("Representation locations must be a subset of the source and target distribution keys.")
-
-   
+                raise ValueError(
+                    "Representation locations must be a subset of the source and target distribution keys."
+                )
 
     def prepare_data(
-        self, 
-        adata: anndata.AnnData,
+        self,
+        adata: "anndata.AnnData",
         verbose: bool = False,
     ) -> GroupedDistribution:
         """
         Distribution flag key must be a boolean column.
+
         The src and tgt distribution keys are recommended to be categorical columns otherwise sorting will be slow.
         Resets the index of obs. saves new to old index
         """
@@ -64,77 +65,80 @@ class DataManager:
         obs = adata.obs[cols].copy()
         old_index_mapping = obs.index.to_numpy()
         obs.reset_index(drop=True, inplace=True)
-        
 
         # dtype must be boolean
         assert pd.api.types.is_bool_dtype(obs[self.dist_flag_key]), "Distribution flag key must be a boolean column."
-        control_mask = obs[self.dist_flag_key].to_numpy()
 
         with timer("Sorting values", verbose=verbose):
             obs.sort_values(cols, inplace=True)
 
         obs["src_dist_idx"] = obs.groupby(self.src_dist_keys, observed=False).ngroup()
         obs["tgt_dist_idx"] = obs.groupby(src_tgt_dist_keys, observed=False).ngroup()
+
         # Fill NaN indices with a specific value before casting
         obs["src_dist_idx"] = obs["src_dist_idx"].fillna(-1).astype(np.int32)
         obs["tgt_dist_idx"] = obs["tgt_dist_idx"].fillna(-1).astype(np.int32)
 
-
+        print(obs)
         # preparing for src_to_tgt_dist_map
         src_tgt_dist_df = obs.loc[~obs[self.dist_flag_key]]
-        src_tgt_dist_df = src_tgt_dist_df[['src_dist_idx', 'tgt_dist_idx', *src_tgt_dist_keys]]
+        src_tgt_dist_df = src_tgt_dist_df[["src_dist_idx", "tgt_dist_idx", *src_tgt_dist_keys]]
         src_tgt_dist_df.drop_duplicates(inplace=True)
 
-        src_to_tgt_dist_map = src_tgt_dist_df[['src_dist_idx', 'tgt_dist_idx']].groupby('src_dist_idx')['tgt_dist_idx'].apply(list).to_dict()
+        src_to_tgt_dist_map = (
+            src_tgt_dist_df[["src_dist_idx", "tgt_dist_idx"]]
+            .groupby("src_dist_idx")["tgt_dist_idx"]
+            .apply(list)
+            .to_dict()
+        )
 
         # preparing src_dist_labels
-        src_dist_labels = obs.loc[obs[self.dist_flag_key]][[*self.src_dist_keys, 'src_dist_idx']]\
-            .drop_duplicates().set_index('src_dist_idx')
-        src_dist_labels = dict(zip(src_dist_labels.index, src_dist_labels.itertuples(index=False, name=None)))
+        src_dist_labels = (
+            obs.loc[obs[self.dist_flag_key]][[*self.src_dist_keys, "src_dist_idx"]]
+            .drop_duplicates()
+            .set_index("src_dist_idx")
+        )
+        src_dist_labels = dict(
+            zip(src_dist_labels.index, src_dist_labels.itertuples(index=False, name=None), strict=True)
+        )
 
         # preparing tgt_dist_labels
-        tgt_dist_labels = obs.loc[~obs[self.dist_flag_key]][[*self.tgt_dist_keys, 'tgt_dist_idx']]\
-            .drop_duplicates().set_index('tgt_dist_idx')
-        tgt_dist_labels = dict(zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None)))
+        tgt_dist_labels = (
+            obs.loc[~obs[self.dist_flag_key]][[*self.tgt_dist_keys, "tgt_dist_idx"]]
+            .drop_duplicates()
+            .set_index("tgt_dist_idx")
+        )
+        tgt_dist_labels = dict(zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None), strict=True))
 
-        col_to_repr = {
-            key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()
-        }
+        col_to_repr = {key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()}
 
         with timer("Getting conditions", verbose=verbose):
             conditions = {}
             for src_dist_idx, tgt_dist_idxs in src_to_tgt_dist_map.items():
                 src_label = src_dist_labels[src_dist_idx]
                 src_repr = [
-                    DataManager._col_to_repr(col_to_repr, col, label) 
-                    for col, label in zip(self.src_dist_keys, src_label)
+                    DataManager._col_to_repr(col_to_repr, col, label)
+                    for col, label in zip(self.src_dist_keys, src_label, strict=True)
                 ]
                 for tgt_dist_idx in tgt_dist_idxs:
                     tgt_label = tgt_dist_labels[tgt_dist_idx]
                     tgt_repr = [
-                        DataManager._col_to_repr(col_to_repr, col, label) 
-                        for col, label in zip(self.tgt_dist_keys, tgt_label)
+                        DataManager._col_to_repr(col_to_repr, col, label)
+                        for col, label in zip(self.tgt_dist_keys, tgt_label, strict=True)
                     ]
                     conditions[tgt_dist_idx] = np.concatenate([*src_repr, *tgt_repr])
-
 
         arr = self.data_location(adata)
         if isinstance(arr, da.Array):
             arr = arr.compute()
-        
 
         with timer("Getting source and target distribution data", verbose=verbose):
-            src_dist_map = obs[control_mask].groupby('src_dist_idx', observed=False).groups
-            tgt_dist_map = obs[~control_mask].groupby('tgt_dist_idx', observed=False).groups
+            src_dist_map = obs[obs[self.dist_flag_key]].groupby("src_dist_idx", observed=False).groups
+            tgt_dist_map = obs[~obs[self.dist_flag_key]].groupby("tgt_dist_idx", observed=False).groups
 
-            tgt_data = {
-                int(k): arr[v.to_numpy()] for k, v in tgt_dist_map.items()
-            }
-            src_data = {
-                int(k): arr[v.to_numpy()] for k, v in src_dist_map.items()
-            }
-        
-            
+            tgt_data = {int(k): arr[v.to_numpy()] for k, v in tgt_dist_map.items()}
+            src_data = {int(k): arr[v.to_numpy()] for k, v in src_dist_map.items()}
+
         return GroupedDistribution(
             data=GroupedDistributionData(
                 src_to_tgt_dist_map=src_to_tgt_dist_map,
@@ -149,7 +153,6 @@ class DataManager:
                 tgt_dist_idx_to_labels=tgt_dist_labels,
             ),
         )
-    
 
     @staticmethod
     def _verify_dist_keys(dist_keys: list[str]) -> None:
@@ -160,11 +163,10 @@ class DataManager:
             raise ValueError("Distributions must be unique.")
 
     @staticmethod
-    def _verify_rep_keys_exists(rep_keys: dict[str, str], adata: anndata.AnnData) -> None:
-        for key, value in rep_keys.items():
+    def _verify_rep_keys_exists(rep_keys: dict[str, str], adata: "anndata.AnnData") -> None:
+        for _, value in rep_keys.items():
             if value not in adata.uns:
                 raise ValueError(f"Representation key {value} not found in adata.uns.")
-
 
     @staticmethod
     def _col_to_repr(col_to_repr: dict[str, dict[str, np.ndarray]], col: str, label: Any) -> np.ndarray:
