@@ -1,416 +1,167 @@
-import anndata as ad
-import numpy as np
 import pytest
-
-from scaleflow.data._datamanager import DataManager
-
-perturbation_covariates_args = [
-    {"drug": ["drug1"]},
-    {"drug": ["drug1"], "dosage": ["dosage_a"]},
-    {
-        "drug": ["drug_a"],
-        "dosage": ["dosage_a"],
-    },
-]
-
-perturbation_covariate_comb_args = [
-    {"drug": ["drug1", "drug2"]},
-    {"drug": ["drug1", "drug2"], "dosage": ["dosage_a", "dosage_b"]},
-    {
-        "drug": ["drug_a", "drug_b", "drug_c"],
-        "dosage": ["dosage_a", "dosage_b", "dosage_c"],
-    },
-]
+import numpy as np
+import pandas as pd
+import anndata as ad
+from scaleflow.data import DataManager, GroupedDistribution
+from scaleflow.data._anndata_location import AnnDataLocation
 
 
-class TestDataManager:
-    @pytest.mark.parametrize("sample_rep", ["X", "X_pca"])
-    @pytest.mark.parametrize("split_covariates", [[], ["cell_type"]])
-    @pytest.mark.parametrize("perturbation_covariates", perturbation_covariates_args)
-    @pytest.mark.parametrize("perturbation_covariate_reps", [{}, {"drug": "drug"}])
-    @pytest.mark.parametrize("sample_covariates", [[], ["dosage_c"]])
-    def test_init_DataManager(
-        self,
-        adata_perturbation: ad.AnnData,
-        sample_rep,
-        split_covariates,
-        perturbation_covariates,
-        perturbation_covariate_reps,
-        sample_covariates,
-    ):
-        from scaleflow.data._datamanager import DataManager
+def create_test_adata() -> ad.AnnData:
+    """
+    Create test AnnData with simple, traceable values for testing data splitting.
+    
+    Key design:
+    - X_pca: cell index embedded at position [idx, 0] for easy tracing (cell 0 has value 0, cell 1 has value 1, etc.)
+    - Simple names: cellline_A, drug_A, gene_A, etc.
+    - Multiple metadata columns (batch, plate, day) for testing different split strategies
+    - Known perturbation combinations
+    """
+    
+    # Define explicit test cases
+    data = [
+        # Controls - cellline_A
+        {'control': True, 'cellline': 'cellline_A', 'drug': 'control', 'gene': 'control', 'dose': 0.0, 'batch': 'batch_1', 'plate': 'plate_1', 'day': 'day_1'},
+        {'control': True, 'cellline': 'cellline_A', 'drug': 'control', 'gene': 'control', 'dose': 0.0, 'batch': 'batch_1', 'plate': 'plate_1', 'day': 'day_1'},
+        {'control': True, 'cellline': 'cellline_A', 'drug': 'control', 'gene': 'control', 'dose': 0.0, 'batch': 'batch_2', 'plate': 'plate_2', 'day': 'day_2'},
+        
+        # Controls - cellline_B
+        {'control': True, 'cellline': 'cellline_B', 'drug': 'control', 'gene': 'control', 'dose': 0.0, 'batch': 'batch_1', 'plate': 'plate_2', 'day': 'day_1'},
+        {'control': True, 'cellline': 'cellline_B', 'drug': 'control', 'gene': 'control', 'dose': 0.0, 'batch': 'batch_2', 'plate': 'plate_2', 'day': 'day_3'},
+        
+        # cellline_A + drug_A, low dose
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'drug_A', 'gene': 'control', 'dose': 1.0, 'batch': 'batch_1', 'plate': 'plate_1', 'day': 'day_1'},
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'drug_A', 'gene': 'control', 'dose': 1.0, 'batch': 'batch_1', 'plate': 'plate_1', 'day': 'day_2'},
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'drug_A', 'gene': 'control', 'dose': 1.0, 'batch': 'batch_2', 'plate': 'plate_2', 'day': 'day_1'},
+        
+        # cellline_A + drug_A, high dose
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'drug_A', 'gene': 'control', 'dose': 100.0, 'batch': 'batch_1', 'plate': 'plate_1', 'day': 'day_1'},
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'drug_A', 'gene': 'control', 'dose': 100.0, 'batch': 'batch_2', 'plate': 'plate_3', 'day': 'day_2'},
+        
+        # cellline_A + gene_A knockout
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'control', 'gene': 'gene_A', 'dose': 0.0, 'batch': 'batch_1', 'plate': 'plate_1', 'day': 'day_1'},
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'control', 'gene': 'gene_A', 'dose': 0.0, 'batch': 'batch_2', 'plate': 'plate_2', 'day': 'day_3'},
+        
+        # cellline_B + drug_B, mid dose
+        {'control': False, 'cellline': 'cellline_B', 'drug': 'drug_B', 'gene': 'control', 'dose': 10.0, 'batch': 'batch_1', 'plate': 'plate_2', 'day': 'day_1'},
+        {'control': False, 'cellline': 'cellline_B', 'drug': 'drug_B', 'gene': 'control', 'dose': 10.0, 'batch': 'batch_1', 'plate': 'plate_2', 'day': 'day_2'},
+        {'control': False, 'cellline': 'cellline_B', 'drug': 'drug_B', 'gene': 'control', 'dose': 10.0, 'batch': 'batch_3', 'plate': 'plate_3', 'day': 'day_1'},
+        
+        # cellline_B + gene_B knockout
+        {'control': False, 'cellline': 'cellline_B', 'drug': 'control', 'gene': 'gene_B', 'dose': 0.0, 'batch': 'batch_2', 'plate': 'plate_2', 'day': 'day_1'},
+        
+        # Combination: cellline_A + drug_A + gene_A
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'drug_A', 'gene': 'gene_A', 'dose': 10.0, 'batch': 'batch_1', 'plate': 'plate_1', 'day': 'day_1'},
+        {'control': False, 'cellline': 'cellline_A', 'drug': 'drug_A', 'gene': 'gene_A', 'dose': 10.0, 'batch': 'batch_2', 'plate': 'plate_2', 'day': 'day_2'},
+        
+        # Combination: cellline_B + drug_B + gene_B
+        {'control': False, 'cellline': 'cellline_B', 'drug': 'drug_B', 'gene': 'gene_B', 'dose': 10.0, 'batch': 'batch_3', 'plate': 'plate_3', 'day': 'day_1'},
+    ]
+    
+    n_obs = len(data)
+    n_vars = 20
+    n_pca = 10
+    
+    obs = pd.DataFrame(data)
+    
+    # Convert to categorical
+    for col in ['cellline', 'drug', 'gene', 'batch', 'plate', 'day']:
+        obs[col] = obs[col].astype('category')
+    
+    # Simple X matrix (not really used in tests, just needs to exist)
+    X = np.random.randn(n_obs, n_vars).astype(np.float32)
+    
+    # X_pca: Put cell index at position [idx, 0] for easy tracing
+    X_pca = np.zeros((n_obs, n_pca), dtype=np.float32)
+    for i in range(n_obs):
+        X_pca[i, 0] = float(i)  # Cell 0 has value 0, cell 1 has value 1, etc.
+    
+    # Create AnnData
+    adata = ad.AnnData(X=X, obs=obs)
+    adata.obsm['X_pca'] = X_pca
+    
+    # Simple embeddings
+    adata.uns['cellline_embeddings'] = {
+        'cellline_A': np.array([1.0, 0.0], dtype=np.float32),
+        'cellline_B': np.array([0.0, 1.0], dtype=np.float32),
+    }
+    
+    adata.uns['drug_embeddings'] = {
+        'drug_A': np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        'drug_B': np.array([0.0, 1.0, 0.0], dtype=np.float32),
+        'control': np.array([0.0, 0.0, 0.0], dtype=np.float32),
+    }
+    
+    adata.uns['gene_embeddings'] = {
+        'gene_A': np.array([1.0, 0.0], dtype=np.float32),
+        'gene_B': np.array([0.0, 1.0], dtype=np.float32),
+        'control': np.array([0.0, 0.0], dtype=np.float32),
+    }
+    
+    return adata
 
+
+@pytest.fixture
+def test_adata():
+    """Fixture to provide test AnnData."""
+    return create_test_adata()
+
+
+class TestDataManagerBasic:
+    """Test basic DataManager functionality."""
+    
+    def test_prepare_data_basic(self, test_adata):
+        """Test that prepare_data works and returns correct structure."""
+        adl = AnnDataLocation()
+        
         dm = DataManager(
-            adata_perturbation,
-            sample_rep=sample_rep,
-            split_covariates=split_covariates,
-            control_key="control",
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-            sample_covariates=sample_covariates,
+            dist_flag_key='control',
+            src_dist_keys=['cellline'],
+            tgt_dist_keys=['drug', 'gene'],
+            rep_keys={
+                'cellline': 'cellline_embeddings',
+                'drug': 'drug_embeddings',
+                'gene': 'gene_embeddings',
+            },
+            data_location=adl.obsm['X_pca'],
         )
-        assert isinstance(dm, DataManager)
-        assert dm._sample_rep == sample_rep
-        assert dm._control_key == "control"
-        assert dm._split_covariates == split_covariates
-        assert dm._perturbation_covariates == perturbation_covariates
-        assert dm._sample_covariates == sample_covariates
-
-    @pytest.mark.parametrize("el_to_delete", ["drug", "cell_type"])
-    def test_raise_false_uns_dict(self, adata_perturbation: ad.AnnData, el_to_delete):
-        from scaleflow.data._datamanager import DataManager
-
-        sample_rep = "X"
-        split_covariates = ["cell_type"]
-        control_key = "control"
-        perturbation_covariates = {"drug": ("drug_a", "drug_b")}
-        perturbation_covariate_reps = {"drug": "drug"}
-        sample_covariates = ["cell_type"]
-        sample_covariate_reps = {"cell_type": "cell_type"}
-
-        if el_to_delete == "drug":
-            del adata_perturbation.uns["drug"]
-        if el_to_delete == "cell_type":
-            del adata_perturbation.uns["cell_type"]
-
-        with pytest.raises(ValueError, match=r".*representation.*not found.*"):
-            _ = DataManager(
-                adata_perturbation,
-                sample_rep=sample_rep,
-                split_covariates=split_covariates,
-                control_key=control_key,
-                perturbation_covariates=perturbation_covariates,
-                perturbation_covariate_reps=perturbation_covariate_reps,
-                sample_covariates=sample_covariates,
-                sample_covariate_reps=sample_covariate_reps,
-            )
-
-    @pytest.mark.parametrize("el_to_delete", ["drug_b", "dosage_a"])
-    def test_raise_covar_mismatch(self, adata_perturbation: ad.AnnData, el_to_delete):
-        from scaleflow.data._datamanager import DataManager
-
-        sample_rep = "X"
-        split_covariates = ["cell_type"]
-        control_key = "control"
-        perturbation_covariate_reps = {"drug": "drug"}
-        perturbation_covariates = {
-            "drug": ["drug_a", "drug_b"],
-            "dosage": ["dosage_a", "dosage_b"],
-        }
-        if el_to_delete == "drug_b":
-            perturbation_covariates["drug"] = ["drug_b"]
-        if el_to_delete == "dosage_a":
-            perturbation_covariates["dosage"] = ["dosage_b"]
-
-        with pytest.raises(ValueError, match=r".*perturbation covariate groups must match.*"):
-            _ = DataManager(
-                adata_perturbation,
-                sample_rep=sample_rep,
-                split_covariates=split_covariates,
-                control_key=control_key,
-                perturbation_covariates=perturbation_covariates,
-                perturbation_covariate_reps=perturbation_covariate_reps,
-            )
-
-    def test_raise_target_without_source(self, adata_perturbation: ad.AnnData):
-        from scaleflow.data._datamanager import DataManager
-
-        sample_rep = "X"
-        split_covariates = ["cell_type"]
-        control_key = "control"
-        perturbation_covariate_reps = {"drug": "drug"}
-        perturbation_covariates = {
-            "drug": ["drug_a", "drug_b"],
-            "dosage": ["dosage_a", "dosage_b"],
-        }
-
-        adata_perturbation.obs.loc[
-            (~adata_perturbation.obs["control"]) & (adata_perturbation.obs["cell_type"] == "cell_line_a"),
-            "cell_type",
-        ] = "cell_line_b"
-
-        with pytest.raises(
-            ValueError,
-            match=r"Source distribution with split covariate values \{\('cell_line_a',\)\} do not have a corresponding target distribution.",
-        ):
-            _ = DataManager(
-                adata_perturbation,
-                sample_rep=sample_rep,
-                split_covariates=split_covariates,
-                control_key=control_key,
-                perturbation_covariates=perturbation_covariates,
-                perturbation_covariate_reps=perturbation_covariate_reps,
-            )
-
-    @pytest.mark.parametrize("sample_rep", ["X", "X_pca"])
-    @pytest.mark.parametrize("split_covariates", [[], ["cell_type"]])
-    @pytest.mark.parametrize("perturbation_covariates", perturbation_covariates_args)
-    @pytest.mark.parametrize("perturbation_covariate_reps", [{}, {"drug": "drug"}])
-    @pytest.mark.parametrize("sample_covariates", [[], ["dosage_c"]])
-    def test_get_train_data(
-        self,
-        adata_perturbation: ad.AnnData,
-        sample_rep,
-        split_covariates,
-        perturbation_covariates,
-        perturbation_covariate_reps,
-        sample_covariates,
-    ):
-        from scaleflow.data._data import TrainingData
-        from scaleflow.data._datamanager import DataManager
-
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep=sample_rep,
-            split_covariates=split_covariates,
-            control_key="control",
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-            sample_covariates=sample_covariates,
-        )
-
-        assert isinstance(dm, DataManager)
-        assert dm._sample_rep == sample_rep
-        assert dm._control_key == "control"
-        assert dm._split_covariates == split_covariates
-        assert dm._perturbation_covariates == perturbation_covariates
-        assert dm._sample_covariates == sample_covariates
-
-        train_data = dm.get_train_data(adata_perturbation)
-        assert isinstance(train_data, TrainingData)
-        assert isinstance(train_data, TrainingData)
-        assert ((train_data.perturbation_covariates_mask == -1) + (train_data.split_covariates_mask == -1)).all()
-        if split_covariates == []:
-            assert train_data.n_controls == 1
-        if split_covariates == ["cell_type"]:
-            assert train_data.n_controls == len(adata_perturbation.obs["cell_type"].cat.categories)
-
-        assert isinstance(train_data.condition_data, dict)
-        assert isinstance(list(train_data.condition_data.values())[0], np.ndarray)
-        assert train_data.max_combination_length == 1
-
-        if sample_covariates == [] and perturbation_covariates == {"drug": ("drug1",)}:
-            assert (
-                train_data.n_perturbations
-                == (len(adata_perturbation.obs["drug1"].cat.categories) - 1) * train_data.n_controls
-            )
-        assert isinstance(train_data.cell_data, np.ndarray)
-        assert isinstance(train_data.split_covariates_mask, np.ndarray)
-        assert isinstance(train_data.split_idx_to_covariates, dict)
-        assert isinstance(train_data.perturbation_covariates_mask, np.ndarray)
-        assert isinstance(train_data.perturbation_idx_to_covariates, dict)
-        assert isinstance(train_data.control_to_perturbation, dict)
-
-    @pytest.mark.parametrize("split_covariates", [[], ["cell_type"]])
-    @pytest.mark.parametrize("perturbation_covariates", perturbation_covariate_comb_args)
-    @pytest.mark.parametrize("perturbation_covariate_reps", [{}, {"drug": "drug"}])
-    def test_get_train_data_with_combinations(
-        self,
-        adata_perturbation: ad.AnnData,
-        split_covariates,
-        perturbation_covariates,
-        perturbation_covariate_reps,
-    ):
-        from scaleflow.data._datamanager import DataManager
-
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=split_covariates,
-            control_key="control",
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-            sample_covariates=["cell_type"],
-            sample_covariate_reps={"cell_type": "cell_type"},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
-        assert ((train_data.perturbation_covariates_mask == -1) + (train_data.split_covariates_mask == -1)).all()
-
-        if split_covariates == []:
-            assert train_data.n_controls == 1
-        if split_covariates == ["cell_type"]:
-            assert train_data.n_controls == len(adata_perturbation.obs["cell_type"].cat.categories)
-
-        assert isinstance(train_data.condition_data, dict)
-        assert isinstance(list(train_data.condition_data.values())[0], np.ndarray)
-        assert train_data.max_combination_length == len(perturbation_covariates["drug"])
-
-        for k in perturbation_covariates.keys():
-            assert k in train_data.condition_data.keys()
-            assert train_data.condition_data[k].ndim == 3
-            assert train_data.condition_data[k].shape[1] == train_data.max_combination_length
-            assert train_data.condition_data[k].shape[0] == train_data.n_perturbations
-
-        for k, v in perturbation_covariate_reps.items():
-            assert k in train_data.condition_data.keys()
-            assert train_data.condition_data[v].shape[1] == train_data.max_combination_length
-            assert train_data.condition_data[v].shape[0] == train_data.n_perturbations
-            cov_key = perturbation_covariates[v][0]
-            if cov_key == "drug_a":
-                cov_name = cov_key
-            else:
-                cov_name = adata_perturbation.obs[cov_key].values[0]
-            assert train_data.condition_data[v].shape[2] == adata_perturbation.uns[k][cov_name].shape[0]
-
-        assert isinstance(train_data.cell_data, np.ndarray)
-        assert isinstance(train_data.split_covariates_mask, np.ndarray)
-        assert isinstance(train_data.split_idx_to_covariates, dict)
-        assert isinstance(train_data.perturbation_covariates_mask, np.ndarray)
-        assert isinstance(train_data.perturbation_idx_to_covariates, dict)
-        assert isinstance(train_data.control_to_perturbation, dict)
-
-    @pytest.mark.parametrize("max_combination_length", [0, 4])
-    def test_max_combination_length(self, adata_perturbation, max_combination_length):
-        sample_rep = "X"
-        split_covariates = ["cell_type"]
-        control_key = "control"
-        perturbation_covariates = {"drug": ["drug1"]}
-        perturbation_covariate_reps = {"drug": "drug"}
-
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep=sample_rep,
-            split_covariates=split_covariates,
-            control_key=control_key,
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-            max_combination_length=max_combination_length,
-        )
-
-        train_data = dm.get_train_data(adata_perturbation)
-
-        assert ((train_data.perturbation_covariates_mask == -1) + (train_data.split_covariates_mask == -1)).all()
-
-        expected_max_combination_length = max(max_combination_length, len(perturbation_covariates["drug"]))
-        assert dm._max_combination_length == expected_max_combination_length
-        assert train_data.condition_data["drug"].shape[1] == expected_max_combination_length
-
-
-class TestValidationData:
-    @pytest.mark.parametrize("sample_rep", ["X", "X_pca"])
-    @pytest.mark.parametrize("split_covariates", [[], ["cell_type"]])
-    @pytest.mark.parametrize("perturbation_covariates", perturbation_covariate_comb_args)
-    @pytest.mark.parametrize("perturbation_covariate_reps", [{}, {"drug": "drug"}])
-    def test_get_validation_data(
-        self,
-        adata_perturbation: ad.AnnData,
-        sample_rep,
-        split_covariates,
-        perturbation_covariates,
-        perturbation_covariate_reps,
-    ):
-        from scaleflow.data._datamanager import DataManager
-
-        control_key = "control"
-        sample_covariates = ["cell_type"]
-        sample_covariate_reps = {"cell_type": "cell_type"}
-
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep=sample_rep,
-            split_covariates=split_covariates,
-            control_key=control_key,
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-            sample_covariates=sample_covariates,
-            sample_covariate_reps=sample_covariate_reps,
-        )
-
-        val_data = dm.get_validation_data(adata_perturbation)
-
-        assert isinstance(val_data.cell_data, np.ndarray)
-        assert isinstance(val_data.split_covariates_mask, np.ndarray)
-        assert isinstance(val_data.split_idx_to_covariates, dict)
-        assert isinstance(val_data.perturbation_covariates_mask, np.ndarray)
-        assert isinstance(val_data.perturbation_idx_to_covariates, dict)
-        assert isinstance(val_data.control_to_perturbation, dict)
-        assert val_data.max_combination_length == len(perturbation_covariates["drug"])
-
-        assert isinstance(val_data.condition_data, dict)
-        assert isinstance(list(val_data.condition_data.values())[0], np.ndarray)
-
-        if sample_covariates == [] and perturbation_covariates == {"drug": ("drug1",)}:
-            assert (
-                val_data.n_perturbations
-                == (len(adata_perturbation.obs["drug1"].cat.categories) - 1) * val_data.n_controls
-            )
-
-    @pytest.mark.skip(reason="To discuss: why should it raise an error?")
-    def test_raises_wrong_max_combination_length(self, adata_perturbation):
-        from scaleflow.data._datamanager import DataManager
-
-        max_combination_length = 3
-        adata = adata_perturbation
-        sample_rep = "X"
-        split_covariates = ["cell_type"]
-        control_key = "control"
-        perturbation_covariates = {"drug": ["drug1"]}
-        perturbation_covariate_reps = {"drug": "drug"}
-
-        with pytest.raises(
-            ValueError,
-            match=r".*max_combination_length.*",
-        ):
-            dm = DataManager(
-                adata,
-                sample_rep=sample_rep,
-                split_covariates=split_covariates,
-                control_key=control_key,
-                perturbation_covariates=perturbation_covariates,
-                perturbation_covariate_reps=perturbation_covariate_reps,
-                max_combination_length=max_combination_length,
-            )
-
-            _ = dm.get_validation_data(adata_perturbation)
-
-
-class TestPredictionData:
-    @pytest.mark.parametrize("sample_rep", ["X", "X_pca"])
-    @pytest.mark.parametrize("split_covariates", [[], ["cell_type"]])
-    @pytest.mark.parametrize("perturbation_covariates", perturbation_covariate_comb_args)
-    @pytest.mark.parametrize("perturbation_covariate_reps", [{}, {"drug": "drug"}])
-    def test_get_prediction_data(
-        self,
-        adata_perturbation: ad.AnnData,
-        sample_rep,
-        split_covariates,
-        perturbation_covariates,
-        perturbation_covariate_reps,
-    ):
-        from scaleflow.data._datamanager import DataManager
-
-        control_key = "control"
-        sample_covariates = ["cell_type"]
-        sample_covariate_reps = {"cell_type": "cell_type"}
-
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep=sample_rep,
-            split_covariates=split_covariates,
-            control_key=control_key,
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-            sample_covariates=sample_covariates,
-            sample_covariate_reps=sample_covariate_reps,
-        )
-
-        adata_pred = adata_perturbation[:50].copy()
-        adata_pred.obs["control"] = True
-        pred_data = dm.get_prediction_data(adata_pred, covariate_data=adata_pred.obs, sample_rep=sample_rep)
-
-        assert isinstance(pred_data.cell_data, np.ndarray)
-        assert isinstance(pred_data.split_covariates_mask, np.ndarray)
-        assert isinstance(pred_data.split_idx_to_covariates, dict)
-        assert isinstance(pred_data.perturbation_idx_to_covariates, dict)
-        assert isinstance(pred_data.control_to_perturbation, dict)
-        assert pred_data.max_combination_length == len(perturbation_covariates["drug"])
-
-        assert isinstance(pred_data.condition_data, dict)
-        assert isinstance(list(pred_data.condition_data.values())[0], np.ndarray)
-
-        if sample_covariates == [] and perturbation_covariates == {"drug": ("drug1",)}:
-            assert (
-                pred_data.n_perturbations
-                == (len(adata_perturbation.obs["drug1"].cat.categories) - 1) * pred_data.n_controls
-            )
+        
+        gd = dm.prepare_data(test_adata)
+        
+        assert isinstance(gd, GroupedDistribution)
+        # 2 source distributions (cellline_A, cellline_B)
+        assert len(gd.data.src_data) == 2
+        # Multiple target distributions
+        assert len(gd.data.tgt_data) > 0
+        
+        # Test target mapping correctness
+        # Verify that src_to_tgt_dist_map exists for each source
+        assert len(gd.data.src_to_tgt_dist_map) == 2
+        
+        # Each source should have at least one target
+        for src_idx, tgt_indices in gd.data.src_to_tgt_dist_map.items():
+            assert len(tgt_indices) > 0, f"Source {src_idx} has no targets"
+            # All target indices should exist in tgt_data
+            for tgt_idx in tgt_indices:
+                assert tgt_idx in gd.data.tgt_data, f"Target {tgt_idx} not in tgt_data"
+        
+        # Verify that targets are correctly mapped to their source celllines
+        # using the src_tgt_dist_df
+        src_tgt_df = gd.annotation.src_tgt_dist_df
+        
+        # For each target, verify it belongs to the correct source
+        for _, row in src_tgt_df.iterrows():
+            src_idx = row['src_dist_idx']
+            tgt_idx = row['tgt_dist_idx']
+            
+            # Target should be in the source's target list
+            assert tgt_idx in gd.data.src_to_tgt_dist_map[src_idx], \
+                f"Target {tgt_idx} not found in source {src_idx}'s mapping"
+            
+            # Verify that the cellline in target matches the source cellline
+            src_label = gd.annotation.src_dist_idx_to_labels[src_idx]
+            tgt_label = gd.annotation.tgt_dist_idx_to_labels[tgt_idx]
+            
+            # The cellline should match between source and target
+            assert src_label[0] == tgt_label[0], \
+                f"Cellline mismatch: source has {src_label[0]}, target has {tgt_label[0]}"
+    

@@ -8,9 +8,11 @@ from scaleflow.data._dataloader import (
     SamplerABC,
 )
 
-from scaleflow.data._datamanager_new import DataManager
+from scaleflow.data._datamanager import DataManager
+from scaleflow.data._anndata_location import AnnDataLocation
 
 __all__ = [
+    "AnnDataLocation",
     "GroupedDistribution",
     "GroupedDistributionData",
     "GroupedDistributionAnnotation",
