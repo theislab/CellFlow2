@@ -12,7 +12,11 @@ import numpy as np
 from scaleflow.logging import timer
 from ._anndata_location import AnnDataLocation
 
-from scaleflow.data._data import GroupedDistribution, GroupedDistributionData, GroupedDistributionAnnotation
+from scaleflow.data import (
+    GroupedDistribution,
+    GroupedDistributionData,
+    GroupedDistributionAnnotation,
+)
 
 __all__ = ["DataManager"]
 

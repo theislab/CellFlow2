@@ -15,6 +15,7 @@ import optax
 import pandas as pd
 from ott.neural.methods.flows import dynamics
 
+from scaleflow.data import DataManager
 from scaleflow import _constants
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
 from scaleflow.data import GroupedDistribution, GroupedDistributionData, GroupedDistributionAnnotation
@@ -656,22 +657,26 @@ class CellFlow:
             raise ValueError("Model not initialized. Please call `prepare_model` first.")
 
         if out_of_core_dataloading:
-            self._dataloader = JaxOutOfCoreTrainSampler(
-                data=self.train_data,
-                batch_size=batch_size,
-                seed=self._seed,
-                num_workers=num_workers,
-                prefetch_factor=prefetch_factor,
-            )
+            pass # TODO
+            # self._dataloader = JaxOutOfCoreTrainSampler(
+            #     data=self.train_data,
+            #     batch_size=batch_size,
+            #     seed=self._seed,
+            #     num_workers=num_workers,
+            #     prefetch_factor=prefetch_factor,
+            # )
         else:
-            self._dataloader = TrainSampler(data=self.train_data, batch_size=batch_size)
+            pass
+            # self._dataloader = TrainSampler(data=self.train_data, batch_size=batch_size)
 
+        # TODO
         # Pass validation_batch_size to ValidationSampler
-        validation_loaders = {
-            k: ValidationSampler(v, validation_batch_size=validation_batch_size)
-            for k, v in self.validation_data.items()
-            if k != "predict_kwargs"
-        }
+        validation_dataloaders = None
+        # validation_loaders = {
+        #     k: ValidationSampler(v, validation_batch_size=validation_batch_size)
+        #     for k, v in self.validation_data.items()
+        #     if k != "predict_kwargs"
+        # }
 
         self._solver = self.trainer.train(
             dataloader=self._dataloader,
@@ -750,7 +755,9 @@ class CellFlow:
             covariate_data=covariate_data,
             condition_id_key=condition_id_key,
         )
-        pred_loader = PredictionSampler(pred_data)
+        # TODO
+        pred_loader = None
+        # pred_loader = PredictionSampler(pred_data)
         batch = pred_loader.sample()
         src = batch["source"]
         condition = batch.get("condition", None)
@@ -777,7 +784,7 @@ class CellFlow:
 
     def get_condition_embedding(
         self,
-        covariate_data: pd.DataFrame | ConditionData,
+        covariate_data: pd.DataFrame,
         rep_dict: dict[str, str] | None = None,
         condition_id_key: str | None = None,
         key_added: str | None = _constants.CONDITION_EMBEDDING,
@@ -927,7 +934,7 @@ class CellFlow:
         return self._solver
 
     @property
-    def dataloader(self) -> TrainSampler | JaxOutOfCoreTrainSampler | None:
+    def dataloader(self) -> ReservoirSampler | None:
         """The dataloader used for training."""
         return self._dataloader
 
@@ -937,7 +944,7 @@ class CellFlow:
         return self._trainer
 
     @property
-    def validation_data(self) -> dict[str, ValidationData]:
+    def validation_data(self) -> dict[str, GroupedDistribution]:
         """The validation data."""
         return self._validation_data
 
