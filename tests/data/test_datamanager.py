@@ -9,12 +9,12 @@ from scaleflow.data._anndata_location import AnnDataLocation
 
 @pytest.fixture
 def adata_test():
-    drugs = ['control', 'drug_A', 'drug_B']
-    genes = ['control', 'gene_A', 'gene_B']
-    cell_lines = ['cell_line_A', 'cell_line_B']
-    batches = ['batch_1', 'batch_2', 'batch_3']
-    plates = ['plate_1', 'plate_2', 'plate_3']
-    days = ['day_1', 'day_2', 'day_3']
+    drugs = ["control", "drug_A", "drug_B"]
+    genes = ["control", "gene_A", "gene_B"]
+    cell_lines = ["cell_line_A", "cell_line_B"]
+    batches = ["batch_1", "batch_2", "batch_3"]
+    plates = ["plate_1", "plate_2", "plate_3"]
+    days = ["day_1", "day_2", "day_3"]
     doses = [1.0, 10.0, 100.0]
 
     rows = []
@@ -24,29 +24,33 @@ def adata_test():
                 for batch in batches:
                     for plate in plates:
                         for day in days:
-                            if drug != 'control':
+                            if drug != "control":
                                 for dose in doses:
-                                    rows.append({
-                                        'drug': drug,
-                                        'gene': gene,
-                                        'cell_line': cell_line,
-                                        'batch': batch,
-                                        'plate': plate,
-                                        'day': day,
-                                        'dose': dose,
-                                        'control': False
-                                    })
+                                    rows.append(
+                                        {
+                                            "drug": drug,
+                                            "gene": gene,
+                                            "cell_line": cell_line,
+                                            "batch": batch,
+                                            "plate": plate,
+                                            "day": day,
+                                            "dose": dose,
+                                            "control": False,
+                                        }
+                                    )
                             else:
-                                rows.append({
-                                    'drug': drug,
-                                    'gene': gene,
-                                    'cell_line': cell_line,
-                                    'batch': batch,
-                                    'plate': plate,
-                                    'day': day,
-                                    'dose': 0.0,
-                                    'control': gene == 'control' and drug == 'control'
-                                })
+                                rows.append(
+                                    {
+                                        "drug": drug,
+                                        "gene": gene,
+                                        "cell_line": cell_line,
+                                        "batch": batch,
+                                        "plate": plate,
+                                        "day": day,
+                                        "dose": 0.0,
+                                        "control": gene == "control" and drug == "control",
+                                    }
+                                )
 
     n_obs = len(rows)
     n_vars = 20
@@ -132,27 +136,24 @@ class TestDataManagerBasic:
         #   1	14	cell_line_B	drug_B	gene_A
         #   1	15	cell_line_B	drug_B	gene_B
 
-        expected_src_data = {
-            0: ('cell_line_A',),
-            1: ('cell_line_B',)
-        }
+        expected_src_data = {0: ("cell_line_A",), 1: ("cell_line_B",)}
         expected_tgt_data = {
-            0: ('drug_A', 'control'),
-            1: ('drug_B', 'control'),
-            2: ('gene_A', 'control'),
-            3: ('gene_B', 'control'),
-            4: ('drug_A', 'gene_A'),
-            5: ('drug_A', 'gene_B'),
-            6: ('drug_B', 'gene_A'),
-            7: ('drug_B', 'gene_B'),
-            8: ('drug_A', 'control'),
-            9: ('drug_B', 'control'),
-            10: ('gene_A', 'control'),
-            11: ('gene_B', 'control'),
-            12: ('drug_A', 'gene_A'),
-            13: ('drug_A', 'gene_B'),
-            14: ('drug_B', 'gene_A'),
-            15: ('drug_B', 'gene_B'),
+            0: ("drug_A", "control"),
+            1: ("drug_B", "control"),
+            2: ("gene_A", "control"),
+            3: ("gene_B", "control"),
+            4: ("drug_A", "gene_A"),
+            5: ("drug_A", "gene_B"),
+            6: ("drug_B", "gene_A"),
+            7: ("drug_B", "gene_B"),
+            8: ("drug_A", "control"),
+            9: ("drug_B", "control"),
+            10: ("gene_A", "control"),
+            11: ("gene_B", "control"),
+            12: ("drug_A", "gene_A"),
+            13: ("drug_A", "gene_B"),
+            14: ("drug_B", "gene_A"),
+            15: ("drug_B", "gene_B"),
         }
         expected_mapping = {
             0: {0, 1, 2, 3, 4, 5, 6, 7},
@@ -188,6 +189,62 @@ class TestDataManagerBasic:
             assert tgt_idx in gd.data.src_to_tgt_dist_map[src_idx], (
                 f"Target {tgt_idx} not found in source {src_idx}'s mapping"
             )
-            assert tgt_idx in expected_mapping[src_idx], (
-                f"Target {tgt_idx} not found in source {src_idx}'s mapping"
-            )
+            assert tgt_idx in expected_mapping[src_idx], f"Target {tgt_idx} not found in source {src_idx}'s mapping"
+
+    def test_ordering_reconstruction_after_shuffle(self, adata_test):
+        """Test that we can reconstruct original ordering after shuffling."""
+        # Store original order information
+        original_index = adata_test.obs.index.to_numpy().copy()
+        original_X_pca = adata_test.obsm["X_pca"].copy()
+
+        # Shuffle the adata
+        shuffle_idx = np.random.permutation(len(adata_test))
+        adata_shuffled = adata_test[shuffle_idx].copy()
+
+        # Verify it's actually shuffled (should not be identical for reasonable dataset sizes)
+        assert not np.array_equal(adata_shuffled.obs.index.to_numpy(), original_index), "Data should be shuffled"
+
+        # Create DataManager and prepare data
+        adl = AnnDataLocation()
+        dm = DataManager(
+            dist_flag_key="control",
+            src_dist_keys=["cell_line"],
+            tgt_dist_keys=["drug", "gene"],
+            rep_keys={
+                "cell_line": "cell_line_embeddings",
+                "drug": "drug_embeddings",
+                "gene": "gene_embeddings",
+            },
+            data_location=adl.obsm["X_pca"],
+        )
+
+        gd = dm.prepare_data(adata_shuffled)
+
+        # Test 1: old_obs_index should map from sorted order back to shuffled AnnData index
+        assert len(gd.annotation.old_obs_index) == len(adata_shuffled)
+        assert np.all(np.isin(gd.annotation.old_obs_index, adata_shuffled.obs.index.to_numpy())), (
+            "old_obs_index should contain valid indices from shuffled adata"
+        )
+
+        # Verify: For each position in the sorted data, the old_obs_index tells us
+        # which original (shuffled adata) index it came from
+        for _, old_idx in enumerate(gd.annotation.old_obs_index):
+            # Find the corresponding cell in the shuffled adata
+            shuffled_pos = np.where(adata_shuffled.obs.index == old_idx)[0][0]
+
+            # The first element of X_pca contains the original cell index from adata_test
+            # (this was set up in the fixture)
+            original_cell_id = adata_shuffled.obsm["X_pca"][shuffled_pos, 0]
+
+            # This should match the original unshuffled data
+            assert original_cell_id == original_X_pca[np.where(original_index == old_idx)[0][0], 0]
+
+        # Test 3: Verify we can fully reconstruct the mapping
+        # Create inverse mapping: from old_obs_index position -> shuffled adata position
+        old_idx_to_shuffled_pos = {
+            old_idx: np.where(adata_shuffled.obs.index == old_idx)[0][0] for old_idx in gd.annotation.old_obs_index
+        }
+
+        # This should cover all cells in the shuffled adata
+        assert len(old_idx_to_shuffled_pos) == len(adata_shuffled)
+
