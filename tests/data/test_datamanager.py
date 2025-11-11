@@ -7,225 +7,52 @@ from scaleflow.data import DataManager, GroupedDistribution
 from scaleflow.data._anndata_location import AnnDataLocation
 
 
-def create_test_adata() -> ad.AnnData:
-    """
-    Create test AnnData with simple, traceable values for testing data splitting.
+@pytest.fixture
+def adata_test():
+    drugs = ['control', 'drug_A', 'drug_B']
+    genes = ['control', 'gene_A', 'gene_B']
+    cell_lines = ['cell_line_A', 'cell_line_B']
+    batches = ['batch_1', 'batch_2', 'batch_3']
+    plates = ['plate_1', 'plate_2', 'plate_3']
+    days = ['day_1', 'day_2', 'day_3']
+    doses = [1.0, 10.0, 100.0]
 
-    Key design:
-    - X_pca: cell index embedded at position [idx, 0] for easy tracing (cell 0 has value 0, cell 1 has value 1, etc.)
-    - Simple names: cell_line_A, drug_A, gene_A, etc.
-    - Multiple metadata columns (batch, plate, day) for testing different split strategies
-    - Known perturbation combinations
-    """
+    rows = []
+    for drug in drugs:
+        for gene in genes:
+            for cell_line in cell_lines:
+                for batch in batches:
+                    for plate in plates:
+                        for day in days:
+                            if drug != 'control':
+                                for dose in doses:
+                                    rows.append({
+                                        'drug': drug,
+                                        'gene': gene,
+                                        'cell_line': cell_line,
+                                        'batch': batch,
+                                        'plate': plate,
+                                        'day': day,
+                                        'dose': dose,
+                                        'control': False
+                                    })
+                            else:
+                                rows.append({
+                                    'drug': drug,
+                                    'gene': gene,
+                                    'cell_line': cell_line,
+                                    'batch': batch,
+                                    'plate': plate,
+                                    'day': day,
+                                    'dose': 0.0,
+                                    'control': gene == 'control' and drug == 'control'
+                                })
 
-    # Define explicit test cases
-    data = [
-        # Controls - cell_line_A
-        {
-            "control": True,
-            "cell_line": "cell_line_A",
-            "drug": "control",
-            "gene": "control",
-            "dose": 0.0,
-            "batch": "batch_1",
-            "plate": "plate_1",
-            "day": "day_1",
-        },
-        {
-            "control": True,
-            "cell_line": "cell_line_A",
-            "drug": "control",
-            "gene": "control",
-            "dose": 0.0,
-            "batch": "batch_1",
-            "plate": "plate_1",
-            "day": "day_1",
-        },
-        {
-            "control": True,
-            "cell_line": "cell_line_A",
-            "drug": "control",
-            "gene": "control",
-            "dose": 0.0,
-            "batch": "batch_2",
-            "plate": "plate_2",
-            "day": "day_2",
-        },
-        # Controls - cell_line_B
-        {
-            "control": True,
-            "cell_line": "cell_line_B",
-            "drug": "control",
-            "gene": "control",
-            "dose": 0.0,
-            "batch": "batch_1",
-            "plate": "plate_2",
-            "day": "day_1",
-        },
-        {
-            "control": True,
-            "cell_line": "cell_line_B",
-            "drug": "control",
-            "gene": "control",
-            "dose": 0.0,
-            "batch": "batch_2",
-            "plate": "plate_2",
-            "day": "day_3",
-        },
-        # cell_line_A + drug_A, low dose
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "drug_A",
-            "gene": "control",
-            "dose": 1.0,
-            "batch": "batch_1",
-            "plate": "plate_1",
-            "day": "day_1",
-        },
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "drug_A",
-            "gene": "control",
-            "dose": 1.0,
-            "batch": "batch_1",
-            "plate": "plate_1",
-            "day": "day_2",
-        },
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "drug_A",
-            "gene": "control",
-            "dose": 1.0,
-            "batch": "batch_2",
-            "plate": "plate_2",
-            "day": "day_1",
-        },
-        # cell_line_A + drug_A, high dose
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "drug_A",
-            "gene": "control",
-            "dose": 100.0,
-            "batch": "batch_1",
-            "plate": "plate_1",
-            "day": "day_1",
-        },
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "drug_A",
-            "gene": "control",
-            "dose": 100.0,
-            "batch": "batch_2",
-            "plate": "plate_3",
-            "day": "day_2",
-        },
-        # cell_line_A + gene_A knockout
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "control",
-            "gene": "gene_A",
-            "dose": 0.0,
-            "batch": "batch_1",
-            "plate": "plate_1",
-            "day": "day_1",
-        },
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "control",
-            "gene": "gene_A",
-            "dose": 0.0,
-            "batch": "batch_2",
-            "plate": "plate_2",
-            "day": "day_3",
-        },
-        # cell_line_B + drug_B, mid dose
-        {
-            "control": False,
-            "cell_line": "cell_line_B",
-            "drug": "drug_B",
-            "gene": "control",
-            "dose": 10.0,
-            "batch": "batch_1",
-            "plate": "plate_2",
-            "day": "day_1",
-        },
-        {
-            "control": False,
-            "cell_line": "cell_line_B",
-            "drug": "drug_B",
-            "gene": "control",
-            "dose": 10.0,
-            "batch": "batch_1",
-            "plate": "plate_2",
-            "day": "day_2",
-        },
-        {
-            "control": False,
-            "cell_line": "cell_line_B",
-            "drug": "drug_B",
-            "gene": "control",
-            "dose": 10.0,
-            "batch": "batch_3",
-            "plate": "plate_3",
-            "day": "day_1",
-        },
-        # cell_line_B + gene_B knockout
-        {
-            "control": False,
-            "cell_line": "cell_line_B",
-            "drug": "control",
-            "gene": "gene_B",
-            "dose": 0.0,
-            "batch": "batch_2",
-            "plate": "plate_2",
-            "day": "day_1",
-        },
-        # Combination: cell_line_A + drug_A + gene_A
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "drug_A",
-            "gene": "gene_A",
-            "dose": 10.0,
-            "batch": "batch_1",
-            "plate": "plate_1",
-            "day": "day_1",
-        },
-        {
-            "control": False,
-            "cell_line": "cell_line_A",
-            "drug": "drug_A",
-            "gene": "gene_A",
-            "dose": 10.0,
-            "batch": "batch_2",
-            "plate": "plate_2",
-            "day": "day_2",
-        },
-        # Combination: cell_line_B + drug_B + gene_B
-        {
-            "control": False,
-            "cell_line": "cell_line_B",
-            "drug": "drug_B",
-            "gene": "gene_B",
-            "dose": 10.0,
-            "batch": "batch_3",
-            "plate": "plate_3",
-            "day": "day_1",
-        },
-    ]
-
-    n_obs = len(data)
+    n_obs = len(rows)
     n_vars = 20
     n_pca = 10
 
-    obs = pd.DataFrame(data)
+    obs = pd.DataFrame(rows)
 
     # Convert to categorical
     for col in ["cell_line", "drug", "gene", "batch", "plate", "day"]:
@@ -264,16 +91,10 @@ def create_test_adata() -> ad.AnnData:
     return adata
 
 
-@pytest.fixture
-def test_adata():
-    """Fixture to provide test AnnData."""
-    return create_test_adata()
-
-
 class TestDataManagerBasic:
     """Test basic DataManager functionality."""
 
-    def test_prepare_data_basic(self, test_adata):
+    def test_prepare_data_basic(self, adata_test):
         """Test that prepare_data works and returns correct structure."""
         adl = AnnDataLocation()
 
@@ -289,17 +110,64 @@ class TestDataManagerBasic:
             data_location=adl.obsm["X_pca"],
         )
 
-        gd = dm.prepare_data(test_adata)
+        gd = dm.prepare_data(adata_test)
 
         assert isinstance(gd, GroupedDistribution)
-        # 2 source distributions (cell_line_A, cell_line_B)
-        assert len(gd.data.src_data) == 2
-        # Multiple target distributions
-        assert len(gd.data.tgt_data) > 0
+
+        # src_dist_idx	tgt_dist_idx	cell_line	drug	gene
+        #   0	0	cell_line_A	control	gene_A
+        #   0	1	cell_line_A	control	gene_B
+        #   0	2	cell_line_A	drug_A	control
+        #   0	3	cell_line_A	drug_A	gene_A
+        #   0	4	cell_line_A	drug_A	gene_B
+        #   0	5	cell_line_A	drug_B	control
+        #   0	6	cell_line_A	drug_B	gene_A
+        #   0	7	cell_line_A	drug_B	gene_B
+        #   1	8	cell_line_B	control	gene_A
+        #   1	9	cell_line_B	control	gene_B
+        #   1	10	cell_line_B	drug_A	control
+        #   1	11	cell_line_B	drug_A	gene_A
+        #   1	12	cell_line_B	drug_A	gene_B
+        #   1	13	cell_line_B	drug_B	control
+        #   1	14	cell_line_B	drug_B	gene_A
+        #   1	15	cell_line_B	drug_B	gene_B
+
+        expected_src_data = {
+            0: ('cell_line_A',),
+            1: ('cell_line_B',)
+        }
+        expected_tgt_data = {
+            0: ('drug_A', 'control'),
+            1: ('drug_B', 'control'),
+            2: ('gene_A', 'control'),
+            3: ('gene_B', 'control'),
+            4: ('drug_A', 'gene_A'),
+            5: ('drug_A', 'gene_B'),
+            6: ('drug_B', 'gene_A'),
+            7: ('drug_B', 'gene_B'),
+            8: ('drug_A', 'control'),
+            9: ('drug_B', 'control'),
+            10: ('gene_A', 'control'),
+            11: ('gene_B', 'control'),
+            12: ('drug_A', 'gene_A'),
+            13: ('drug_A', 'gene_B'),
+            14: ('drug_B', 'gene_A'),
+            15: ('drug_B', 'gene_B'),
+        }
+        expected_mapping = {
+            0: {0, 1, 2, 3, 4, 5, 6, 7},
+            1: {8, 9, 10, 11, 12, 13, 14, 15},
+        }
+
+        assert len(gd.data.src_data) == len(expected_src_data)
+        assert len(gd.data.tgt_data) == len(expected_tgt_data)
 
         # Test target mapping correctness
         # Verify that src_to_tgt_dist_map exists for each source
-        assert len(gd.data.src_to_tgt_dist_map) == 2
+        assert len(gd.data.src_to_tgt_dist_map) == len(expected_src_data)
+
+        # sum of the values in src_to_tgt_dist_map should be equal to the number of target distributions
+        assert sum(len(v) for v in gd.data.src_to_tgt_dist_map.values()) == len(expected_tgt_data)
 
         # Each source should have at least one target
         for src_idx, tgt_indices in gd.data.src_to_tgt_dist_map.items():
@@ -316,17 +184,10 @@ class TestDataManagerBasic:
         for _, row in src_tgt_df.iterrows():
             src_idx = row["src_dist_idx"]
             tgt_idx = row["tgt_dist_idx"]
-
             # Target should be in the source's target list
             assert tgt_idx in gd.data.src_to_tgt_dist_map[src_idx], (
                 f"Target {tgt_idx} not found in source {src_idx}'s mapping"
             )
-
-            # Verify that the cell_line in target matches the source cell_line
-            src_label = gd.annotation.src_dist_idx_to_labels[src_idx]
-            tgt_label = gd.annotation.tgt_dist_idx_to_labels[tgt_idx]
-
-            # The cell_line should match between source and target
-            assert src_label[0] == tgt_label[0], (
-                f"cell_line mismatch: source has {src_label[0]}, target has {tgt_label[0]}"
+            assert tgt_idx in expected_mapping[src_idx], (
+                f"Target {tgt_idx} not found in source {src_idx}'s mapping"
             )

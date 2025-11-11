@@ -73,13 +73,13 @@ class DataManager:
             obs.sort_values(cols, inplace=True)
 
         obs["src_dist_idx"] = obs.groupby(self.src_dist_keys, observed=False).ngroup()
-        obs["tgt_dist_idx"] = obs.groupby(src_tgt_dist_keys, observed=False).ngroup()
+        dist_mask = ~obs[self.dist_flag_key]
+        obs.loc[dist_mask, "tgt_dist_idx"] = obs.loc[dist_mask].groupby(src_tgt_dist_keys, observed=False).ngroup()
 
         # Fill NaN indices with a specific value before casting
         obs["src_dist_idx"] = obs["src_dist_idx"].fillna(-1).astype(np.int32)
         obs["tgt_dist_idx"] = obs["tgt_dist_idx"].fillna(-1).astype(np.int32)
 
-        print(obs)
         # preparing for src_to_tgt_dist_map
         src_tgt_dist_df = obs.loc[~obs[self.dist_flag_key]]
         src_tgt_dist_df = src_tgt_dist_df[["src_dist_idx", "tgt_dist_idx", *src_tgt_dist_keys]]
