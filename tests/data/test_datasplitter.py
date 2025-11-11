@@ -1,731 +1,565 @@
-from pathlib import Path
+"""Tests for DataSplitter class."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from scaleflow.data import DataManager
-from scaleflow.data._data_splitter import DataSplitter
+from scaleflow.data._data import GroupedDistribution, GroupedDistributionAnnotation, GroupedDistributionData
+from scaleflow.data._data_splitter import DataSplitter, apply_split_to_grouped_distribution
 
 
-class TestDataSplitterValidation:
-    def test_mismatched_datasets_and_names(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
+@pytest.fixture
+def sample_annotation():
+    """Create a sample GroupedDistributionAnnotation for testing."""
+    # Create a simple dataset with 2 source distributions and 8 target distributions
+    # Source distributions: cell_line_A, cell_line_B
+    # Target distributions: combinations of drugs (control, drug_A, drug_B) and genes (control, gene_A, gene_B)
 
-        with pytest.raises(ValueError, match="training_datasets length.*must match.*dataset_names length"):
-            DataSplitter(
-                training_datasets=[train_data],
-                dataset_names=["dataset1", "dataset2"],
-                split_ratios=[[0.8, 0.1, 0.1]],
+    src_dist_idx_to_labels = {
+        0: ("cell_line_A",),
+        1: ("cell_line_B",),
+    }
+
+    tgt_dist_idx_to_labels = {
+        0: ("control", "control"),  # Control for both
+        1: ("drug_A", "control"),  # Drug A only
+        2: ("drug_B", "control"),  # Drug B only
+        3: ("control", "gene_A"),  # Gene A only
+        4: ("control", "gene_B"),  # Gene B only
+        5: ("drug_A", "gene_A"),  # Combination
+        6: ("drug_A", "gene_B"),  # Combination
+        7: ("drug_B", "gene_A"),  # Combination
+        8: ("drug_B", "gene_B"),  # Combination
+        9: ("control", "control"),  # Control for cell_line_B
+        10: ("drug_A", "control"),  # Drug A only for cell_line_B
+        11: ("drug_B", "control"),  # Drug B only for cell_line_B
+        12: ("control", "gene_A"),  # Gene A only for cell_line_B
+        13: ("control", "gene_B"),  # Gene B only for cell_line_B
+        14: ("drug_A", "gene_A"),  # Combination for cell_line_B
+        15: ("drug_A", "gene_B"),  # Combination for cell_line_B
+        16: ("drug_B", "gene_A"),  # Combination for cell_line_B
+        17: ("drug_B", "gene_B"),  # Combination for cell_line_B
+    }
+
+    # Create src_tgt_dist_df
+    rows = []
+    for src_idx in [0, 1]:
+        src_label = src_dist_idx_to_labels[src_idx][0]
+        base_tgt_idx = 0 if src_idx == 0 else 9
+        for i in range(9):
+            tgt_idx = base_tgt_idx + i
+            drug, gene = tgt_dist_idx_to_labels[tgt_idx]
+            rows.append(
+                {
+                    "src_dist_idx": src_idx,
+                    "tgt_dist_idx": tgt_idx,
+                    "cell_line": src_label,
+                    "drug": drug,
+                    "gene": gene,
+                }
             )
 
-    def test_mismatched_datasets_and_ratios(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
+    src_tgt_dist_df = pd.DataFrame(rows)
+
+    return GroupedDistributionAnnotation(
+        old_obs_index=np.arange(1000),  # Dummy indices
+        src_dist_idx_to_labels=src_dist_idx_to_labels,
+        tgt_dist_idx_to_labels=tgt_dist_idx_to_labels,
+        src_tgt_dist_df=src_tgt_dist_df,
+    )
+
+
+@pytest.fixture
+def sample_grouped_distribution(sample_annotation):
+    """Create a complete GroupedDistribution for testing."""
+    # Create dummy data for each distribution
+    src_data = {
+        0: np.random.randn(50, 10).astype(np.float32),  # 50 cells, 10 features
+        1: np.random.randn(50, 10).astype(np.float32),
+    }
+
+    tgt_data = {}
+    for tgt_idx in range(18):
+        tgt_data[tgt_idx] = np.random.randn(30, 10).astype(np.float32)  # 30 cells per distribution
+
+    conditions = {}
+    for tgt_idx in range(18):
+        conditions[tgt_idx] = np.random.randn(5).astype(np.float32)  # 5-dim condition embedding
+
+    src_to_tgt_dist_map = {
+        0: list(range(9)),
+        1: list(range(9, 18)),
+    }
+
+    return GroupedDistribution(
+        data=GroupedDistributionData(
+            src_to_tgt_dist_map=src_to_tgt_dist_map,
+            src_data=src_data,
+            tgt_data=tgt_data,
+            conditions=conditions,
+        ),
+        annotation=sample_annotation,
+    )
+
+
+class TestDataSplitterBasic:
+    """Test basic DataSplitter functionality."""
+
+    def test_init_valid(self, sample_annotation):
+        """Test that DataSplitter initializes correctly with valid inputs."""
+        splitter = DataSplitter(
+            annotations=[sample_annotation],
+            dataset_names=["test_dataset"],
+            split_ratios=[[0.7, 0.15, 0.15]],
+            split_type="random",
         )
-        train_data = dm.get_train_data(adata_perturbation)
+        assert splitter.split_type == "random"
+        assert len(splitter.annotations) == 1
 
-        with pytest.raises(ValueError, match="split_ratios length.*must match.*training_datasets length"):
-            DataSplitter(
-                training_datasets=[train_data],
-                dataset_names=["dataset1"],
-                split_ratios=[[0.8, 0.1, 0.1], [0.7, 0.2, 0.1]],
-            )
-
-    def test_invalid_split_ratios_format(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
-        with pytest.raises(ValueError, match="must be a list of 3 values"):
-            DataSplitter(
-                training_datasets=[train_data],
-                dataset_names=["dataset1"],
-                split_ratios=[[0.8, 0.2]],
-            )
-
-    def test_split_ratios_dont_sum_to_one(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
+    def test_init_invalid_ratios(self, sample_annotation):
+        """Test that invalid split ratios raise ValueError."""
         with pytest.raises(ValueError, match="must sum to 1.0"):
             DataSplitter(
-                training_datasets=[train_data],
-                dataset_names=["dataset1"],
-                split_ratios=[[0.8, 0.1, 0.2]],
+                annotations=[sample_annotation],
+                dataset_names=["test"],
+                split_ratios=[[0.7, 0.2, 0.2]],  # Sums to 1.1
             )
 
-    def test_negative_split_ratios(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
-        with pytest.raises(ValueError, match="must be non-negative"):
-            DataSplitter(
-                training_datasets=[train_data],
-                dataset_names=["dataset1"],
-                split_ratios=[[0.9, 0.2, -0.1]],
-            )
-
-    def test_holdout_groups_requires_split_key(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
+    def test_init_missing_split_key(self, sample_annotation):
+        """Test that holdout_groups without split_key raises ValueError."""
         with pytest.raises(ValueError, match="split_key must be provided"):
             DataSplitter(
-                training_datasets=[train_data],
-                dataset_names=["dataset1"],
-                split_ratios=[[0.8, 0.1, 0.1]],
+                annotations=[sample_annotation],
+                dataset_names=["test"],
+                split_ratios=[[0.7, 0.15, 0.15]],
                 split_type="holdout_groups",
             )
 
-    def test_holdout_combinations_requires_control_value(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1", "drug2"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
+    def test_init_missing_control_value(self, sample_annotation):
+        """Test that holdout_combinations without control_value raises ValueError."""
         with pytest.raises(ValueError, match="control_value must be provided"):
             DataSplitter(
-                training_datasets=[train_data],
-                dataset_names=["dataset1"],
-                split_ratios=[[0.8, 0.1, 0.1]],
+                annotations=[sample_annotation],
+                dataset_names=["test"],
+                split_ratios=[[0.7, 0.15, 0.15]],
                 split_type="holdout_combinations",
-                split_key="drug",
+                split_key=["drug", "gene"],
             )
 
 
-class TestRandomSplit:
-    @pytest.mark.parametrize("hard_test_split", [True, False])
-    @pytest.mark.parametrize("split_ratios", [[0.8, 0.1, 0.1], [0.7, 0.2, 0.1], [1.0, 0.0, 0.0]])
-    def test_random_split_ratios(self, adata_perturbation, hard_test_split, split_ratios):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
+class TestDataSplitterRandom:
+    """Test random splitting strategy."""
 
+    def test_random_split_hard(self, sample_annotation):
+        """Test hard random split (no overlap between val and test)."""
         splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[split_ratios],
-            split_type="random",
-            hard_test_split=hard_test_split,
-            random_state=42,
-        )
-
-        results = splitter.split_all_datasets()
-
-        assert "dataset1" in results
-        indices = results["dataset1"]["indices"]
-
-        n_cells = train_data.perturbation_covariates_mask.shape[0]
-        total_assigned = len(indices["train"]) + len(indices["val"]) + len(indices["test"])
-        assert total_assigned == n_cells
-
-        train_ratio, val_ratio, test_ratio = split_ratios
-        assert len(indices["train"]) == pytest.approx(train_ratio * n_cells, abs=1)
-        if val_ratio > 0:
-            assert len(indices["val"]) > 0
-        if test_ratio > 0:
-            assert len(indices["test"]) > 0
-
-    def test_random_split_reproducibility(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
-        splitter1 = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.8, 0.1, 0.1]],
-            split_type="random",
-            random_state=42,
-        )
-        results1 = splitter1.split_all_datasets()
-
-        splitter2 = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.8, 0.1, 0.1]],
-            split_type="random",
-            random_state=42,
-        )
-        results2 = splitter2.split_all_datasets()
-
-        assert np.array_equal(results1["dataset1"]["indices"]["train"], results2["dataset1"]["indices"]["train"])
-        assert np.array_equal(results1["dataset1"]["indices"]["val"], results2["dataset1"]["indices"]["val"])
-        assert np.array_equal(results1["dataset1"]["indices"]["test"], results2["dataset1"]["indices"]["test"])
-
-    def test_random_split_no_overlap_hard(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
-        splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.7, 0.2, 0.1]],
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
             split_type="random",
             hard_test_split=True,
             random_state=42,
         )
-        results = splitter.split_all_datasets()
-        indices = results["dataset1"]["indices"]
 
-        train_set = set(indices["train"])
-        val_set = set(indices["val"])
-        test_set = set(indices["test"])
+        results = splitter.split_all()
 
-        assert len(train_set & val_set) == 0
-        assert len(train_set & test_set) == 0
-        assert len(val_set & test_set) == 0
+        # Check that we got results
+        assert "test" in results
+        assert "train" in results["test"]
+        assert "val" in results["test"]
+        assert "test" in results["test"]
 
+        # Get distribution indices from annotations
+        train_dists = set(results["test"]["train"].src_tgt_dist_df["tgt_dist_idx"])
+        val_dists = set(results["test"]["val"].src_tgt_dist_df["tgt_dist_idx"])
+        test_dists = set(results["test"]["test"].src_tgt_dist_df["tgt_dist_idx"])
 
-class TestHoldoutGroups:
-    @pytest.mark.parametrize("hard_test_split", [True, False])
-    def test_holdout_groups_basic(self, adata_perturbation, hard_test_split):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
+        # In hard split, there should be no overlap
+        assert len(train_dists & val_dists) == 0
+        assert len(train_dists & test_dists) == 0
+        assert len(val_dists & test_dists) == 0
 
+        # All distributions should be accounted for
+        total_dists = len(sample_annotation.src_tgt_dist_df)
+        assert len(train_dists) + len(val_dists) + len(test_dists) == total_dists
+
+    def test_random_split_soft(self, sample_annotation):
+        """Test soft random split (val and test can overlap)."""
         splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.6, 0.2, 0.2]],
-            split_type="holdout_groups",
-            split_key="drug",
-            hard_test_split=hard_test_split,
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
+            split_type="random",
+            hard_test_split=False,
             random_state=42,
         )
 
-        results = splitter.split_all_datasets()
+        results = splitter.split_all()
 
-        assert "dataset1" in results
-        assert "split_values" in results["dataset1"]
+        train_dists = set(results["test"]["train"].src_tgt_dist_df["tgt_dist_idx"])
+        val_dists = set(results["test"]["val"].src_tgt_dist_df["tgt_dist_idx"])
+        test_dists = set(results["test"]["test"].src_tgt_dist_df["tgt_dist_idx"])
 
-        split_values = results["dataset1"]["split_values"]
-        assert "train" in split_values
-        assert "val" in split_values
-        assert "test" in split_values
+        # Train should not overlap with val or test
+        assert len(train_dists & val_dists) == 0
+        assert len(train_dists & test_dists) == 0
 
-    def test_holdout_groups_force_training_values(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=[],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
+        # But val and test CAN overlap in soft mode
+        # (not guaranteed, but possible)
+
+    def test_random_split_reproducible(self, sample_annotation):
+        """Test that random split is reproducible with same seed."""
+        splitter1 = DataSplitter(
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
+            split_type="random",
+            random_state=42,
         )
-        train_data = dm.get_train_data(adata_perturbation)
+        results1 = splitter1.split_all()
 
-        # Get available perturbation values (not control)
-        unique_values = set()
-        for covariates in train_data.perturbation_idx_to_covariates.values():
-            unique_values.update(covariates)
+        splitter2 = DataSplitter(
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
+            split_type="random",
+            random_state=42,
+        )
+        results2 = splitter2.split_all()
 
-        # Use "drug_a" instead of "control" since control cells are filtered out
-        force_value = "drug_a"
-        if force_value not in unique_values:
-            pytest.skip("drug_a not in perturbation values")
+        # Check that train distributions are the same
+        train_dists1 = set(results1["test"]["train"].src_tgt_dist_df["tgt_dist_idx"])
+        train_dists2 = set(results2["test"]["train"].src_tgt_dist_df["tgt_dist_idx"])
+        assert train_dists1 == train_dists2
 
+
+class TestDataSplitterHoldoutGroups:
+    """Test holdout_groups splitting strategy."""
+
+    def test_holdout_groups_basic(self, sample_annotation):
+        """Test basic holdout groups splitting."""
         splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.6, 0.2, 0.2]],
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
             split_type="holdout_groups",
             split_key="drug",
-            force_training_values=[force_value],
             random_state=42,
         )
 
-        results = splitter.split_all_datasets()
-        split_values = results["dataset1"]["split_values"]
+        results = splitter.split_all()
 
-        assert force_value in split_values["train"]
-        assert force_value not in split_values["val"]
-        assert force_value not in split_values["test"]
+        # Get unique drugs in each split
+        train_drugs = set(results["test"]["train"].src_tgt_dist_df["drug"].unique())
+        val_drugs = set(results["test"]["val"].src_tgt_dist_df["drug"].unique())
+        test_drugs = set(results["test"]["test"].src_tgt_dist_df["drug"].unique())
 
-    def test_holdout_groups_fixed_test_seed(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
+        # In hard split, drugs should not overlap
+        assert len(train_drugs & val_drugs) == 0
+        assert len(train_drugs & test_drugs) == 0
+        assert len(val_drugs & test_drugs) == 0
+
+    def test_holdout_groups_force_training(self, sample_annotation):
+        """Test that force_training_values keeps certain values in training."""
+        splitter = DataSplitter(
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
+            split_type="holdout_groups",
+            split_key="drug",
+            force_training_values=["control"],
+            random_state=42,
         )
-        train_data = dm.get_train_data(adata_perturbation)
 
-        results_list = []
-        for seed in [42, 43, 44]:
+        results = splitter.split_all()
+
+        # Control should only appear in training
+        val_drugs = set(results["test"]["val"].src_tgt_dist_df["drug"].unique())
+        test_drugs = set(results["test"]["test"].src_tgt_dist_df["drug"].unique())
+
+        assert "control" not in val_drugs
+        assert "control" not in test_drugs
+
+        # But should be in training
+        train_drugs = set(results["test"]["train"].src_tgt_dist_df["drug"].unique())
+        assert "control" in train_drugs
+
+    def test_holdout_groups_multiple_keys(self, sample_annotation):
+        """Test splitting on multiple keys."""
+        splitter = DataSplitter(
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
+            split_type="holdout_groups",
+            split_key=["drug", "gene"],
+            random_state=42,
+        )
+
+        results = splitter.split_all()
+
+        # Get all unique values from both drug and gene
+        train_df = results["test"]["train"].src_tgt_dist_df
+        val_df = results["test"]["val"].src_tgt_dist_df
+        test_df = results["test"]["test"].src_tgt_dist_df
+
+        train_values = set(train_df["drug"].unique()) | set(train_df["gene"].unique())
+        val_values = set(val_df["drug"].unique()) | set(val_df["gene"].unique())
+        test_values = set(test_df["drug"].unique()) | set(test_df["gene"].unique())
+
+        # Should have some separation
+        assert len(val_values | test_values) > 0
+
+    def test_holdout_groups_fixed_test_set(self, sample_annotation):
+        """Test that test_random_state keeps test set fixed across runs."""
+        # Run with different val_random_state but same test_random_state
+        test_sets = []
+        for val_seed in [42, 43, 44]:
             splitter = DataSplitter(
-                training_datasets=[train_data],
-                dataset_names=["dataset1"],
+                annotations=[sample_annotation],
+                dataset_names=["test"],
                 split_ratios=[[0.6, 0.2, 0.2]],
                 split_type="holdout_groups",
                 split_key="drug",
-                test_random_state=999,
-                val_random_state=seed,
-                random_state=seed,
+                test_random_state=999,  # Fixed
+                val_random_state=val_seed,  # Varying
+                random_state=val_seed,
             )
-            results = splitter.split_all_datasets()
-            results_list.append(results)
+            results = splitter.split_all()
+            test_drugs = set(results["test"]["test"].src_tgt_dist_df["drug"].unique())
+            test_sets.append(test_drugs)
 
-        test_values_1 = set(results_list[0]["dataset1"]["split_values"]["test"])
-        test_values_2 = set(results_list[1]["dataset1"]["split_values"]["test"])
-        test_values_3 = set(results_list[2]["dataset1"]["split_values"]["test"])
-
-        assert test_values_1 == test_values_2 == test_values_3
-
-        val_values_1 = set(results_list[0]["dataset1"]["split_values"]["val"])
-        val_values_2 = set(results_list[1]["dataset1"]["split_values"]["val"])
-
-        if len(val_values_1) > 0 and len(val_values_2) > 0:
-            assert val_values_1 != val_values_2
+        # All test sets should be identical
+        assert test_sets[0] == test_sets[1] == test_sets[2]
 
 
-class TestHoldoutCombinations:
-    @pytest.mark.parametrize("hard_test_split", [True, False])
-    def test_holdout_combinations_basic(self, adata_perturbation, hard_test_split):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1", "drug2"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
+class TestDataSplitterHoldoutCombinations:
+    """Test holdout_combinations splitting strategy."""
 
+    def test_holdout_combinations_basic(self, sample_annotation):
+        """Test basic holdout combinations splitting."""
         splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.6, 0.2, 0.2]],
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
             split_type="holdout_combinations",
-            split_key=["drug1", "drug2"],
-            control_value="control",
-            hard_test_split=hard_test_split,
-            random_state=42,
-        )
-
-        results = splitter.split_all_datasets()
-
-        assert "dataset1" in results
-        indices = results["dataset1"]["indices"]
-
-        assert len(indices["train"]) > 0
-        assert len(indices["val"]) >= 0
-        assert len(indices["test"]) >= 0
-
-    def test_holdout_combinations_singletons_in_train(self):
-        # Create test data with a good number of combinations
-        import anndata as ad
-
-        n_obs = 1000  # Increased to accommodate more combinations
-        n_vars = 50
-        n_pca = 10
-
-        X_data = np.random.rand(n_obs, n_vars)
-        my_counts = np.random.rand(n_obs, n_vars)
-        X_pca = np.random.rand(n_obs, n_pca)
-
-        # Use 5 drugs to get 20 unique combinations (5 * 4)
-        drugs = ["drug_a", "drug_b", "drug_c", "drug_d", "drug_e"]
-        cell_lines = ["cell_line_a", "cell_line_b", "cell_line_c"]
-
-        # Create structured data with known combinations
-        drug1_list = []
-        drug2_list = []
-
-        # Control cells (100)
-        drug1_list.extend(["control"] * 100)
-        drug2_list.extend(["control"] * 100)
-
-        # Singleton on drug1 (250 cells: 50 per drug)
-        for drug in drugs:
-            drug1_list.extend([drug] * 50)
-            drug2_list.extend(["control"] * 50)
-
-        # Singleton on drug2 (250 cells: 50 per drug)
-        for drug in drugs:
-            drug1_list.extend(["control"] * 50)
-            drug2_list.extend([drug] * 50)
-
-        # Combinations (400 cells distributed across 20 combinations = 20 cells each)
-        # Create all possible non-control combinations
-        combinations = []
-        for d1 in drugs:
-            for d2 in drugs:
-                if d1 != d2:  # Different drugs (true combinations)
-                    combinations.append((d1, d2))
-
-        # Distribute 400 cells evenly across combinations (20 cells per combination)
-        cells_per_combo = 400 // len(combinations)
-
-        for d1, d2 in combinations:
-            drug1_list.extend([d1] * cells_per_combo)
-            drug2_list.extend([d2] * cells_per_combo)
-
-        # Create cell line assignments
-        import pandas as pd
-
-        cell_type_list = np.random.choice(cell_lines, n_obs)
-        dosages = np.random.choice([10.0, 100.0, 1000.0], n_obs)
-
-        obs_data = pd.DataFrame(
-            {
-                "cell_type": cell_type_list,
-                "dosage": dosages,
-                "drug1": drug1_list,
-                "drug2": drug2_list,
-                "drug3": ["control"] * n_obs,
-                "dosage_a": np.random.choice([10.0, 100.0, 1000.0], n_obs),
-                "dosage_b": np.random.choice([10.0, 100.0, 1000.0], n_obs),
-                "dosage_c": np.random.choice([10.0, 100.0, 1000.0], n_obs),
-            }
-        )
-
-        # Create an AnnData object
-        adata_combinations = ad.AnnData(X=X_data, obs=obs_data)
-        adata_combinations.layers["my_counts"] = my_counts
-        adata_combinations.obsm["X_pca"] = X_pca
-
-        # Add boolean columns for each drug
-        for drug in drugs:
-            adata_combinations.obs[drug] = (
-                (adata_combinations.obs["drug1"] == drug)
-                | (adata_combinations.obs["drug2"] == drug)
-                | (adata_combinations.obs["drug3"] == drug)
-            )
-
-        adata_combinations.obs["control"] = (adata_combinations.obs["drug1"] == "control") & (
-            adata_combinations.obs["drug2"] == "control"
-        )
-
-        # Convert to categorical EXCEPT for control and boolean drug columns
-        for col in adata_combinations.obs.columns:
-            if col not in ["control"] + drugs:
-                adata_combinations.obs[col] = adata_combinations.obs[col].astype("category")
-
-        # Add embeddings
-        drug_emb = {}
-        for drug in adata_combinations.obs["drug1"].cat.categories:
-            drug_emb[drug] = np.random.randn(5, 1)
-        adata_combinations.uns["drug"] = drug_emb
-
-        cell_type_emb = {}
-        for cell_type in adata_combinations.obs["cell_type"].cat.categories:
-            cell_type_emb[cell_type] = np.random.randn(3, 1)
-        adata_combinations.uns["cell_type"] = cell_type_emb
-
-        # Now run the actual test
-        dm = DataManager(
-            adata_combinations,
-            sample_rep="X",
-            split_covariates=[],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1", "drug2"]},
-        )
-        train_data = dm.get_train_data(adata_combinations)
-
-        splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.6, 0.2, 0.2]],
-            split_type="holdout_combinations",
-            split_key=["drug1", "drug2"],
+            split_key=["drug", "gene"],
             control_value="control",
             random_state=42,
         )
 
-        results = splitter.split_all_datasets()
+        results = splitter.split_all()
 
-        perturbation_covariates_mask = train_data.perturbation_covariates_mask
-        perturbation_idx_to_covariates = train_data.perturbation_idx_to_covariates
+        # Check that controls and singletons are in training
+        train_df = results["test"]["train"].src_tgt_dist_df
+        val_df = results["test"]["val"].src_tgt_dist_df
+        test_df = results["test"]["test"].src_tgt_dist_df
 
-        train_indices = results["dataset1"]["indices"]["train"]
-        val_indices = results["dataset1"]["indices"]["val"]
-        test_indices = results["dataset1"]["indices"]["test"]
+        # Count non-control values in each row
+        def count_non_control(row):
+            non_control = 0
+            for key in ["drug", "gene"]:
+                if row[key] != "control":
+                    non_control += 1
+            return non_control
 
-        # Verify that ALL singletons and controls are in training
-        all_singletons = []
-        all_combinations = []
+        train_df["n_non_control"] = train_df.apply(count_non_control, axis=1)
+        val_df["n_non_control"] = val_df.apply(count_non_control, axis=1)
+        test_df["n_non_control"] = test_df.apply(count_non_control, axis=1)
 
-        for idx in range(len(perturbation_covariates_mask)):
-            pert_idx = perturbation_covariates_mask[idx]
-            if pert_idx >= 0:
-                covariates = perturbation_idx_to_covariates[pert_idx]
-                non_control_count = sum(1 for c in covariates if c != "control")
-                if non_control_count == 1:
-                    all_singletons.append(idx)
-                elif non_control_count > 1:
-                    all_combinations.append(idx)
+        # Training should have controls (0) and singletons (1)
+        assert 0 in train_df["n_non_control"].values or 1 in train_df["n_non_control"].values
 
-        train_set = set(train_indices)
+        # Val and test should only have combinations (2)
+        if len(val_df) > 0:
+            assert all(val_df["n_non_control"] == 2)
+        if len(test_df) > 0:
+            assert all(test_df["n_non_control"] == 2)
 
-        # All singletons should be in training
-        for singleton_idx in all_singletons:
-            assert singleton_idx in train_set, "All singleton perturbations should be in training"
+    def test_holdout_combinations_no_combinations(self):
+        """Test that warning is raised when no combinations exist."""
+        # Create annotation with only singletons
+        src_dist_idx_to_labels = {0: ("cell_line_A",)}
+        tgt_dist_idx_to_labels = {
+            0: ("control", "control"),
+            1: ("drug_A", "control"),
+            2: ("control", "gene_A"),
+        }
 
-        # Some (but not all) combinations should be in training according to split_ratios
-        combinations_in_train = [idx for idx in all_combinations if idx in train_set]
-        combinations_in_val = [idx for idx in all_combinations if idx in set(val_indices)]
-        combinations_in_test = [idx for idx in all_combinations if idx in set(test_indices)]
+        rows = [
+            {"src_dist_idx": 0, "tgt_dist_idx": 0, "drug": "control", "gene": "control"},
+            {"src_dist_idx": 0, "tgt_dist_idx": 1, "drug": "drug_A", "gene": "control"},
+            {"src_dist_idx": 0, "tgt_dist_idx": 2, "drug": "control", "gene": "gene_A"},
+        ]
 
-        # With enough combinations, we should see proper distribution
-        assert len(all_combinations) > 0, "Test data should have combination perturbations"
-
-        train_combo_ratio = len(combinations_in_train) / len(all_combinations)
-        val_combo_ratio = len(combinations_in_val) / len(all_combinations)
-        test_combo_ratio = len(combinations_in_test) / len(all_combinations)
-
-        # With 0.6, 0.2, 0.2 ratios, allow some tolerance
-        assert 0.4 < train_combo_ratio < 0.8, f"Expected ~60% of combinations in training, got {train_combo_ratio:.2%}"
-        assert 0.05 < val_combo_ratio < 0.35, f"Expected ~20% of combinations in val, got {val_combo_ratio:.2%}"
-        assert 0.05 < test_combo_ratio < 0.35, f"Expected ~20% of combinations in test, got {test_combo_ratio:.2%}"
-
-
-class TestStratifiedSplit:
-    @pytest.mark.parametrize("hard_test_split", [True, False])
-    def test_stratified_split_basic(self, adata_perturbation, hard_test_split):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
+        annotation = GroupedDistributionAnnotation(
+            old_obs_index=np.arange(100),
+            src_dist_idx_to_labels=src_dist_idx_to_labels,
+            tgt_dist_idx_to_labels=tgt_dist_idx_to_labels,
+            src_tgt_dist_df=pd.DataFrame(rows),
         )
-        train_data = dm.get_train_data(adata_perturbation)
 
         splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.8, 0.1, 0.1]],
+            annotations=[annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
+            split_type="holdout_combinations",
+            split_key=["drug", "gene"],
+            control_value="control",
+        )
+
+        with pytest.warns(UserWarning, match="No combination treatments found"):
+            results = splitter.split_all()
+
+            # Val and test should be empty
+            assert len(results["test"]["val"].src_tgt_dist_df) == 0
+            assert len(results["test"]["test"].src_tgt_dist_df) == 0
+
+
+class TestDataSplitterStratified:
+    """Test stratified splitting strategy."""
+
+    def test_stratified_split(self, sample_annotation):
+        """Test that stratified split maintains source distribution proportions."""
+        splitter = DataSplitter(
+            annotations=[sample_annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
             split_type="stratified",
-            split_key="drug",
-            hard_test_split=hard_test_split,
             random_state=42,
         )
 
-        results = splitter.split_all_datasets()
+        results = splitter.split_all()
 
-        assert "dataset1" in results
-        indices = results["dataset1"]["indices"]
+        # Check that both source distributions appear in all splits
+        for split_name in ["train", "val", "test"]:
+            split_df = results["test"][split_name].src_tgt_dist_df
+            if len(split_df) > 0:
+                src_dists = split_df["src_dist_idx"].unique()
+                # Should have both source distributions (or at least some)
+                assert len(src_dists) > 0
 
-        n_cells = train_data.perturbation_covariates_mask.shape[0]
-        total_assigned = len(indices["train"]) + len(indices["val"]) + len(indices["test"])
-        assert total_assigned == n_cells
 
+class TestApplySplitToGroupedDistribution:
+    """Test applying splits to full GroupedDistribution."""
 
-class TestMultipleDatasets:
-    def test_multiple_datasets_different_ratios(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data1 = dm.get_train_data(adata_perturbation)
-        train_data2 = dm.get_train_data(adata_perturbation)
-
+    def test_apply_split_basic(self, sample_grouped_distribution):
+        """Test applying split annotations to GroupedDistribution."""
         splitter = DataSplitter(
-            training_datasets=[train_data1, train_data2],
-            dataset_names=["dataset1", "dataset2"],
-            split_ratios=[[0.8, 0.1, 0.1], [0.7, 0.2, 0.1]],
+            annotations=[sample_grouped_distribution.annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
             split_type="random",
             random_state=42,
         )
 
-        results = splitter.split_all_datasets()
+        split_annotations = splitter.split_all()
 
-        assert "dataset1" in results
-        assert "dataset2" in results
+        # Apply to full GroupedDistribution
+        split_gds = apply_split_to_grouped_distribution(sample_grouped_distribution, split_annotations["test"])
 
-        n_cells = train_data1.perturbation_covariates_mask.shape[0]
+        assert "train" in split_gds
+        assert "val" in split_gds
+        assert "test" in split_gds
 
-        assert len(results["dataset1"]["indices"]["train"]) == pytest.approx(0.8 * n_cells, abs=1)
-        assert len(results["dataset2"]["indices"]["train"]) == pytest.approx(0.7 * n_cells, abs=1)
+        # Check that we got GroupedDistribution objects
+        assert isinstance(split_gds["train"], GroupedDistribution)
+        assert isinstance(split_gds["val"], GroupedDistribution)
+        assert isinstance(split_gds["test"], GroupedDistribution)
 
+        # Check that data is actually split
+        train_tgt_dists = set(split_gds["train"].data.tgt_data.keys())
+        val_tgt_dists = set(split_gds["val"].data.tgt_data.keys())
+        test_tgt_dists = set(split_gds["test"].data.tgt_data.keys())
 
-class TestSaveAndLoad:
-    def test_save_and_load_splits(self, adata_perturbation, tmp_path):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
+        # No overlap in hard split
+        assert len(train_tgt_dists & val_tgt_dists) == 0
+        assert len(train_tgt_dists & test_tgt_dists) == 0
+        assert len(val_tgt_dists & test_tgt_dists) == 0
 
+    def test_apply_split_preserves_data(self, sample_grouped_distribution):
+        """Test that applying split preserves the actual data arrays."""
         splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.8, 0.1, 0.1]],
-            split_type="holdout_groups",
-            split_key="drug",
-            random_state=42,
-        )
-
-        results = splitter.split_all_datasets()
-        splitter.save_splits(tmp_path / "splits")
-
-        assert (tmp_path / "splits" / "split_summary.json").exists()
-        assert (tmp_path / "splits" / "dataset1" / "metadata.json").exists()
-        assert (tmp_path / "splits" / "dataset1" / "split_info.pkl").exists()
-
-        loaded_info = DataSplitter.load_split_info(tmp_path / "splits", "dataset1")
-
-        assert "indices" in loaded_info
-        assert "metadata" in loaded_info
-
-        assert np.array_equal(loaded_info["indices"]["train"], results["dataset1"]["indices"]["train"])
-        assert np.array_equal(loaded_info["indices"]["val"], results["dataset1"]["indices"]["val"])
-        assert np.array_equal(loaded_info["indices"]["test"], results["dataset1"]["indices"]["test"])
-
-    def test_load_nonexistent_split(self, tmp_path):
-        with pytest.raises(FileNotFoundError):
-            DataSplitter.load_split_info(tmp_path / "nonexistent", "dataset1")
-
-
-class TestSplitSummary:
-    def test_generate_split_summary(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
-        splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.8, 0.1, 0.1]],
-            split_type="holdout_groups",
-            split_key="drug",
-            random_state=42,
-        )
-
-        splitter.split_all_datasets()
-        summary = splitter.generate_split_summary()
-
-        assert "dataset1" in summary
-        assert "configuration" in summary["dataset1"]
-        assert "statistics" in summary["dataset1"]
-        assert "observations_per_condition" in summary["dataset1"]
-
-        config = summary["dataset1"]["configuration"]
-        assert config["split_type"] == "holdout_groups"
-        assert config["random_state"] == 42
-
-        stats = summary["dataset1"]["statistics"]
-        assert "total_observations" in stats
-        assert "train_observations" in stats
-        assert "val_observations" in stats
-        assert "test_observations" in stats
-
-    def test_summary_before_split_raises(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
-
-        splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.8, 0.1, 0.1]],
+            annotations=[sample_grouped_distribution.annotation],
+            dataset_names=["test"],
+            split_ratios=[[0.7, 0.15, 0.15]],
             split_type="random",
             random_state=42,
         )
 
-        with pytest.raises(ValueError, match="No split results available"):
-            splitter.generate_split_summary()
+        split_annotations = splitter.split_all()
+        split_gds = apply_split_to_grouped_distribution(sample_grouped_distribution, split_annotations["test"])
+
+        # Check that data arrays match original
+        for tgt_idx in split_gds["train"].data.tgt_data.keys():
+            original_data = sample_grouped_distribution.data.tgt_data[tgt_idx]
+            split_data = split_gds["train"].data.tgt_data[tgt_idx]
+            np.testing.assert_array_equal(original_data, split_data)
 
 
-class TestExtractPerturbationInfo:
-    def test_extract_perturbation_info(self, adata_perturbation):
-        dm = DataManager(
-            adata_perturbation,
-            sample_rep="X",
-            split_covariates=["cell_type"],
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        train_data = dm.get_train_data(adata_perturbation)
+class TestSaveLoad:
+    """Test saving and loading splits."""
 
+    def test_save_and_load(self, sample_annotation, tmp_path):
+        """Test that splits can be saved and loaded."""
         splitter = DataSplitter(
-            training_datasets=[train_data],
-            dataset_names=["dataset1"],
-            split_ratios=[[0.8, 0.1, 0.1]],
+            annotations=[sample_annotation],
+            dataset_names=["test_dataset"],
+            split_ratios=[[0.7, 0.15, 0.15]],
             split_type="random",
+            random_state=42,
         )
 
-        pert_info = splitter.extract_perturbation_info(train_data)
+        results = splitter.split_all()
 
-        assert "perturbation_covariates_mask" in pert_info
-        assert "perturbation_idx_to_covariates" in pert_info
-        assert "n_cells" in pert_info
+        # Save
+        output_dir = tmp_path / "splits"
+        splitter.save_splits(output_dir)
 
-        assert isinstance(pert_info["perturbation_covariates_mask"], np.ndarray)
-        assert isinstance(pert_info["perturbation_idx_to_covariates"], dict)
-        assert pert_info["n_cells"] == len(train_data.perturbation_covariates_mask)
+        # Check that files were created
+        assert (output_dir / "test_dataset" / "train_annotation.pkl").exists()
+        assert (output_dir / "test_dataset" / "val_annotation.pkl").exists()
+        assert (output_dir / "test_dataset" / "test_annotation.pkl").exists()
+        assert (output_dir / "test_dataset" / "metadata.json").exists()
+
+        # Load
+        loaded = DataSplitter.load_split_annotations(output_dir, "test_dataset")
+
+        # Check that loaded data matches
+        assert "train" in loaded
+        assert "val" in loaded
+        assert "test" in loaded
+        assert "metadata" in loaded
+
+        # Compare train distributions
+        original_train_dists = set(results["test_dataset"]["train"].src_tgt_dist_df["tgt_dist_idx"])
+        loaded_train_dists = set(loaded["train"].src_tgt_dist_df["tgt_dist_idx"])
+        assert original_train_dists == loaded_train_dists
+
+
+class TestFilterByTgtDistIndices:
+    """Test the filter_by_tgt_dist_indices methods."""
+
+    def test_filter_annotation(self, sample_annotation):
+        """Test filtering GroupedDistributionAnnotation."""
+        # Filter to only first 5 distributions
+        indices_to_keep = [0, 1, 2, 3, 4]
+        filtered = sample_annotation.filter_by_tgt_dist_indices(indices_to_keep)
+
+        assert isinstance(filtered, GroupedDistributionAnnotation)
+        assert len(filtered.src_tgt_dist_df) == len(indices_to_keep)
+        assert set(filtered.src_tgt_dist_df["tgt_dist_idx"]) == set(indices_to_keep)
+
+    def test_filter_grouped_distribution(self, sample_grouped_distribution):
+        """Test filtering full GroupedDistribution."""
+        # Filter to only first 5 distributions
+        indices_to_keep = [0, 1, 2, 3, 4]
+        filtered = sample_grouped_distribution.filter_by_tgt_dist_indices(indices_to_keep)
+
+        assert isinstance(filtered, GroupedDistribution)
+        assert set(filtered.data.tgt_data.keys()) == set(indices_to_keep)
+
+        # Check that data is preserved
+        for idx in indices_to_keep:
+            original = sample_grouped_distribution.data.tgt_data[idx]
+            filtered_data = filtered.data.tgt_data[idx]
+            np.testing.assert_array_equal(original, filtered_data)

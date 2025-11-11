@@ -1,4 +1,4 @@
-"""Data splitter for creating train/validation/test splits from TrainingData objects."""
+"""Data splitter for creating train/validation/test splits from GroupedDistribution objects."""
 
 import logging
 import warnings
@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from scaleflow.data._data import GroupedDistribution
+from scaleflow.data._data import GroupedDistribution, GroupedDistributionAnnotation
 
 logger = logging.getLogger(__name__)
 
@@ -19,28 +20,29 @@ class DataSplitter:
     """
     A lightweight class for creating train/validation/test splits from GroupedDistribution objects.
 
-    This class extracts metadata from GroupedDistribution objects and returns split indices,
-    making it memory-efficient for large datasets.
+    This class works on GroupedDistributionAnnotation objects, making it lightweight and easy to
+    inspect splits before applying them to the actual data. Splits are performed at the
+    distribution level (tgt_dist_idx) rather than at the cell level.
 
     Supports various splitting strategies:
     - holdout_groups: Hold out specific groups (drugs, cell lines, donors, etc.) for validation/test
     - holdout_combinations: Keep single treatments in training, hold out combination treatments for validation/test
-    - random: Random split of observations
-    - stratified: Stratified split maintaining condition proportions
+    - random: Random split of distributions
+    - stratified: Stratified split maintaining source distribution proportions
 
     Parameters
     ----------
-    training_datasets : list[GroupedDistribution]
-        List of GroupedDistribution objects to process
+    annotations : list[GroupedDistributionAnnotation]
+        List of GroupedDistributionAnnotation objects to split
     dataset_names : list[str]
         List of names for each dataset (for saving/loading)
     split_ratios : list[list[float]]
         List of triples, each indicating [train, validation, test] ratios for each dataset.
-        Each triple must sum to 1.0. Length must match training_datasets.
+        Each triple must sum to 1.0. Length must match annotations.
     split_type : SplitType
         Type of split to perform
     split_key : str | list[str] | None
-        Column name(s) in adata.obs to use for splitting (required for holdout_groups and holdout_combinations).
+        Column name(s) from the src_tgt_dist_df to use for splitting (required for holdout_groups and holdout_combinations).
         Can be a single column or list of columns for combination treatments.
     force_training_values : list[str] | None
         Values that should be forced to appear only in training (e.g., ['control', 'dmso']).
@@ -49,85 +51,40 @@ class DataSplitter:
         Value(s) that represent control/untreated condition (e.g., 'control' or ['control', 'dmso']).
         Required for holdout_combinations split type.
     hard_test_split : bool
-        If True, validation and test get completely different groups (no overlap).
-        If False, validation and test can share groups, split at cell level.
-        Applies to all split types for consistent val/test separation control.
+        If True, validation and test get completely different distributions (no overlap).
+        If False, validation and test can share distributions, split at cell level.
     random_state : int
-        Random seed for reproducible splits. This controls:
-        - Observation-level splits in soft mode (hard_test_split=False)
-        - Fallback for test_random_state and val_random_state if they are None
-        Note: In hard mode with test_random_state and val_random_state specified,
-        this parameter only affects downstream training randomness (not DataSplitter itself).
+        Random seed for reproducible splits
     test_random_state : int | None
         Random seed specifically for selecting which conditions go to the test set.
-        If None, uses random_state as fallback. Only applies to 'holdout_groups' and
-        'holdout_combinations' split types. This enables running multiple experiments with
-        different train/val splits while keeping the test set fixed for fair comparison.
+        If None, uses random_state as fallback.
     val_random_state : int | None
-        Random seed specifically for selecting which conditions go to the validation set
-        (from the remaining conditions after test set selection). If None, uses random_state
-        as fallback. Only applies to 'holdout_groups' and 'holdout_combinations' split types.
-        This enables varying the validation set across runs while keeping test set fixed
+        Random seed specifically for selecting which conditions go to the validation set.
+        If None, uses random_state as fallback.
 
     Examples
     --------
-    >>> # Example 1: Basic split with forced training values
+    >>> # Example: Hold out specific drugs
     >>> splitter = DataSplitter(
-    ...     training_datasets=[train_data1, train_data2],
-    ...     dataset_names=["dataset1", "dataset2"],
-    ...     split_ratios=[[0.8, 0.2, 0.0], [0.9, 0.1, 0.0]],
+    ...     annotations=[gd.annotation],
+    ...     dataset_names=["experiment1"],
+    ...     split_ratios=[[0.7, 0.15, 0.15]],
     ...     split_type="holdout_groups",
-    ...     split_key=["drug1", "drug2"],
-    ...     force_training_values=["control", "dmso"],
+    ...     split_key="drug",  # Column from src_tgt_dist_df
+    ...     force_training_values=["control"],
     ... )
-
-    >>> # Example 2: Split by holding out combinations (singletons in training)
-    >>> splitter = DataSplitter(
-    ...     training_datasets=[train_data],
-    ...     dataset_names=["dataset"],
-    ...     split_ratios=[[0.8, 0.2, 0.0]],
-    ...     split_type="holdout_combinations",
-    ...     split_key=["drug1", "drug2"],
-    ...     control_value=["control", "dmso"],
+    >>> split_annotations = splitter.split_all()
+    >>> # Inspect splits before applying to data
+    >>> print(split_annotations["experiment1"]["train"].src_tgt_dist_df)
+    >>> # Apply to full GroupedDistribution
+    >>> train_gd = gd.filter_by_tgt_dist_indices(
+    ...     split_annotations["experiment1"]["train"].src_tgt_dist_df["tgt_dist_idx"].tolist()
     ... )
-
-    >>> # Example 3: Fixed test set across multiple runs (for drug discovery benchmarking)
-    >>> # All runs will test on the same drugs, but with different train/val splits
-    >>> for seed in [42, 43, 44, 45]:
-    ...     splitter = DataSplitter(
-    ...         training_datasets=[train_data],
-    ...         dataset_names=["experiment"],
-    ...         split_ratios=[[0.6, 0.2, 0.2]],
-    ...         split_type="holdout_groups",
-    ...         split_key=["drug"],
-    ...         test_random_state=999,  # Fixed: same test drugs across all runs
-    ...         val_random_state=seed,  # Varies: different validation drugs per run
-    ...         random_state=seed,  # Varies: different training randomness
-    ...     )
-    ...     results = splitter.split_all_datasets()
-    ...     # Train model with this split...
-
-    >>> # Example 4: Completely different splits per run (current behavior)
-    >>> for seed in [42, 43, 44]:
-    ...     splitter = DataSplitter(
-    ...         training_datasets=[train_data],
-    ...         dataset_names=["experiment"],
-    ...         split_ratios=[[0.8, 0.1, 0.1]],
-    ...         split_type="holdout_groups",
-    ...         split_key=["drug"],
-    ...         random_state=seed,  # All three seeds derived from this
-    ...     )
-
-    >>> # Save and load splits
-    >>> results = splitter.split_all_datasets()
-    >>> splitter.save_splits("./splits")
-    >>> split_info = DataSplitter.load_split_info("./splits", "dataset1")
-    >>> train_indices = split_info["indices"]["train"]
     """
 
     def __init__(
         self,
-        training_datasets: list[GroupedDistribution],
+        annotations: list[GroupedDistributionAnnotation],
         dataset_names: list[str],
         split_ratios: list[list[float]],
         split_type: SplitType = "random",
@@ -139,7 +96,7 @@ class DataSplitter:
         test_random_state: int | None = None,
         val_random_state: int | None = None,
     ):
-        self.training_datasets = training_datasets
+        self.annotations = annotations
         self.dataset_names = dataset_names
         self.split_ratios = split_ratios
         self.split_type = split_type
@@ -153,25 +110,23 @@ class DataSplitter:
 
         self._validate_inputs()
 
-        self._extract_covariate_orderings()
-
         self.split_results: dict[str, dict] = {}
 
     def _validate_inputs(self) -> None:
         """Validate input parameters."""
-        if len(self.training_datasets) != len(self.dataset_names):
+        if len(self.annotations) != len(self.dataset_names):
             raise ValueError(
-                f"training_datasets length ({len(self.training_datasets)}) must match "
+                f"annotations length ({len(self.annotations)}) must match "
                 f"dataset_names length ({len(self.dataset_names)})"
             )
 
         if not isinstance(self.split_ratios, list):
             raise ValueError("split_ratios must be a list of lists")
 
-        if len(self.split_ratios) != len(self.training_datasets):
+        if len(self.split_ratios) != len(self.annotations):
             raise ValueError(
                 f"split_ratios length ({len(self.split_ratios)}) must match "
-                f"training_datasets length ({len(self.training_datasets)})"
+                f"annotations length ({len(self.annotations)})"
             )
 
         # Check each split ratio
@@ -193,205 +148,75 @@ class DataSplitter:
         if self.split_type == "holdout_combinations" and self.control_value is None:
             raise ValueError("control_value must be provided for split_type 'holdout_combinations'")
 
-        for i, td in enumerate(self.training_datasets):
-            if not isinstance(td, GroupedDistribution):
-                raise ValueError(f"training_datasets[{i}] must be a GroupedDistribution object")
+        for i, ann in enumerate(self.annotations):
+            if not isinstance(ann, GroupedDistributionAnnotation):
+                raise ValueError(f"annotations[{i}] must be a GroupedDistributionAnnotation object")
 
-    def _extract_covariate_orderings(self) -> None:
-        self.covariate_orderings = []
-        for i, td in enumerate(self.training_datasets):
-            if hasattr(td, 'data_manager') and td.data_manager is not None:
-                covar_keys = td.data_manager.perturb_covar_keys
-                covar_name_to_positions = {}
-                for pos, key in enumerate(covar_keys):
-                    if key not in covar_name_to_positions:
-                        covar_name_to_positions[key] = []
-                    covar_name_to_positions[key].append(pos)
-                self.covariate_orderings.append(covar_name_to_positions)
-                logger.info(f"Dataset {i}: Covariate ordering: {covar_keys}")
-            else:
-                self.covariate_orderings.append({})
-                logger.warning(f"Dataset {i}: No data_manager found, cannot extract covariate ordering")
-
-    def extract_perturbation_info(self, training_data: GroupedDistribution) -> dict:
-        """
-        Extract condition information from TrainingData or MappedCellData.
-
-        Note: Internal variable names use 'perturbation' for compatibility with
-        TrainingData structure, but conceptually these represent any conditions
-        (drugs, cell lines, donors, etc.).
-
-        Parameters
-        ----------
-        training_data : GroupedDistribution
-            Training data object
-
-        Returns
-        -------
-        dict
-            Dictionary containing:
-            - perturbation_covariates_mask: array mapping observations to condition indices
-            - perturbation_idx_to_covariates: dict mapping condition indices to covariate tuples
-            - n_cells: total number of observations
-        """
-        perturbation_covariates_mask = np.asarray(training_data.perturbation_covariates_mask)
-        perturbation_idx_to_covariates = training_data.perturbation_idx_to_covariates
-
-        n_cells = len(perturbation_covariates_mask)
-
-        logger.info(f"Extracted condition info for {n_cells} observations")
-        logger.info(f"Number of unique conditions: {len(perturbation_idx_to_covariates)}")
-
-        return {
-            "perturbation_covariates_mask": perturbation_covariates_mask,
-            "perturbation_idx_to_covariates": perturbation_idx_to_covariates,
-            "n_cells": n_cells,
-        }
-
-    def _get_unique_perturbation_values(
+    def _split_random(
         self,
-        perturbation_idx_to_covariates: dict[int, tuple[str, ...]],
-        dataset_index: int = 0,
-    ) -> list[str]:
-        all_unique_vals = set()
-        if self.split_key is None or not self.covariate_orderings or not self.covariate_orderings[dataset_index]:
-            for covariates in perturbation_idx_to_covariates.values():
-                all_unique_vals.update(covariates)
-        else:
-            covar_name_to_positions = self.covariate_orderings[dataset_index]
-            positions_to_extract = []
-            for key in self.split_key:
-                if key in covar_name_to_positions:
-                    positions_to_extract.extend(covar_name_to_positions[key])
-                else:
-                    logger.warning(f"split_key '{key}' not found in covariate ordering for dataset {dataset_index}")
-            if positions_to_extract:
-                for covariates in perturbation_idx_to_covariates.values():
-                    for pos in positions_to_extract:
-                        if pos < len(covariates):
-                            all_unique_vals.add(covariates[pos])
-            else:
-                for covariates in perturbation_idx_to_covariates.values():
-                    all_unique_vals.update(covariates)
-        return list(all_unique_vals)
-
-    def _split_random(self, n_cells: int, split_ratios: list[float]) -> dict[str, np.ndarray]:
-        """Perform random split of cells."""
+        dist_indices: list[int],
+        split_ratios: list[float]
+    ) -> dict[str, list[int]]:
+        """Perform random split of distributions."""
         train_ratio, val_ratio, test_ratio = split_ratios
+        n_dists = len(dist_indices)
 
-        # Generate random indices
-        indices = np.arange(n_cells)
+        # Shuffle distributions
         np.random.seed(self.random_state)
-        np.random.shuffle(indices)
+        shuffled = np.random.permutation(dist_indices)
 
         if self.hard_test_split:
             # HARD: Val and test are completely separate
-            train_end = int(train_ratio * n_cells)
-            val_end = train_end + int(val_ratio * n_cells)
+            train_end = int(train_ratio * n_dists)
+            val_end = train_end + int(val_ratio * n_dists)
 
-            train_idx = indices[:train_end]
-            val_idx = indices[train_end:val_end] if val_ratio > 0 else np.array([])
-            test_idx = indices[val_end:] if test_ratio > 0 else np.array([])
+            train_dists = shuffled[:train_end].tolist()
+            val_dists = shuffled[train_end:val_end].tolist() if val_ratio > 0 else []
+            test_dists = shuffled[val_end:].tolist() if test_ratio > 0 else []
 
-            logger.info("HARD RANDOM SPLIT: Completely separate val/test")
+            logger.info("HARD RANDOM SPLIT: Completely separate val/test distributions")
         else:
-            # SOFT: Val and test can overlap (split val+test at cell level)
-            train_end = int(train_ratio * n_cells)
-            train_idx = indices[:train_end]
-            val_test_idx = indices[train_end:]
+            # SOFT: Val and test can share distributions (split cells within distributions)
+            train_end = int(train_ratio * n_dists)
+            train_dists = shuffled[:train_end].tolist()
+            val_test_dists = shuffled[train_end:].tolist()
 
-            # Split val+test according to val/test ratios
-            if len(val_test_idx) > 0 and val_ratio + test_ratio > 0:
+            # Split val+test distributions according to val/test ratios
+            if len(val_test_dists) > 0 and val_ratio + test_ratio > 0:
                 val_size = val_ratio / (val_ratio + test_ratio)
-                val_idx, test_idx = train_test_split(
-                    val_test_idx, train_size=val_size, random_state=self.random_state + 1
+                np.random.seed(self.random_state + 1)
+                val_dists, test_dists = train_test_split(
+                    val_test_dists, train_size=val_size, random_state=self.random_state + 1
                 )
             else:
-                val_idx = np.array([])
-                test_idx = np.array([])
+                val_dists = []
+                test_dists = []
 
-            logger.info("SOFT RANDOM SPLIT: Val/test can overlap")
+            logger.info("SOFT RANDOM SPLIT: Val/test can share distributions")
 
-        return {"train": train_idx, "val": val_idx, "test": test_idx}
+        return {"train": train_dists, "val": val_dists, "test": test_dists}
 
-    def _add_control_cells_to_splits(
+    def _split_holdout_groups(
         self,
-        train_idx: np.ndarray,
-        val_idx: np.ndarray,
-        test_idx: np.ndarray,
-        train_values: list,
-        val_values: list,
-        test_values: list,
-        perturbation_covariates_mask: np.ndarray,
-        dataset_index: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        training_data = self.training_datasets[dataset_index]
-        if not hasattr(training_data, 'split_covariates_mask') or not hasattr(training_data, 'split_idx_to_covariates'):
-            return train_idx, val_idx, test_idx
-
-        split_covariates_mask = np.asarray(training_data.split_covariates_mask)
-        split_idx_to_covariates = training_data.split_idx_to_covariates
-
-        control_cell_indices = np.where(split_covariates_mask >= 0)[0]
-        if len(control_cell_indices) == 0:
-            logger.info("No control cells found to assign")
-            return train_idx, val_idx, test_idx
-
-        covar_name_to_positions = self.covariate_orderings[dataset_index] if self.covariate_orderings else {}
-        positions_to_check = []
-        if self.split_key and covar_name_to_positions:
-            for key in self.split_key:
-                if key in covar_name_to_positions:
-                    positions_to_check.extend(covar_name_to_positions[key])
-
-        def get_control_cells_for_values(values_set):
-            if len(values_set) == 0:
-                return np.array([], dtype=int)
-
-            values_set_normalized = {str(v) for v in values_set}
-
-            matching_control_indices = []
-            for control_group_idx, covariates in split_idx_to_covariates.items():
-                if positions_to_check:
-                    if any(str(covariates[pos]) in values_set_normalized for pos in positions_to_check if pos < len(covariates)):
-                        matching_control_indices.append(control_group_idx)
-                else:
-                    if any(str(cov) in values_set_normalized for cov in covariates):
-                        matching_control_indices.append(control_group_idx)
-
-            if len(matching_control_indices) == 0:
-                return np.array([], dtype=int)
-
-            control_cells_mask = np.isin(split_covariates_mask, matching_control_indices)
-            return np.where(control_cells_mask)[0]
-
-        train_control_cells = get_control_cells_for_values(train_values)
-        val_control_cells = get_control_cells_for_values(val_values)
-        test_control_cells = get_control_cells_for_values(test_values)
-
-        logger.info(f"Adding control cells - Train: {len(train_control_cells)}, Val: {len(val_control_cells)}, Test: {len(test_control_cells)}")
-
-        train_idx = np.concatenate([train_idx, train_control_cells])
-        val_idx = np.concatenate([val_idx, val_control_cells])
-        test_idx = np.concatenate([test_idx, test_control_cells])
-
-        return train_idx, val_idx, test_idx
-
-    def _split_by_values(
-        self,
-        perturbation_covariates_mask: np.ndarray,
-        perturbation_idx_to_covariates: dict[int, tuple[str, ...]],
+        dist_df: pd.DataFrame,
         split_ratios: list[float],
-        dataset_index: int = 0,
-    ) -> dict[str, np.ndarray]:
+    ) -> dict[str, list[int]]:
         """Split by holding out specific condition groups."""
         if self.split_key is None:
             raise ValueError("split_key must be provided for holdout_groups splitting")
 
-        # Get all unique covariate values
-        unique_values = self._get_unique_perturbation_values(perturbation_idx_to_covariates, dataset_index)
+        # Verify split_key columns exist in dist_df
+        for key in self.split_key:
+            if key not in dist_df.columns:
+                raise ValueError(f"split_key '{key}' not found in dist_df columns: {dist_df.columns.tolist()}")
 
-        # Remove forced training values from consideration for val/test splits
+        # Get all unique values from the split_key columns
+        unique_values = set()
+        for key in self.split_key:
+            unique_values.update(dist_df[key].unique())
+        unique_values = list(unique_values)
+
+        # Remove forced training values
         available_values = [v for v in unique_values if v not in self.force_training_values]
         forced_train_values = [v for v in unique_values if v in self.force_training_values]
 
@@ -399,24 +224,22 @@ class DataSplitter:
         logger.info(f"Forced training values: {forced_train_values}")
         logger.info(f"Available for val/test: {len(available_values)}")
 
-        n_values = len(available_values)
-
-        if n_values < 3:
+        if len(available_values) < 3:
             warnings.warn(
-                f"Only {n_values} unique values found across columns {self.split_key}. "
+                f"Only {len(available_values)} unique values available for splitting. "
                 "Consider using random split instead.",
                 stacklevel=2,
             )
 
-        # Split values according to ratios using three-level seed hierarchy
+        # Split values according to ratios
         train_ratio, val_ratio, test_ratio = split_ratios
+        n_values = len(available_values)
 
         # Calculate number of values for each split
         n_test = int(test_ratio * n_values)
         n_val = int(val_ratio * n_values)
         n_train = n_values - n_test - n_val
 
-        # Ensure we have at least one value for train if train_ratio > 0
         if train_ratio > 0 and n_train == 0:
             n_train = 1
             n_test = max(0, n_test - 1)
@@ -424,353 +247,207 @@ class DataSplitter:
         # Step 1: Select test values using test_random_state
         np.random.seed(self.test_random_state)
         shuffled_for_test = np.random.permutation(available_values)
-        test_values = shuffled_for_test[-n_test:] if n_test > 0 else []
-        remaining_after_test = shuffled_for_test[:-n_test] if n_test > 0 else shuffled_for_test
+        test_values = shuffled_for_test[-n_test:].tolist() if n_test > 0 else []
+        remaining_after_test = shuffled_for_test[:-n_test].tolist() if n_test > 0 else shuffled_for_test.tolist()
 
         # Step 2: Select val values from remaining using val_random_state
         np.random.seed(self.val_random_state)
         shuffled_for_val = np.random.permutation(remaining_after_test)
-        val_values = shuffled_for_val[-n_val:] if n_val > 0 else []
-        train_values_random = shuffled_for_val[:-n_val] if n_val > 0 else shuffled_for_val
+        val_values = shuffled_for_val[-n_val:].tolist() if n_val > 0 else []
+        train_values_random = shuffled_for_val[:-n_val].tolist() if n_val > 0 else shuffled_for_val.tolist()
 
         # Step 3: Combine forced training values with randomly assigned training values
         train_values = list(train_values_random) + forced_train_values
 
         logger.info(f"Split values - Train: {len(train_values)}, Val: {len(val_values)}, Test: {len(test_values)}")
-        logger.info(f"Train values: {train_values}")
-        logger.info(f"Val values: {val_values}")
-        logger.info(f"Test values: {test_values}")
 
-        print(f"Split values - Train: {len(train_values)}, Val: {len(val_values)}, Test: {len(test_values)}")
-        print(f"Train values: {train_values}")
-        print(f"Val values: {val_values}")
-        print(f"Test values: {test_values}")
-
-        # Get positions to check based on split_key
-        covar_name_to_positions = self.covariate_orderings[dataset_index] if self.covariate_orderings else {}
-        positions_to_check = []
-        if self.split_key and covar_name_to_positions:
-            for key in self.split_key:
-                if key in covar_name_to_positions:
-                    positions_to_check.extend(covar_name_to_positions[key])
-
-        # Create masks by checking which perturbation indices contain which values
-        def _get_cells_with_values(values_set):
+        # Get distributions that contain each value
+        def _get_dists_with_values(values_set):
             if len(values_set) == 0:
-                return np.array([], dtype=int)
-
-            matching_pert_indices = []
-            for pert_idx, covariates in perturbation_idx_to_covariates.items():
-                if positions_to_check:
-                    if any(covariates[pos] in values_set for pos in positions_to_check if pos < len(covariates)):
-                        matching_pert_indices.append(pert_idx)
-                else:
-                    if any(val in covariates for val in values_set):
-                        matching_pert_indices.append(pert_idx)
-
-            if len(matching_pert_indices) == 0:
-                return np.array([], dtype=int)
-
-            cell_mask = np.isin(perturbation_covariates_mask, matching_pert_indices)
-            return np.where(cell_mask)[0]
+                return []
+            matching_dist_indices = []
+            for _, row in dist_df.iterrows():
+                # Check if any split_key column contains any of the values
+                if any(row[key] in values_set for key in self.split_key):
+                    matching_dist_indices.append(row["tgt_dist_idx"])
+            return list(set(matching_dist_indices))
 
         if self.hard_test_split:
-            # HARD: Val and test get different values (existing logic)
-            train_idx = _get_cells_with_values(train_values)
-            val_idx = _get_cells_with_values(val_values)
-            test_idx = _get_cells_with_values(test_values)
+            # HARD: Val and test get different values
+            train_dists = _get_dists_with_values(train_values)
+            val_dists = _get_dists_with_values(val_values)
+            test_dists = _get_dists_with_values(test_values)
 
             logger.info("HARD HOLDOUT GROUPS: Val and test get different values")
         else:
-            # SOFT: Val and test can share values, split at cell level
-            train_values_all = list(train_values_random) + forced_train_values
+            # SOFT: Val and test can share values
             val_test_values = list(val_values) + list(test_values)
+            train_dists = _get_dists_with_values(train_values)
+            val_test_dists = _get_dists_with_values(val_test_values)
 
-            train_idx = _get_cells_with_values(train_values_all)
-            val_test_idx = _get_cells_with_values(val_test_values)
-
-            # Split val+test cells according to val/test ratios
-            if len(val_test_idx) > 0 and val_ratio + test_ratio > 0:
+            # Split val+test distributions at distribution level
+            if len(val_test_dists) > 0 and val_ratio + test_ratio > 0:
                 val_size = val_ratio / (val_ratio + test_ratio)
-                val_idx, test_idx = train_test_split(
-                    val_test_idx, train_size=val_size, random_state=self.random_state + 1
+                np.random.seed(self.random_state + 1)
+                val_dists, test_dists = train_test_split(
+                    val_test_dists, train_size=val_size, random_state=self.random_state + 1
                 )
+                val_dists = val_dists.tolist()
+                test_dists = test_dists.tolist()
             else:
-                val_idx = np.array([])
-                test_idx = np.array([])
+                val_dists = []
+                test_dists = []
 
             logger.info("SOFT HOLDOUT GROUPS: Val/test can share values")
 
-        # Also assign control cells to splits based on their cell_line
-        train_idx, val_idx, test_idx = self._add_control_cells_to_splits(
-            train_idx, val_idx, test_idx,
-            train_values, val_values, test_values,
-            perturbation_covariates_mask,
-            dataset_index
-        )
-
-        # Log overlap information (important for combination treatments)
-        total_assigned = len(set(train_idx) | set(val_idx) | set(test_idx))
-        logger.info(
-            f"Total observations assigned to splits: {total_assigned} out of {len(perturbation_covariates_mask)}"
-        )
-
-        overlaps = []
-        if len(set(train_idx) & set(val_idx)) > 0:
-            overlaps.append("train-val")
-        if len(set(train_idx) & set(test_idx)) > 0:
-            overlaps.append("train-test")
-        if len(set(val_idx) & set(test_idx)) > 0:
-            overlaps.append("val-test")
-
-        if overlaps:
-            logger.warning(
-                f"Found overlapping cells between splits: {overlaps}. This is expected with combination treatments."
-            )
-
-        return {"train": train_idx, "val": val_idx, "test": test_idx}
+        return {
+            "train": train_dists,
+            "val": val_dists,
+            "test": test_dists,
+            "train_values": train_values,
+            "val_values": val_values,
+            "test_values": test_values,
+        }
 
     def _split_holdout_combinations(
         self,
-        perturbation_covariates_mask: np.ndarray,
-        perturbation_idx_to_covariates: dict[int, tuple[str, ...]],
+        dist_df: pd.DataFrame,
         split_ratios: list[float],
-    ) -> dict[str, np.ndarray]:
+    ) -> dict[str, list[int]]:
         """Split by keeping single conditions in training and holding out combinations for val/test."""
         if self.split_key is None:
             raise ValueError("split_key must be provided for holdout_combinations splitting")
         if self.control_value is None:
             raise ValueError("control_value must be provided for holdout_combinations splitting")
 
-        logger.info("Identifying combinations vs singletons from condition covariates")
+        logger.info("Identifying combinations vs singletons from distribution labels")
         logger.info(f"Control value(s): {self.control_value}")
 
-        # Classify each perturbation index as control, singleton, or combination
-        control_pert_indices = []
-        singleton_pert_indices = []
-        combination_pert_indices = []
+        # Classify each distribution as control, singleton, or combination
+        control_dists = []
+        singleton_dists = []
+        combination_dists = []
 
-        for pert_idx, covariates in perturbation_idx_to_covariates.items():
-            non_control_values = [c for c in covariates if c not in self.control_value]
+        for _, row in dist_df.iterrows():
+            tgt_dist_idx = row["tgt_dist_idx"]
+            # Count non-control values in split_key columns
+            non_control_values = [
+                row[key] for key in self.split_key 
+                if row[key] not in self.control_value
+            ]
             n_non_control = len(non_control_values)
 
             if n_non_control == 0:
-                control_pert_indices.append(pert_idx)
+                control_dists.append(tgt_dist_idx)
             elif n_non_control == 1:
-                singleton_pert_indices.append(pert_idx)
+                singleton_dists.append(tgt_dist_idx)
             else:
-                combination_pert_indices.append(pert_idx)
+                combination_dists.append(tgt_dist_idx)
 
-        # Get cell indices for each type
-        if len(control_pert_indices) > 0:
-            control_mask = np.isin(perturbation_covariates_mask, control_pert_indices)
-        else:
-            control_mask = np.zeros(len(perturbation_covariates_mask), dtype=bool)
+        # Remove duplicates
+        control_dists = list(set(control_dists))
+        singleton_dists = list(set(singleton_dists))
+        combination_dists = list(set(combination_dists))
 
-        if len(singleton_pert_indices) > 0:
-            singleton_mask = np.isin(perturbation_covariates_mask, singleton_pert_indices)
-        else:
-            singleton_mask = np.zeros(len(perturbation_covariates_mask), dtype=bool)
+        logger.info(f"Found {len(combination_dists)} combination treatment distributions")
+        logger.info(f"Found {len(singleton_dists)} singleton treatment distributions")
+        logger.info(f"Found {len(control_dists)} control treatment distributions")
 
-        if len(combination_pert_indices) > 0:
-            combination_mask = np.isin(perturbation_covariates_mask, combination_pert_indices)
-        else:
-            combination_mask = np.zeros(len(perturbation_covariates_mask), dtype=bool)
-
-        # Count each type
-        n_combinations = combination_mask.sum()
-        n_singletons = singleton_mask.sum()
-        n_controls = control_mask.sum()
-
-        logger.info(f"Found {n_combinations} combination treatments")
-        logger.info(f"Found {n_singletons} singleton treatments")
-        logger.info(f"Found {n_controls} control treatments")
-
-        if n_combinations == 0:
-            warnings.warn("No combination treatments found. Consider using 'holdout_groups' instead.", stacklevel=2)
-
-        # Get indices for each type
-        combination_indices = np.where(combination_mask)[0]
-        singleton_indices = np.where(singleton_mask)[0]
-        control_indices = np.where(control_mask)[0]
+        if len(combination_dists) == 0:
+            warnings.warn(
+                "No combination treatments found. Consider using 'holdout_groups' instead.",
+                stacklevel=2
+            )
 
         # All singletons and controls go to training
-        train_idx = np.concatenate([singleton_indices, control_indices])
+        train_dists = singleton_dists + control_dists
 
         # Split combinations according to the provided ratios
         train_ratio, val_ratio, test_ratio = split_ratios
 
-        if n_combinations > 0:
-            # Get perturbation identifiers for combination cells
-            # Map each cell to its perturbation tuple (non-control values only)
-            perturbation_ids = []
-            for cell_idx in combination_indices:
-                pert_idx = perturbation_covariates_mask[cell_idx]
-                covariates = perturbation_idx_to_covariates[pert_idx]
-                # Extract non-control values
-                non_control_vals = [c for c in covariates if c not in self.control_value]
-                perturbation_id = tuple(sorted(non_control_vals))
-                perturbation_ids.append(perturbation_id)
-
-            # Get unique perturbation combinations
-            unique_perturbations = list(set(perturbation_ids))
-            n_unique_perturbations = len(unique_perturbations)
-
-            logger.info(f"Found {n_unique_perturbations} unique condition combinations")
-
+        if len(combination_dists) > 0:
             if self.hard_test_split:
-                # HARD TEST SPLIT: Val and test get completely different conditions
-                # Calculate number of perturbation combinations for each split
-                n_test_perturbations = int(test_ratio * n_unique_perturbations)
-                n_val_perturbations = int(val_ratio * n_unique_perturbations)
-                n_train_perturbations = n_unique_perturbations - n_test_perturbations - n_val_perturbations
+                # HARD: Val and test get completely different combinations
+                n_combos = len(combination_dists)
+                n_test = int(test_ratio * n_combos)
+                n_val = int(val_ratio * n_combos)
 
-                # Ensure we have at least one perturbation for train if train_ratio > 0
-                if train_ratio > 0 and n_train_perturbations == 0:
-                    n_train_perturbations = 1
-                    n_test_perturbations = max(0, n_test_perturbations - 1)
-
-                # Step 1: Select test perturbations using test_random_state
+                # Step 1: Select test combinations using test_random_state
                 np.random.seed(self.test_random_state)
-                shuffled_for_test = np.random.permutation(unique_perturbations)
-                test_perturbations = (
-                    [tuple(p) for p in shuffled_for_test[-n_test_perturbations:]] if n_test_perturbations > 0 else []
-                )
-                remaining_after_test = (
-                    shuffled_for_test[:-n_test_perturbations] if n_test_perturbations > 0 else shuffled_for_test
-                )
+                shuffled_for_test = np.random.permutation(combination_dists)
+                test_combo_dists = shuffled_for_test[-n_test:].tolist() if n_test > 0 else []
+                remaining_after_test = shuffled_for_test[:-n_test].tolist() if n_test > 0 else shuffled_for_test.tolist()
 
-                # Step 2: Select val perturbations from remaining using val_random_state
+                # Step 2: Select val combinations from remaining using val_random_state
                 np.random.seed(self.val_random_state)
                 shuffled_for_val = np.random.permutation(remaining_after_test)
-                val_perturbations = (
-                    [tuple(p) for p in shuffled_for_val[-n_val_perturbations:]] if n_val_perturbations > 0 else []
-                )
-                train_perturbations = (
-                    [tuple(p) for p in shuffled_for_val[:-n_val_perturbations]]
-                    if n_val_perturbations > 0
-                    else [tuple(p) for p in shuffled_for_val]
-                )
+                val_combo_dists = shuffled_for_val[-n_val:].tolist() if n_val > 0 else []
+                train_combo_dists = shuffled_for_val[:-n_val].tolist() if n_val > 0 else shuffled_for_val.tolist()
 
-                # Assign all cells with same perturbation to same split
-                train_combo_idx = []
-                val_combo_idx = []
-                test_combo_idx = []
+                train_dists.extend(train_combo_dists)
+                val_dists = val_combo_dists
+                test_dists = test_combo_dists
 
-                for i, perturbation_id in enumerate(perturbation_ids):
-                    cell_idx = combination_indices[i]
-                    if perturbation_id in train_perturbations:
-                        train_combo_idx.append(cell_idx)
-                    elif perturbation_id in val_perturbations:
-                        val_combo_idx.append(cell_idx)
-                    elif perturbation_id in test_perturbations:
-                        test_combo_idx.append(cell_idx)
-
-                logger.info(
-                    f"HARD TEST SPLIT - Condition split: Train={len(train_perturbations)}, Val={len(val_perturbations)}, Test={len(test_perturbations)}"
-                )
-                if len(test_perturbations) > 0:
-                    logger.info(f"Test perturbations: {list(test_perturbations)[:3]}")
-                if len(val_perturbations) > 0:
-                    logger.info(f"Val perturbations: {list(val_perturbations)[:3]}")
-
+                logger.info(f"HARD TEST SPLIT - Combinations: Train={len(train_combo_dists)}, Val={len(val_combo_dists)}, Test={len(test_combo_dists)}")
             else:
-                # SOFT TEST SPLIT: Val and test can share conditions, split at cell level
-                # First assign conditions to train vs (val+test) using test_random_state
-                # (In soft mode, val and test share conditions, so we only need one seed for this split)
-                n_train_perturbations = int(train_ratio * n_unique_perturbations)
-                n_val_test_perturbations = n_unique_perturbations - n_train_perturbations
+                # SOFT: Val and test can share combinations
+                n_combos = len(combination_dists)
+                n_train_combos = int(train_ratio * n_combos)
 
-                # Shuffle perturbations using test_random_state
+                # Split combinations into train vs (val+test)
                 np.random.seed(self.test_random_state)
-                shuffled_perturbations = np.random.permutation(unique_perturbations)
+                shuffled_combos = np.random.permutation(combination_dists)
+                train_combo_dists = shuffled_combos[:n_train_combos].tolist()
+                val_test_combo_dists = shuffled_combos[n_train_combos:].tolist()
 
-                train_perturbations = (
-                    shuffled_perturbations[:n_train_perturbations] if n_train_perturbations > 0 else []
-                )
-                val_test_perturbations = (
-                    shuffled_perturbations[n_train_perturbations:] if n_val_test_perturbations > 0 else []
-                )
+                train_dists.extend(train_combo_dists)
 
-                # Get cells for train perturbations (all go to train)
-                train_combo_idx = []
-                val_test_combo_idx = []
-
-                for i, perturbation_id in enumerate(perturbation_ids):
-                    cell_idx = combination_indices[i]
-                    if perturbation_id in train_perturbations:
-                        train_combo_idx.append(cell_idx)
-                    else:
-                        val_test_combo_idx.append(cell_idx)
-
-                # Now split val_test cells according to val/test ratios
-                if len(val_test_combo_idx) > 0 and val_ratio + test_ratio > 0:
+                # Split val+test distributions
+                if len(val_test_combo_dists) > 0 and val_ratio + test_ratio > 0:
                     val_size = val_ratio / (val_ratio + test_ratio)
-                    np.random.seed(self.random_state + 1)  # Different seed for cell-level split
-
-                    val_combo_idx, test_combo_idx = train_test_split(
-                        val_test_combo_idx, train_size=val_size, random_state=self.random_state + 1
+                    np.random.seed(self.random_state + 1)
+                    val_dists, test_dists = train_test_split(
+                        val_test_combo_dists, train_size=val_size, random_state=self.random_state + 1
                     )
+                    val_dists = val_dists.tolist()
+                    test_dists = test_dists.tolist()
                 else:
-                    val_combo_idx = np.array([])
-                    test_combo_idx = np.array([])
+                    val_dists = []
+                    test_dists = []
 
-                logger.info(
-                    f"SOFT TEST SPLIT - Condition split: Train={len(train_perturbations)}, Val+Test={len(val_test_perturbations)}"
-                )
-                logger.info(f"Cell split within Val+Test: Val={len(val_combo_idx)}, Test={len(test_combo_idx)}")
-
-            # Convert to numpy arrays
-            train_combo_idx = np.array(train_combo_idx)
-            val_combo_idx = np.array(val_combo_idx)
-            test_combo_idx = np.array(test_combo_idx)
-
-            # Combine singletons/controls with assigned combinations
-            train_idx = np.concatenate([train_idx, train_combo_idx])
-            val_idx = val_combo_idx
-            test_idx = test_combo_idx
-
-            logger.info(
-                f"Final cell split: Train={len(train_combo_idx)}, Val={len(val_combo_idx)}, Test={len(test_combo_idx)}"
-            )
+                logger.info(f"SOFT TEST SPLIT - Combinations: Train={len(train_combo_dists)}, Val+Test={len(val_test_combo_dists)}")
         else:
-            val_idx = np.array([])
-            test_idx = np.array([])
+            val_dists = []
+            test_dists = []
 
-        logger.info(
-            f"Final split - Train: {len(train_idx)} (singletons + controls + {len(train_combo_idx) if n_combinations > 0 else 0} combination observations)"
-        )
-        logger.info(f"Final split - Val: {len(val_idx)} (combination observations only)")
-        logger.info(f"Final split - Test: {len(test_idx)} (combination observations only)")
+        logger.info(f"Final split - Train: {len(train_dists)}, Val: {len(val_dists)}, Test: {len(test_dists)} distributions")
 
-        return {"train": train_idx, "val": val_idx, "test": test_idx}
+        return {"train": train_dists, "val": val_dists, "test": test_dists}
 
     def _split_stratified(
         self,
-        perturbation_covariates_mask: np.ndarray,
+        dist_df: pd.DataFrame,
         split_ratios: list[float],
-    ) -> dict[str, np.ndarray]:
-        """Perform stratified split maintaining proportions of conditions."""
-        if self.split_key is None:
-            raise ValueError("split_key must be provided for stratified splitting")
-
+    ) -> dict[str, list[int]]:
+        """Perform stratified split maintaining source distribution proportions."""
         train_ratio, val_ratio, test_ratio = split_ratios
-        # Use perturbation indices as stratification labels
-        labels = perturbation_covariates_mask
-        indices = np.arange(len(perturbation_covariates_mask))
+
+        # Use src_dist_idx as stratification labels
+        dist_indices = dist_df["tgt_dist_idx"].values
+        src_labels = dist_df["src_dist_idx"].values
 
         if self.hard_test_split:
-            # HARD: Val and test get different stratification groups (existing logic)
+            # HARD: Val and test get different stratification groups
             if val_ratio + test_ratio > 0:
                 train_idx, temp_idx = train_test_split(
-                    indices, train_size=train_ratio, stratify=labels, random_state=self.random_state
+                    dist_indices, train_size=train_ratio, stratify=src_labels, random_state=self.random_state
                 )
 
                 if val_ratio > 0 and test_ratio > 0:
-                    temp_labels = labels[temp_idx]
+                    temp_src_labels = dist_df[dist_df["tgt_dist_idx"].isin(temp_idx)]["src_dist_idx"].values
                     val_size = val_ratio / (val_ratio + test_ratio)
                     val_idx, test_idx = train_test_split(
-                        temp_idx, train_size=val_size, stratify=temp_labels, random_state=self.random_state
+                        temp_idx, train_size=val_size, stratify=temp_src_labels, random_state=self.random_state
                     )
                 elif val_ratio > 0:
                     val_idx = temp_idx
@@ -779,19 +456,19 @@ class DataSplitter:
                     val_idx = np.array([])
                     test_idx = temp_idx
             else:
-                train_idx = indices
+                train_idx = dist_indices
                 val_idx = np.array([])
                 test_idx = np.array([])
 
             logger.info("HARD STRATIFIED SPLIT: Val and test get different strata")
         else:
-            # SOFT: Val and test can share stratification groups, split at cell level
+            # SOFT: Val and test can share stratification groups
             if val_ratio + test_ratio > 0:
                 train_idx, val_test_idx = train_test_split(
-                    indices, train_size=train_ratio, stratify=labels, random_state=self.random_state
+                    dist_indices, train_size=train_ratio, stratify=src_labels, random_state=self.random_state
                 )
 
-                # Split val+test cells (not stratified)
+                # Split val+test distributions (not stratified)
                 if len(val_test_idx) > 0 and val_ratio + test_ratio > 0:
                     val_size = val_ratio / (val_ratio + test_ratio)
                     val_idx, test_idx = train_test_split(
@@ -801,263 +478,135 @@ class DataSplitter:
                     val_idx = np.array([])
                     test_idx = np.array([])
             else:
-                train_idx = indices
+                train_idx = dist_indices
                 val_idx = np.array([])
                 test_idx = np.array([])
 
             logger.info("SOFT STRATIFIED SPLIT: Val/test can share strata")
 
-        return {"train": train_idx, "val": val_idx, "test": test_idx}
+        return {
+            "train": train_idx.tolist(),
+            "val": val_idx.tolist(),
+            "test": test_idx.tolist()
+        }
 
-    def split_single_dataset(self, training_data: GroupedDistribution, dataset_index: int) -> dict:
+    def split_single(
+        self, 
+        annotation: GroupedDistributionAnnotation, 
+        dataset_index: int
+    ) -> dict[str, GroupedDistributionAnnotation]:
         """
-        Split a single GroupedDistribution object according to the specified strategy.
+        Split a single GroupedDistributionAnnotation according to the specified strategy.
 
         Parameters
         ----------
-        training_data : GroupedDistribution
-            Training data object to split
+        annotation : GroupedDistributionAnnotation
+            Annotation object to split
         dataset_index : int
             Index of the dataset to get the correct split ratios
 
         Returns
         -------
-        dict
-            Dictionary containing split indices and metadata
+        dict[str, GroupedDistributionAnnotation]
+            Dictionary with "train", "val", "test" keys mapping to split annotations
         """
-        # Extract perturbation information
-        pert_info = self.extract_perturbation_info(training_data)
-        perturbation_covariates_mask = pert_info["perturbation_covariates_mask"]
-        perturbation_idx_to_covariates = pert_info["perturbation_idx_to_covariates"]
-        n_cells = pert_info["n_cells"]
-
-        # Get split ratios for this specific dataset
+        dist_df = annotation.src_tgt_dist_df
         current_split_ratios = self.split_ratios[dataset_index]
+
+        logger.info(f"Splitting {len(dist_df)} distributions")
+        logger.info(f"Unique source distributions: {dist_df['src_dist_idx'].nunique()}")
 
         # Perform split based on strategy
         if self.split_type == "random":
-            split_indices = self._split_random(n_cells, current_split_ratios)
+            split_result = self._split_random(
+                dist_df["tgt_dist_idx"].tolist(),
+                current_split_ratios
+            )
         elif self.split_type == "holdout_groups":
-            split_indices = self._split_by_values(
-                perturbation_covariates_mask, perturbation_idx_to_covariates, current_split_ratios, dataset_index
-            )
+            split_result = self._split_holdout_groups(dist_df, current_split_ratios)
         elif self.split_type == "holdout_combinations":
-            split_indices = self._split_holdout_combinations(
-                perturbation_covariates_mask, perturbation_idx_to_covariates, current_split_ratios
-            )
+            split_result = self._split_holdout_combinations(dist_df, current_split_ratios)
         elif self.split_type == "stratified":
-            split_indices = self._split_stratified(perturbation_covariates_mask, current_split_ratios)
+            split_result = self._split_stratified(dist_df, current_split_ratios)
         else:
             raise ValueError(f"Unknown split_type: {self.split_type}")
 
-        # Create result dictionary with indices and metadata
-        result = {
-            "indices": split_indices,
-            "metadata": {
-                "total_cells": n_cells,
-                "split_type": self.split_type,
-                "split_key": self.split_key,
-                "split_ratios": current_split_ratios,
-                "random_state": self.random_state,
-                "test_random_state": self.test_random_state,
-                "val_random_state": self.val_random_state,
-                "hard_test_split": self.hard_test_split,
-            },
+        # Create split annotations
+        split_annotations = {}
+        for split_name in ["train", "val", "test"]:
+            dist_indices = split_result[split_name]
+            if len(dist_indices) > 0:
+                split_annotations[split_name] = annotation.filter_by_tgt_dist_indices(dist_indices)
+            else:
+                # Create empty annotation
+                split_annotations[split_name] = GroupedDistributionAnnotation(
+                    old_obs_index=annotation.old_obs_index,
+                    src_dist_idx_to_labels={},
+                    tgt_dist_idx_to_labels={},
+                    src_tgt_dist_df=pd.DataFrame(columns=dist_df.columns),
+                )
+
+        # Store metadata
+        metadata = {
+            "split_type": self.split_type,
+            "split_key": self.split_key,
+            "split_ratios": current_split_ratios,
+            "random_state": self.random_state,
+            "test_random_state": self.test_random_state,
+            "val_random_state": self.val_random_state,
+            "hard_test_split": self.hard_test_split,
+            "train_distributions": len(split_result["train"]),
+            "val_distributions": len(split_result["val"]),
+            "test_distributions": len(split_result["test"]),
         }
 
-        # Add force_training_values and control_value to metadata
         if self.force_training_values:
-            result["metadata"]["force_training_values"] = self.force_training_values
+            metadata["force_training_values"] = self.force_training_values
         if self.control_value:
-            result["metadata"]["control_value"] = self.control_value
+            metadata["control_value"] = self.control_value
 
-        # Add split values information if applicable
-        if self.split_type in ["holdout_groups", "holdout_combinations"] and self.split_key:
-            unique_values = self._get_unique_perturbation_values(perturbation_idx_to_covariates, dataset_index)
+        # Add split values if available
+        if "train_values" in split_result:
+            metadata["train_values"] = split_result["train_values"]
+            metadata["val_values"] = split_result["val_values"]
+            metadata["test_values"] = split_result["test_values"]
 
-            covar_name_to_positions = self.covariate_orderings[dataset_index] if self.covariate_orderings else {}
-            positions_to_extract = []
-            if self.split_key and covar_name_to_positions:
-                for key in self.split_key:
-                    if key in covar_name_to_positions:
-                        positions_to_extract.extend(covar_name_to_positions[key])
-
-            def _get_split_values(indices):
-                if len(indices) == 0:
-                    return []
-                split_vals = set()
-                for idx in indices:
-                    pert_idx = perturbation_covariates_mask[idx]
-                    covariates = perturbation_idx_to_covariates[pert_idx]
-                    if positions_to_extract:
-                        for pos in positions_to_extract:
-                            if pos < len(covariates):
-                                split_vals.add(covariates[pos])
-                    else:
-                        split_vals.update(covariates)
-                return list(split_vals)
-
-            train_values = _get_split_values(split_indices["train"])
-            val_values = _get_split_values(split_indices["val"])
-            test_values = _get_split_values(split_indices["test"])
-
-            result["split_values"] = {
-                "train": train_values,
-                "val": val_values,
-                "test": test_values,
-                "all_unique": unique_values,
-            }
+        split_annotations["metadata"] = metadata
 
         # Log split statistics
         logger.info(f"Split results for {self.dataset_names[dataset_index]}:")
-        for split_name, indices in split_indices.items():
-            if len(indices) > 0:
-                logger.info(f"  {split_name}: {len(indices)} observations")
+        for split_name in ["train", "val", "test"]:
+            n_dists = len(split_result[split_name])
+            logger.info(f"  {split_name}: {n_dists} distributions")
 
-        return result
+        return split_annotations
 
-    def split_all_datasets(self) -> dict[str, dict]:
+    def split_all(self) -> dict[str, dict[str, GroupedDistributionAnnotation]]:
         """
-        Split all GroupedDistribution objects according to the specified strategy.
+        Split all GroupedDistributionAnnotation objects according to the specified strategy.
 
         Returns
         -------
-        dict[str, dict]
-            Nested dictionary with dataset names as keys and split information as values
+        dict[str, dict[str, GroupedDistributionAnnotation]]
+            Nested dictionary with dataset names as keys and split annotations as values.
+            Each split contains "train", "val", "test" annotation objects and "metadata".
         """
         logger.info(f"Starting data splitting with strategy: {self.split_type}")
-        logger.info(f"Number of datasets: {len(self.training_datasets)}")
-        for i, ratios in enumerate(self.split_ratios):
-            logger.info(f"Dataset {i} ratios: train={ratios[0]}, val={ratios[1]}, test={ratios[2]}")
+        logger.info(f"Number of datasets: {len(self.annotations)}")
 
-        for i, (training_data, dataset_name) in enumerate(zip(self.training_datasets, self.dataset_names, strict=True)):
+        for i, (annotation, dataset_name) in enumerate(zip(self.annotations, self.dataset_names, strict=True)):
             logger.info(f"\nProcessing dataset {i}: {dataset_name}")
             logger.info(f"Using split ratios: {self.split_ratios[i]}")
 
-            split_result = self.split_single_dataset(training_data, i)
+            split_result = self.split_single(annotation, i)
             self.split_results[dataset_name] = split_result
 
-        logger.info(f"\nCompleted splitting {len(self.training_datasets)} datasets")
+        logger.info(f"\nCompleted splitting {len(self.annotations)} datasets")
         return self.split_results
-
-    def generate_split_summary(self) -> dict[str, dict]:
-        """
-        Generate a human-readable summary of split conditions for each dataset.
-
-        This method creates a comprehensive summary showing which specific conditions
-        (perturbations, cell lines, donors, etc.) are assigned to train/val/test splits.
-        Useful for tracking what was tested across different random seeds.
-
-        Returns
-        -------
-        dict[str, dict]
-            Dictionary with dataset names as keys and split summaries as values.
-            Each summary contains:
-            - conditions_per_split: Lists of condition values in each split
-            - observations_per_condition: Number of observations for each condition in each split
-            - statistics: Observation and condition counts per split
-            - configuration: Random states and split parameters used
-
-        Examples
-        --------
-        >>> splitter = DataSplitter(...)
-        >>> results = splitter.split_all_datasets()
-        >>> summary = splitter.generate_split_summary()
-        >>> print(summary["dataset1"]["conditions_per_split"]["test"])
-        ['DrugA', 'DrugB', 'DrugC']
-        >>> print(summary["dataset1"]["observations_per_condition"]["test"]["DrugA"])
-        150
-        """
-        if not self.split_results:
-            raise ValueError("No split results available. Run split_all_datasets() first.")
-
-        summary = {}
-
-        for i, (dataset_name, split_info) in enumerate(self.split_results.items()):
-            dataset_summary = {
-                "configuration": {
-                    "split_type": split_info["metadata"]["split_type"],
-                    "split_key": split_info["metadata"]["split_key"],
-                    "split_ratios": split_info["metadata"]["split_ratios"],
-                    "random_state": split_info["metadata"]["random_state"],
-                    "test_random_state": split_info["metadata"]["test_random_state"],
-                    "val_random_state": split_info["metadata"]["val_random_state"],
-                    "hard_test_split": split_info["metadata"]["hard_test_split"],
-                },
-                "statistics": {
-                    "total_observations": split_info["metadata"]["total_cells"],
-                },
-            }
-
-            if self.force_training_values:
-                dataset_summary["configuration"]["force_training_values"] = self.force_training_values
-            if self.control_value:
-                dataset_summary["configuration"]["control_value"] = self.control_value
-
-            # Add split statistics
-            for split_name, indices in split_info["indices"].items():
-                dataset_summary["statistics"][f"{split_name}_observations"] = len(indices)
-                if split_info["metadata"]["total_cells"] > 0:
-                    percentage = 100 * len(indices) / split_info["metadata"]["total_cells"]
-                    dataset_summary["statistics"][f"{split_name}_percentage"] = round(percentage, 2)
-
-            # Add condition information if available
-            if "split_values" in split_info:
-                dataset_summary["conditions_per_split"] = {
-                    "train": sorted(split_info["split_values"]["train"]),
-                    "val": sorted(split_info["split_values"]["val"]),
-                    "test": sorted(split_info["split_values"]["test"]),
-                }
-                dataset_summary["statistics"]["total_unique_conditions"] = len(split_info["split_values"]["all_unique"])
-                dataset_summary["statistics"]["train_conditions"] = len(split_info["split_values"]["train"])
-                dataset_summary["statistics"]["val_conditions"] = len(split_info["split_values"]["val"])
-                dataset_summary["statistics"]["test_conditions"] = len(split_info["split_values"]["test"])
-
-            # Add observations per condition for each split
-            training_data = self.training_datasets[i]
-            pert_info = self.extract_perturbation_info(training_data)
-            perturbation_covariates_mask = pert_info["perturbation_covariates_mask"]
-            perturbation_idx_to_covariates = pert_info["perturbation_idx_to_covariates"]
-
-            observations_per_condition = {}
-            for split_name, indices in split_info["indices"].items():
-                if len(indices) == 0:
-                    observations_per_condition[split_name] = {}
-                    continue
-
-                # Count observations per condition for this split
-                condition_counts = {}
-                for idx in indices:
-                    pert_idx = perturbation_covariates_mask[idx]
-                    condition_tuple = perturbation_idx_to_covariates[pert_idx]
-
-                    # Convert tuple to string representation for JSON compatibility
-                    if len(condition_tuple) == 1:
-                        condition_str = condition_tuple[0]
-                    else:
-                        condition_str = "+".join(condition_tuple)
-
-                    condition_counts[condition_str] = condition_counts.get(condition_str, 0) + 1
-
-                # Sort by condition name for consistent output
-                observations_per_condition[split_name] = dict(sorted(condition_counts.items()))
-
-            dataset_summary["observations_per_condition"] = observations_per_condition
-
-            summary[dataset_name] = dataset_summary
-
-        return summary
 
     def save_splits(self, output_dir: str | Path) -> None:
         """
         Save all split information to the specified directory.
-
-        This saves multiple files per dataset:
-        - split_summary.json: Human-readable summary with conditions per split
-        - indices/*.npy: Cell indices for each split
-        - metadata.json: Configuration and parameters
-        - split_values.json: Condition values per split (if applicable)
-        - split_info.pkl: Complete split information
 
         Parameters
         ----------
@@ -1072,51 +621,39 @@ class DataSplitter:
 
         logger.info(f"Saving splits to: {output_dir}")
 
-        # Generate and save split summary
-        split_summary = self.generate_split_summary()
-        summary_file = output_dir / "split_summary.json"
-        with open(summary_file, "w") as f:
-            json.dump(split_summary, f, indent=2)
-        logger.info(f"Saved split summary -> {summary_file}")
-
         for dataset_name, split_info in self.split_results.items():
-            # Save indices as numpy arrays (more efficient for large datasets)
-            indices_dir = output_dir / dataset_name / "indices"
-            indices_dir.mkdir(parents=True, exist_ok=True)
+            dataset_dir = output_dir / dataset_name
+            dataset_dir.mkdir(parents=True, exist_ok=True)
 
-            for split_name, indices in split_info["indices"].items():
-                if len(indices) > 0:
-                    indices_file = indices_dir / f"{split_name}_indices.npy"
-                    np.save(indices_file, indices)
-                    logger.info(f"Saved {split_name} indices: {len(indices)} observations -> {indices_file}")
+            # Save each split annotation
+            for split_name in ["train", "val", "test"]:
+                annotation = split_info[split_name]
+                
+                # Save as pickle
+                annotation_file = dataset_dir / f"{split_name}_annotation.pkl"
+                with open(annotation_file, "wb") as f:
+                    pickle.dump(annotation, f)
+                logger.info(f"Saved {split_name} annotation -> {annotation_file}")
+
+                # Save distribution indices as numpy array for convenience
+                if len(annotation.src_tgt_dist_df) > 0:
+                    indices_file = dataset_dir / f"{split_name}_dist_indices.npy"
+                    np.save(indices_file, annotation.src_tgt_dist_df["tgt_dist_idx"].values)
 
             # Save metadata as JSON
-            metadata_file = output_dir / dataset_name / "metadata.json"
+            metadata_file = dataset_dir / "metadata.json"
             with open(metadata_file, "w") as f:
-                # Convert numpy arrays to lists for JSON serialization
-                metadata = split_info["metadata"].copy()
-                json.dump(metadata, f, indent=2)
+                # Convert to JSON-serializable format
+                metadata_json = split_info["metadata"].copy()
+                json.dump(metadata_json, f, indent=2)
             logger.info(f"Saved metadata -> {metadata_file}")
-
-            # Save split values if available
-            if "split_values" in split_info:
-                split_values_file = output_dir / dataset_name / "split_values.json"
-                with open(split_values_file, "w") as f:
-                    json.dump(split_info["split_values"], f, indent=2)
-                logger.info(f"Saved split values -> {split_values_file}")
-
-            # Save complete split info as pickle for easy loading
-            complete_file = output_dir / dataset_name / "split_info.pkl"
-            with open(complete_file, "wb") as f:
-                pickle.dump(split_info, f)
-            logger.info(f"Saved complete split info -> {complete_file}")
 
         logger.info("All splits saved successfully")
 
     @staticmethod
-    def load_split_info(split_dir: str | Path, dataset_name: str) -> dict:
+    def load_split_annotations(split_dir: str | Path, dataset_name: str) -> dict[str, GroupedDistributionAnnotation]:
         """
-        Load split information from disk.
+        Load split annotations from disk.
 
         Parameters
         ----------
@@ -1127,10 +664,11 @@ class DataSplitter:
 
         Returns
         -------
-        dict
-            Dictionary containing split indices and metadata
+        dict[str, GroupedDistributionAnnotation]
+            Dictionary containing train/val/test annotations and metadata
         """
         import pickle
+        import json
 
         split_dir = Path(split_dir)
         dataset_dir = split_dir / dataset_name
@@ -1138,41 +676,71 @@ class DataSplitter:
         if not dataset_dir.exists():
             raise FileNotFoundError(f"Split directory not found: {dataset_dir}")
 
-        # Load complete split info from pickle
-        complete_file = dataset_dir / "split_info.pkl"
-        if complete_file.exists():
-            with open(complete_file, "rb") as f:
-                return pickle.load(f)
+        result = {}
 
-        # Fallback: reconstruct from individual files
-        logger.warning("Complete split info not found, reconstructing from individual files")
-
-        # Load indices
-        indices_dir = dataset_dir / "indices"
-        indices = {}
+        # Load annotations
         for split_name in ["train", "val", "test"]:
-            indices_file = indices_dir / f"{split_name}_indices.npy"
-            if indices_file.exists():
-                indices[split_name] = np.load(indices_file)
+            annotation_file = dataset_dir / f"{split_name}_annotation.pkl"
+            if annotation_file.exists():
+                with open(annotation_file, "rb") as f:
+                    result[split_name] = pickle.load(f)
             else:
-                indices[split_name] = np.array([])
+                raise FileNotFoundError(f"Annotation file not found: {annotation_file}")
 
         # Load metadata
-        import json
-
         metadata_file = dataset_dir / "metadata.json"
-        with open(metadata_file) as f:
-            metadata = json.load(f)
-
-        # Load split values if available
-        split_values = None
-        split_values_file = dataset_dir / "split_values.json"
-        if split_values_file.exists():
-            with open(split_values_file) as f:
-                split_values = json.load(f)
-
-        result = {"indices": indices, "metadata": metadata}
-        if split_values:
-            result["split_values"] = split_values
+        if metadata_file.exists():
+            with open(metadata_file) as f:
+                result["metadata"] = json.load(f)
 
         return result
+
+
+def apply_split_to_grouped_distribution(
+    gd: GroupedDistribution,
+    split_annotations: dict[str, GroupedDistributionAnnotation]
+) -> dict[str, GroupedDistribution]:
+    """
+    Apply split annotations to a GroupedDistribution to get train/val/test GroupedDistributions.
+
+    Parameters
+    ----------
+    gd : GroupedDistribution
+        Full GroupedDistribution to split
+    split_annotations : dict[str, GroupedDistributionAnnotation]
+        Dictionary with "train", "val", "test" annotations (from DataSplitter.split_single)
+
+    Returns
+    -------
+    dict[str, GroupedDistribution]
+        Dictionary with "train", "val", "test" GroupedDistribution objects
+
+    Examples
+    --------
+    >>> splitter = DataSplitter(...)
+    >>> split_annotations = splitter.split_all()
+    >>> train_val_test = apply_split_to_grouped_distribution(
+    ...     gd, split_annotations["dataset1"]
+    ... )
+    >>> train_gd = train_val_test["train"]
+    >>> val_gd = train_val_test["val"]
+    >>> test_gd = train_val_test["test"]
+    """
+    result = {}
+    for split_name in ["train", "val", "test"]:
+        annotation = split_annotations[split_name]
+        if len(annotation.src_tgt_dist_df) > 0:
+            tgt_dist_indices = annotation.src_tgt_dist_df["tgt_dist_idx"].tolist()
+            result[split_name] = gd.filter_by_tgt_dist_indices(tgt_dist_indices)
+        else:
+            # Create empty GroupedDistribution
+            result[split_name] = GroupedDistribution(
+                data=gd.data.__class__(
+                    src_to_tgt_dist_map={},
+                    src_data={},
+                    tgt_data={},
+                    conditions={},
+                ),
+                annotation=annotation,
+            )
+    return result
