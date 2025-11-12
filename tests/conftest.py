@@ -1,8 +1,9 @@
 import anndata as ad
-import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import pytest
+
+from scaleflow.data import DataManager, GroupedDistribution, AnnDataLocation
 
 
 @pytest.fixture()
@@ -159,3 +160,110 @@ def metrics_data():
         "Dacinostat+Danusertib": np.random.rand(20, 10),
     }
     return data
+
+
+@pytest.fixture
+def adata_test() -> ad.AnnData:
+    n_drugs = 10
+    n_genes = 5
+    n_cell_lines = 3
+    n_plates = 3
+    n_days = 3
+    n_batches = 3
+    drugs = ["control"] + [f"drug_{i}" for i in range(n_drugs)]
+    genes = ["control"] + [f"gene_{i}" for i in range(n_genes)]
+    cell_lines = [f"cell_line_{i}" for i in range(n_cell_lines)]
+    batches = [f"batch_{i}" for i in range(n_batches)]
+    plates = [f"plate_{i}" for i in range(n_plates)]
+    days = [f"day_{i}" for i in range(n_days)]
+    doses = [1.0, 10.0, 100.0]
+
+    rows = []
+    for drug in drugs:
+        for gene in genes:
+            for cell_line in cell_lines:
+                for batch in batches:
+                    for plate in plates:
+                        for day in days:
+                            if drug != "control":
+                                for dose in doses:
+                                    rows.append(
+                                        {
+                                            "drug": drug,
+                                            "gene": gene,
+                                            "cell_line": cell_line,
+                                            "batch": batch,
+                                            "plate": plate,
+                                            "day": day,
+                                            "dose": dose,
+                                            "control": False,
+                                        }
+                                    )
+                            else:
+                                rows.append(
+                                    {
+                                        "drug": drug,
+                                        "gene": gene,
+                                        "cell_line": cell_line,
+                                        "batch": batch,
+                                        "plate": plate,
+                                        "day": day,
+                                        "dose": 0.0,
+                                        "control": gene == "control" and drug == "control",
+                                    }
+                                )
+
+    n_obs = len(rows)
+    n_vars = 20
+    n_pca = 10
+
+    obs = pd.DataFrame(rows)
+
+    # Convert to categorical
+    for col in ["cell_line", "drug", "gene", "batch", "plate", "day"]:
+        obs[col] = obs[col].astype("category")
+
+    # Simple X matrix (not really used in tests, just needs to exist)
+    X = np.random.randn(n_obs, n_vars).astype(np.float32)
+
+    # X_pca: Put cell index at position [idx, 0] for easy tracing
+    X_pca = np.zeros((n_obs, n_pca), dtype=np.float32)
+    for i in range(n_obs):
+        X_pca[i, 0] = float(i)  # Cell 0 has value 0, cell 1 has value 1, etc.
+
+    # Create AnnData
+    adata = ad.AnnData(X=X, obs=obs)
+    adata.obsm["X_pca"] = X_pca
+
+    # Simple embeddings
+    # one hot encoding
+
+    adata.uns["cell_line_embeddings"] = dict(zip(cell_lines, np.eye(n_cell_lines), strict=True))
+
+    adata.uns["drug_embeddings"] = dict(
+        zip(drugs, np.concatenate([np.zeros((1, n_drugs)), np.eye(n_drugs)], axis=0), strict=True)
+    )
+
+    adata.uns["gene_embeddings"] = dict(
+        zip(genes, np.concatenate([np.zeros((1, n_genes)), np.eye(n_genes)], axis=0), strict=True)
+    )
+
+    return adata
+
+
+@pytest.fixture
+def sample_grouped_distribution(adata_test: ad.AnnData) -> GroupedDistribution:
+    adl = AnnDataLocation()
+    dm = DataManager(
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys=["drug", "gene"],
+        rep_keys={
+            "cell_line": "cell_line_embeddings",
+            "drug": "drug_embeddings",
+            "gene": "gene_embeddings",
+        },
+        data_location=adl.obsm["X_pca"],
+    )
+    gd = dm.prepare_data(adata_test)
+    return gd
