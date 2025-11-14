@@ -128,6 +128,11 @@ class GroupedDistributionAnnotation:
     tgt_dist_idx_to_labels: dict[int, Any]  # (n_tgt_dists) → Any (e.g. list of strings)
     src_tgt_dist_df: pd.DataFrame
 
+    default_values: dict[str, Any]
+    tgt_dist_keys: list[str]
+    src_dist_keys: list[str]
+    dist_flag_key: str
+
     @classmethod
     def read_zarr(
         cls,
@@ -142,6 +147,10 @@ class GroupedDistributionAnnotation:
             src_dist_idx_to_labels=elem["src_dist_idx_to_labels"],
             tgt_dist_idx_to_labels=elem["tgt_dist_idx_to_labels"],
             src_tgt_dist_df=elem["src_tgt_dist_df"],
+            default_values=elem["default_values"],
+            tgt_dist_keys=elem["tgt_dist_keys"],
+            src_dist_keys=elem["src_dist_keys"],
+            dist_flag_key=elem["dist_flag_key"],
         )
 
     def write_zarr_group(
@@ -158,6 +167,7 @@ class GroupedDistributionAnnotation:
             "src_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.src_dist_idx_to_labels.items()},
             "tgt_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.tgt_dist_idx_to_labels.items()},
             "src_tgt_dist_df": self.src_tgt_dist_df,
+            "control_values": self.control_values,
         }
         write_sharded(
             group=group,
@@ -209,6 +219,7 @@ class GroupedDistributionAnnotation:
             src_dist_idx_to_labels=filtered_src_labels,
             tgt_dist_idx_to_labels=filtered_tgt_labels,
             src_tgt_dist_df=filtered_df,
+            control_values=self.control_values,
         )
 
 

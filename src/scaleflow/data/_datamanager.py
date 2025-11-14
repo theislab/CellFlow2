@@ -76,11 +76,18 @@ class DataManager:
         obs["src_dist_idx"] = obs["src_dist_idx"].fillna(-1).astype(np.int32)
         obs["tgt_dist_idx"] = obs["tgt_dist_idx"].fillna(-1).astype(np.int32)
 
-        # preparing for src_to_tgt_dist_map
+        # prepare src_tgt_dist_df
         src_tgt_dist_df = obs.loc[~obs[self.dist_flag_key]]
         src_tgt_dist_df = src_tgt_dist_df[["src_dist_idx", "tgt_dist_idx", *src_tgt_dist_keys]]
         src_tgt_dist_df.drop_duplicates(inplace=True)
 
+        # prepare default_values
+        temp_df = obs.loc[obs[self.dist_flag_key]][self.tgt_dist_keys].drop_duplicates()
+        if len(temp_df) != 1:
+            raise ValueError("There should be exactly one control value.")
+        default_values = temp_df.iloc[0].to_dict()
+
+        # prepare src_to_tgt_dist_map
         src_to_tgt_dist_map = (
             src_tgt_dist_df[["src_dist_idx", "tgt_dist_idx"]]
             .groupby("src_dist_idx")["tgt_dist_idx"]
@@ -88,7 +95,7 @@ class DataManager:
             .to_dict()
         )
 
-        # preparing src_dist_labels
+        # prepare src_dist_labels
         src_dist_labels = (
             obs.loc[obs[self.dist_flag_key]][[*self.src_dist_keys, "src_dist_idx"]]
             .drop_duplicates()
@@ -98,7 +105,7 @@ class DataManager:
             zip(src_dist_labels.index, src_dist_labels.itertuples(index=False, name=None), strict=True)
         )
 
-        # preparing tgt_dist_labels
+        # prepare tgt_dist_labels
         tgt_dist_labels = (
             obs.loc[~obs[self.dist_flag_key]][[*self.tgt_dist_keys, "tgt_dist_idx"]]
             .drop_duplicates()
@@ -106,8 +113,9 @@ class DataManager:
         )
         tgt_dist_labels = dict(zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None), strict=True))
 
-        col_to_repr = {key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()}
 
+        # prepare conditions
+        col_to_repr = {key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()}
         with timer("Getting conditions", verbose=verbose):
             conditions = {}
             for src_dist_idx, tgt_dist_idxs in src_to_tgt_dist_map.items():
@@ -124,10 +132,11 @@ class DataManager:
                     ]
                     conditions[tgt_dist_idx] = np.concatenate([*src_repr, *tgt_repr])
 
+
+        # prepare src_data and tgt_data
         arr = self.data_location(adata)
         if isinstance(arr, da.Array):
             arr = arr.compute()
-
         with timer("Getting source and target distribution data", verbose=verbose):
             src_dist_map = obs[obs[self.dist_flag_key]].groupby("src_dist_idx", observed=False).groups
             tgt_dist_map = obs[~obs[self.dist_flag_key]].groupby("tgt_dist_idx", observed=False).groups
@@ -145,8 +154,12 @@ class DataManager:
             annotation=GroupedDistributionAnnotation(
                 src_tgt_dist_df=src_tgt_dist_df,
                 old_obs_index=old_index_mapping,
+                tgt_dist_keys=self.tgt_dist_keys,
+                src_dist_keys=self.src_dist_keys,
+                dist_flag_key=self.dist_flag_key,
                 src_dist_idx_to_labels=src_dist_labels,
                 tgt_dist_idx_to_labels=tgt_dist_labels,
+                default_values=default_values,
             ),
         )
 
