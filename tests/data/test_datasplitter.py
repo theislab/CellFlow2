@@ -138,7 +138,7 @@ class TestAnnotationSplitterSplit:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # Check that split column exists
         assert "split" in df_split.columns
@@ -162,7 +162,7 @@ class TestAnnotationSplitterSplit:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # Check that custom split column exists
         assert "my_split" in df_split.columns
@@ -184,7 +184,7 @@ class TestAnnotationSplitterSplit:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # All rows with the same drug should have the same split
         for drug in df_split["drug"].unique():
@@ -203,7 +203,7 @@ class TestAnnotationSplitterSplit:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # Get unique combinations
         df_unique = df_split.drop_duplicates(subset=["drug", "gene"])
@@ -243,8 +243,8 @@ class TestAnnotationSplitterSplit:
             random_state=42,
         )
 
-        df_split1 = splitter1.split(sample_grouped_distribution.annotation)
-        df_split2 = splitter2.split(sample_grouped_distribution.annotation)
+        df_split1 = splitter1._split_df()
+        df_split2 = splitter2._split_df()
 
         # Results should be identical
         pd.testing.assert_frame_equal(df_split1, df_split2)
@@ -271,8 +271,8 @@ class TestAnnotationSplitterSplit:
             random_state=123,
         )
 
-        df_split1 = splitter1.split(sample_grouped_distribution.annotation)
-        df_split2 = splitter2.split(sample_grouped_distribution.annotation)
+        df_split1 = splitter1._split_df()
+        df_split2 = splitter2._split_df()
 
         # Results should be different
         assert not df_split1[["split","drug","gene"]].equals(df_split2[["split","drug","gene"]])
@@ -289,7 +289,7 @@ class TestAnnotationSplitterSplit:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # Group by split_by keys and check each group has only one split value
         for (drug, gene), group in df_split.groupby(["drug", "gene"]):
@@ -314,7 +314,7 @@ class TestAnnotationSplitterForceTraining:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # All rows with drug_0 should be in training
         drug_0_rows = df_split[df_split["drug"] == "drug_0"]
@@ -333,7 +333,7 @@ class TestAnnotationSplitterForceTraining:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # All rows with drug_0 OR gene_0 should be in training
         forced_rows = df_split[(df_split["drug"] == "drug_0") | (df_split["gene"] == "gene_0")]
@@ -353,7 +353,7 @@ class TestAnnotationSplitterForceTraining:
             random_state=42,
         )
 
-        df_no_force = splitter_no_force.split(sample_grouped_distribution.annotation)
+        df_no_force = splitter_no_force._split_df()
 
         # With forcing
         splitter_with_force = AnnotationSplitter(
@@ -366,7 +366,7 @@ class TestAnnotationSplitterForceTraining:
             random_state=42,
         )
 
-        df_with_force = splitter_with_force.split(sample_grouped_distribution.annotation)
+        df_with_force = splitter_with_force._split_df()
 
         # Training set should be different
         train_no_force = set(df_no_force[df_no_force["split"] == "train"]["drug"].unique())
@@ -391,7 +391,7 @@ class TestAnnotationSplitterHoldout:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # Get default values from annotation
         default_values = sample_grouped_distribution.annotation.default_values
@@ -418,7 +418,7 @@ class TestAnnotationSplitterHoldout:
             random_state=42,
         )
 
-        df_split = splitter.split(sample_grouped_distribution.annotation)
+        df_split = splitter._split_df()
 
         # Check that we have all three splits
         assert set(df_split["split"].unique()) == {"train", "val", "test"}

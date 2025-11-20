@@ -94,10 +94,10 @@ class AnnotationSplitter:
 
         return df_unique
 
-    def split(self, annotation: GroupedDistributionAnnotation):
+    def _split_df(self):
         # calculate the sizes of the splits
         is_in_training_key = None
-        df = annotation.src_tgt_dist_df.copy()
+        df = self.annotation.src_tgt_dist_df.copy()
         df_unique = df.drop_duplicates(subset=self.split_by)
         AnnotationSplitter._check_df_unique_columns(df_unique, self.split_by)
         total_combinations = len(df_unique)
