@@ -80,9 +80,9 @@ class AnnotationSplitter:
 
         # remove the forced training combinations from the unique combinations
         if is_in_training_key is not None:
-            df_unique = df_unique[df_unique[is_in_training_key] == is_in_training_key]
+            df_unique = df_unique[df_unique[is_in_training_key]]
         if not_in_training_key is not None:
-            df_unique = df_unique[df_unique[not_in_training_key] != not_in_training_key]
+            df_unique = df_unique[~df_unique[not_in_training_key]]
         if len(df_unique) == 0:
             raise ValueError(
                 "There must be at least one unique combination of split_by keys after removing forced training combinations"
@@ -133,16 +133,16 @@ class AnnotationSplitter:
         )
 
         # Shuffle test_val and split into test and val
-        test_val_mask = df_unique["split"] == "test_val"
+        test_val_mask = df_unique[self.split_key] == "test_val"
         test_val_df = df_unique[test_val_mask].copy()
         test_val_df = test_val_df.sample(frac=1, random_state=self.random_state).reset_index(drop=True)
 
         # Split test_val into test and val
-        test_val_df.loc[: test_size - 1, "split"] = "test"
-        test_val_df.loc[test_size:, "split"] = "val"
+        test_val_df.loc[: test_size - 1, self.split_key] = "test"
+        test_val_df.loc[test_size:, self.split_key] = "val"
 
         # Update the original dataframe with the new split labels
-        df_unique.loc[test_val_mask, "split"] = test_val_df["split"].values
+        df_unique.loc[test_val_mask, self.split_key] = test_val_df[self.split_key].values
         return df_unique
 
     @staticmethod

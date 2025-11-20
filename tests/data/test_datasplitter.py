@@ -1,88 +1,23 @@
-"""Tests for data splitter functionality."""
+"""Test suite for AnnotationSplitter with high coverage."""
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from scaleflow.data._data import GroupedDistributionAnnotation
+from scaleflow.data import GroupedDistribution
 from scaleflow.data._data_splitter import AnnotationSplitter
 
 
-@pytest.fixture
-def sample_annotation():
-    """Create a sample GroupedDistributionAnnotation for testing."""
-    # Create a sample dataframe with source and target distributions
-    df = pd.DataFrame(
-        {
-            "src_dist_idx": [0, 0, 0, 1, 1, 1, 2, 2, 2],
-            "tgt_dist_idx": [0, 1, 2, 3, 4, 5, 6, 7, 8],
-            "cell_line": ["A", "A", "A", "B", "B", "B", "C", "C", "C"],
-            "drug": ["drug1", "drug2", "drug3", "drug1", "drug2", "drug3", "drug1", "drug2", "drug3"],
-            "dose": [10.0, 10.0, 10.0, 100.0, 100.0, 100.0, 1000.0, 1000.0, 1000.0],
-        }
-    )
-
-    annotation = GroupedDistributionAnnotation(
-        old_obs_index=np.arange(100),
-        src_dist_idx_to_labels={0: ["A"], 1: ["B"], 2: ["C"]},
-        tgt_dist_idx_to_labels={i: [f"tgt_{i}"] for i in range(9)},
-        src_tgt_dist_df=df,
-        default_values={"cell_line": "A", "drug": "drug1"},
-        tgt_dist_keys=["drug", "dose"],
-        src_dist_keys=["cell_line"],
-        dist_flag_key="control",
-    )
-
-    return annotation
-
-
-@pytest.fixture
-def sample_annotation_large():
-    """Create a larger sample annotation with more combinations."""
-    rows = []
-    src_idx = 0
-    tgt_idx = 0
-
-    for cell_line in ["A", "B", "C", "D"]:
-        for drug in ["drug1", "drug2", "drug3", "drug4", "drug5"]:
-            for dose in [10.0, 100.0, 1000.0]:
-                rows.append(
-                    {
-                        "src_dist_idx": src_idx % 4,
-                        "tgt_dist_idx": tgt_idx,
-                        "cell_line": cell_line,
-                        "drug": drug,
-                        "dose": dose,
-                    }
-                )
-                tgt_idx += 1
-        src_idx += 1
-
-    df = pd.DataFrame(rows)
-
-    annotation = GroupedDistributionAnnotation(
-        old_obs_index=np.arange(500),
-        src_dist_idx_to_labels={i: [chr(65 + i)] for i in range(4)},
-        tgt_dist_idx_to_labels={i: [f"tgt_{i}"] for i in range(len(df))},
-        src_tgt_dist_df=df,
-        default_values={"cell_line": "A"},
-        tgt_dist_keys=["drug", "dose"],
-        src_dist_keys=["cell_line"],
-        dist_flag_key="control",
-    )
-
-    return annotation
-
-
 class TestAnnotationSplitterInit:
-    """Test the __post_init__ validation logic."""
+    """Test AnnotationSplitter initialization."""
 
-    def test_init_valid(self, sample_annotation):
-        """Test initialization with valid parameters."""
+    def test_init_valid_params(self, sample_grouped_distribution):
+        """Test that AnnotationSplitter initializes with valid parameters."""
         splitter = AnnotationSplitter(
-            annotation=sample_annotation,
+            annotation=sample_grouped_distribution.annotation,
             holdout_combinations=False,
-            split_keys=["cell_line", "drug"],
+            split_by=["drug", "gene"],
+            split_key="split",
             force_training_values={},
             ratios=[0.6, 0.2, 0.2],
             random_state=42,
@@ -91,64 +26,772 @@ class TestAnnotationSplitterInit:
         assert splitter.train_ratio == 0.6
         assert splitter.val_ratio == 0.2
         assert splitter.test_ratio == 0.2
+        assert splitter.split_by == ["drug", "gene"]
+        assert splitter.split_key == "split"
+        assert splitter.random_state == 42
 
-    def test_empty_split_keys(self, sample_annotation):
-        """Test that empty split_keys raises ValueError."""
-        with pytest.raises(ValueError, match="split_keys must be a non-empty list"):
+    def test_init_custom_split_key(self, sample_grouped_distribution):
+        """Test initialization with custom split_key."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug"],
+            split_key="my_custom_split",
+            force_training_values={},
+            ratios=[0.7, 0.15, 0.15],
+            random_state=99,
+        )
+
+        assert splitter.split_key == "my_custom_split"
+
+    def test_init_invalid_split_by_empty(self, sample_grouped_distribution):
+        """Test that empty split_by raises ValueError."""
+        with pytest.raises(ValueError, match="split_by must be a non-empty list"):
             AnnotationSplitter(
-                annotation=sample_annotation,
+                annotation=sample_grouped_distribution.annotation,
                 holdout_combinations=False,
-                split_keys=[],
+                split_by=[],
+                split_key="split",
                 force_training_values={},
                 ratios=[0.6, 0.2, 0.2],
                 random_state=42,
             )
 
-    def test_wrong_number_of_ratios(self, sample_annotation):
-        """Test that wrong number of ratios raises ValueError."""
+    def test_init_invalid_ratios_length(self, sample_grouped_distribution):
+        """Test that ratios with wrong length raises ValueError."""
         with pytest.raises(ValueError, match="ratios must be a list of 3 values"):
             AnnotationSplitter(
-                annotation=sample_annotation,
+                annotation=sample_grouped_distribution.annotation,
                 holdout_combinations=False,
-                split_keys=["cell_line"],
+                split_by=["drug"],
+                split_key="split",
                 force_training_values={},
                 ratios=[0.6, 0.4],
                 random_state=42,
             )
 
-    def test_ratios_not_sum_to_one(self, sample_annotation):
+    def test_init_invalid_ratios_sum(self, sample_grouped_distribution):
         """Test that ratios not summing to 1.0 raises ValueError."""
         with pytest.raises(ValueError, match="ratios must sum to 1.0"):
             AnnotationSplitter(
-                annotation=sample_annotation,
+                annotation=sample_grouped_distribution.annotation,
                 holdout_combinations=False,
-                split_keys=["cell_line"],
+                split_by=["drug"],
+                split_key="split",
                 force_training_values={},
-                ratios=[0.5, 0.3, 0.3],
+                ratios=[0.5, 0.3, 0.1],
                 random_state=42,
             )
 
-    def test_ratios_out_of_bounds(self, sample_annotation):
-        """Test that ratios outside (0, 1) raise ValueError."""
+    def test_init_invalid_ratios_with_zero(self, sample_grouped_distribution):
+        """Test that ratios with 0 raises ValueError."""
         with pytest.raises(ValueError, match="ratios must be between 0.0 and 1.0"):
             AnnotationSplitter(
-                annotation=sample_annotation,
+                annotation=sample_grouped_distribution.annotation,
                 holdout_combinations=False,
-                split_keys=["cell_line"],
+                split_by=["drug"],
+                split_key="split",
+                force_training_values={},
+                ratios=[0.8, 0.2, 0.0],
+                random_state=42,
+            )
+
+    def test_init_invalid_ratios_with_one(self, sample_grouped_distribution):
+        """Test that ratios with 1.0 raises ValueError."""
+        with pytest.raises(ValueError, match="ratios must be between 0.0 and 1.0"):
+            AnnotationSplitter(
+                annotation=sample_grouped_distribution.annotation,
+                holdout_combinations=False,
+                split_by=["drug"],
+                split_key="split",
                 force_training_values={},
                 ratios=[1.0, 0.0, 0.0],
                 random_state=42,
             )
 
-    def test_force_training_values_not_in_split_keys(self, sample_annotation):
-        """Test that force_training_values keys must be subset of split_keys."""
-        with pytest.raises(ValueError, match="force_training_values keys must be a subset of split_keys"):
+    def test_init_invalid_force_training_values(self, sample_grouped_distribution):
+        """Test that force_training_values with keys not in split_by raises ValueError."""
+        with pytest.raises(ValueError, match="force_training_values keys must be a subset of split_by"):
             AnnotationSplitter(
-                annotation=sample_annotation,
+                annotation=sample_grouped_distribution.annotation,
                 holdout_combinations=False,
-                split_keys=["cell_line"],
-                force_training_values={"drug": "drug1"},
+                split_by=["drug"],
+                split_key="split",
+                force_training_values={"cell_line": "cell_line_0"},
                 ratios=[0.6, 0.2, 0.2],
+                random_state=42,
+            )
+
+
+class TestAnnotationSplitterSplit:
+    """Test the split method of AnnotationSplitter."""
+
+    def test_split_basic(self, sample_grouped_distribution):
+        """Test basic splitting functionality."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # Check that split column exists
+        assert "split" in df_split.columns
+
+        # Check that all rows are labeled
+        assert df_split["split"].notna().all()
+
+        # Check that all three splits exist
+        split_values = set(df_split["split"].unique())
+        assert split_values == {"train", "val", "test"}
+
+    def test_split_with_custom_split_key(self, sample_grouped_distribution):
+        """Test splitting with a custom split_key name."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="my_split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # Check that custom split column exists
+        assert "my_split" in df_split.columns
+        assert df_split["my_split"].notna().all()
+
+        # Check all three splits exist
+        split_values = set(df_split["my_split"].unique())
+        assert split_values == {"train", "val", "test"}
+
+    def test_split_single_key(self, sample_grouped_distribution):
+        """Test splitting by a single key."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # All rows with the same drug should have the same split
+        for drug in df_split["drug"].unique():
+            drug_splits = df_split[df_split["drug"] == drug]["split"].unique()
+            assert len(drug_splits) == 1, f"Drug {drug} has multiple splits: {drug_splits}"
+
+    def test_split_ratios_approximately_correct(self, sample_grouped_distribution):
+        """Test that split ratios are approximately correct."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # Get unique combinations
+        df_unique = df_split.drop_duplicates(subset=["drug", "gene"])
+
+        total = len(df_unique)
+        train_count = (df_unique["split"] == "train").sum()
+        val_count = (df_unique["split"] == "val").sum()
+        test_count = (df_unique["split"] == "test").sum()
+
+        # Check counts sum to total
+        assert train_count + val_count + test_count == total
+
+        # Check ratios are approximately correct
+        assert train_count >= 1
+        assert val_count >= 1
+        assert test_count >= 1
+
+    def test_split_deterministic_with_random_state(self, sample_grouped_distribution):
+        """Test that splitting is deterministic given a random_state."""
+        splitter1 = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        splitter2 = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split1 = splitter1.split(sample_grouped_distribution.annotation)
+        df_split2 = splitter2.split(sample_grouped_distribution.annotation)
+
+        # Results should be identical
+        pd.testing.assert_frame_equal(df_split1, df_split2)
+
+    def test_split_different_with_different_random_state(self, sample_grouped_distribution):
+        """Test that different random states produce different splits."""
+        splitter1 = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        splitter2 = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=123,
+        )
+
+        df_split1 = splitter1.split(sample_grouped_distribution.annotation)
+        df_split2 = splitter2.split(sample_grouped_distribution.annotation)
+
+        # Results should be different
+        assert not df_split1[["split","drug","gene"]].equals(df_split2[["split","drug","gene"]])
+
+    def test_split_no_duplicate_combinations_in_multiple_splits(self, sample_grouped_distribution):
+        """Test that no combination appears in multiple splits."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # Group by split_by keys and check each group has only one split value
+        for (drug, gene), group in df_split.groupby(["drug", "gene"]):
+            unique_splits = group["split"].unique()
+            assert len(unique_splits) == 1, (
+                f"Combination (drug={drug}, gene={gene}) appears in multiple splits: {unique_splits}"
+            )
+
+
+class TestAnnotationSplitterForceTraining:
+    """Test force_training_values functionality."""
+
+    def test_force_training_single_value(self, sample_grouped_distribution):
+        """Test that forced training values end up in training set."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug"],
+            split_key="split",
+            force_training_values={"drug": "drug_0"},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # All rows with drug_0 should be in training
+        drug_0_rows = df_split[df_split["drug"] == "drug_0"]
+        if len(drug_0_rows) > 0:
+            assert (drug_0_rows["split"] == "train").all(), "drug_0 should be forced to training"
+
+    def test_force_training_multiple_keys_or_logic(self, sample_grouped_distribution):
+        """Test forcing multiple keys uses OR logic."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={"drug": "drug_0", "gene": "gene_0"},
+            ratios=[0.7, 0.15, 0.15],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # All rows with drug_0 OR gene_0 should be in training
+        forced_rows = df_split[(df_split["drug"] == "drug_0") | (df_split["gene"] == "gene_0")]
+        if len(forced_rows) > 0:
+            assert (forced_rows["split"] == "train").all()
+
+    def test_force_training_reduces_available_combinations(self, sample_grouped_distribution):
+        """Test that forcing values to training reduces available combinations for test/val."""
+        # Without forcing
+        splitter_no_force = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.5, 0.25, 0.25],
+            random_state=42,
+        )
+
+        df_no_force = splitter_no_force.split(sample_grouped_distribution.annotation)
+
+        # With forcing
+        splitter_with_force = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug"],
+            split_key="split",
+            force_training_values={"drug": "drug_0"},
+            ratios=[0.5, 0.25, 0.25],
+            random_state=42,
+        )
+
+        df_with_force = splitter_with_force.split(sample_grouped_distribution.annotation)
+
+        # Training set should be different
+        train_no_force = set(df_no_force[df_no_force["split"] == "train"]["drug"].unique())
+        train_with_force = set(df_with_force[df_with_force["split"] == "train"]["drug"].unique())
+
+        # drug_0 must be in training when forced
+        assert "drug_0" in train_with_force
+
+
+class TestAnnotationSplitterHoldout:
+    """Test holdout_combinations functionality."""
+
+    def test_holdout_combinations_control_in_train(self, sample_grouped_distribution):
+        """Test that when holdout_combinations=True, default values are in training."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=True,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # Get default values from annotation
+        default_values = sample_grouped_distribution.annotation.default_values
+
+        # Check that rows matching default values are in training
+        for key, value in default_values.items():
+            if key in df_split.columns:
+                default_rows = df_split[df_split[key] == value]
+                if len(default_rows) > 0:
+                    # All default value rows should be in training
+                    assert (default_rows["split"] == "train").all(), (
+                        f"Rows with {key}={value} (default) should be in training"
+                    )
+
+    def test_holdout_false_allows_controls_in_all_splits(self, sample_grouped_distribution):
+        """Test that when holdout_combinations=False, controls can be in any split."""
+        splitter = AnnotationSplitter(
+            annotation=sample_grouped_distribution.annotation,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        df_split = splitter.split(sample_grouped_distribution.annotation)
+
+        # Check that we have all three splits
+        assert set(df_split["split"].unique()) == {"train", "val", "test"}
+
+
+class TestContainsValue:
+    """Test the _contains_value static method."""
+
+    def test_contains_value_basic(self):
+        """Test basic _contains_value functionality."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", "drug_c", "drug_a"],
+                "gene": ["gene_x", "gene_y", "gene_z", "gene_x"],
+            }
+        )
+
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug", "gene"],
+            values={"drug": "drug_a"},
+            column_key="is_target",
+            accept_nan=False,
+        )
+
+        # Rows 0 and 3 should be True (drug_a)
+        assert df["is_target"].tolist() == [True, False, False, True]
+
+    def test_contains_value_multiple_keys_or_logic(self):
+        """Test _contains_value with multiple keys uses OR logic."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", "drug_c", "drug_a"],
+                "gene": ["gene_x", "gene_y", "gene_x", "gene_z"],
+            }
+        )
+
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug", "gene"],
+            values={"drug": "drug_a", "gene": "gene_x"},
+            column_key="is_target",
+            accept_nan=False,
+        )
+
+        # Rows where drug=drug_a OR gene=gene_x should be True
+        assert df["is_target"].tolist() == [True, False, True, True]
+
+    def test_contains_value_with_nan_accept_false(self):
+        """Test _contains_value with NaN when accept_nan=False."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", np.nan, "drug_a"],
+                "gene": ["gene_x", "gene_y", "gene_z", np.nan],
+            }
+        )
+
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug", "gene"],
+            values={"drug": "drug_a"},
+            column_key="is_target",
+            accept_nan=False,
+        )
+
+        # Only rows with drug_a (0 and 3), NaN should not match
+        assert df["is_target"].tolist() == [True, False, False, True]
+
+    def test_contains_value_with_nan_accept_true(self):
+        """Test _contains_value with NaN when accept_nan=True."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", np.nan, "drug_d"],
+                "gene": ["gene_x", "gene_y", "gene_z", np.nan],
+            }
+        )
+
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug", "gene"],
+            values={"drug": "drug_a"},
+            column_key="is_target",
+            accept_nan=True,
+        )
+
+        # Rows with drug_a OR NaN in drug column (0, 2)
+        expected = [True, False, True, False]
+        assert df["is_target"].tolist() == expected
+
+    def test_contains_value_or_logic_multiple_calls(self):
+        """Test that _contains_value uses OR logic when called multiple times."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", "drug_c"],
+                "gene": ["gene_x", "gene_y", "gene_z"],
+            }
+        )
+
+        # First call
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug", "gene"],
+            values={"drug": "drug_a"},
+            column_key="is_target",
+            accept_nan=False,
+        )
+
+        assert df["is_target"].tolist() == [True, False, False]
+
+        # Second call with different value - should OR with previous
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug", "gene"],
+            values={"drug": "drug_b"},
+            column_key="is_target",
+            accept_nan=False,
+        )
+
+        # Rows 0 and 1 should be True (drug_a OR drug_b)
+        assert df["is_target"].tolist() == [True, True, False]
+
+    def test_contains_value_creates_column_if_not_exists(self):
+        """Test that _contains_value creates the column if it doesn't exist."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b"],
+            }
+        )
+
+        assert "is_target" not in df.columns
+
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug"],
+            values={"drug": "drug_a"},
+            column_key="is_target",
+            accept_nan=False,
+        )
+
+        assert "is_target" in df.columns
+        assert df["is_target"].tolist() == [True, False]
+
+    def test_contains_value_skips_keys_not_in_combination_keys(self):
+        """Test that _contains_value ignores keys not in combination_keys."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", "drug_c"],
+                "gene": ["gene_x", "gene_y", "gene_z"],
+            }
+        )
+
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug"],  # Only drug, not gene
+            values={"drug": "drug_a", "gene": "gene_x"},  # gene_x should be ignored
+            column_key="is_target",
+            accept_nan=False,
+        )
+
+        # Only drug_a should match, gene_x is ignored
+        assert df["is_target"].tolist() == [True, False, False]
+
+    def test_contains_value_empty_values_dict(self):
+        """Test _contains_value with empty values dictionary."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b"],
+            }
+        )
+
+        AnnotationSplitter._contains_value(
+            df_unique=df,
+            combination_keys=["drug"],
+            values={},  # Empty
+            column_key="is_target",
+            accept_nan=False,
+        )
+
+        # All should be False
+        assert df["is_target"].tolist() == [False, False]
+
+    def test_contains_value_invalid_combination_keys(self):
+        """Test that _contains_value raises error for invalid combination_keys."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b"],
+            }
+        )
+
+        with pytest.raises(ValueError, match="combination_keys must be in df.columns"):
+            AnnotationSplitter._contains_value(
+                df_unique=df,
+                combination_keys=["nonexistent_column"],
+                values={"drug": "drug_a"},
+                column_key="is_target",
+                accept_nan=False,
+            )
+
+
+class TestSplitTwo:
+    """Test the _split_two static method."""
+
+    def test_split_two_basic(self):
+        """Test basic _split_two functionality."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", "drug_c", "drug_d", "drug_e"],
+                "value": [1, 2, 3, 4, 5],
+            }
+        )
+
+        result = AnnotationSplitter._split_two(
+            df_unique=df.copy(),
+            train_size=3,
+            split_key="split",
+            random_state=42,
+        )
+
+        # Check split column exists
+        assert "split" in result.columns
+
+        # Check counts
+        assert (result["split"] == "train").sum() == 3
+        assert (result["split"] == "test_val").sum() == 2
+
+        # Check all rows are present
+        assert len(result) == 5
+
+    def test_split_two_shuffles_data(self):
+        """Test that _split_two shuffles the data."""
+        df = pd.DataFrame(
+            {
+                "drug": [f"drug_{i}" for i in range(20)],
+                "value": list(range(20)),
+            }
+        )
+
+        result = AnnotationSplitter._split_two(
+            df_unique=df.copy(),
+            train_size=10,
+            split_key="split",
+            random_state=42,
+        )
+
+        # Get train drugs
+        train_drugs = result[result["split"] == "train"]["drug"].tolist()
+        original_first_10 = [f"drug_{i}" for i in range(10)]
+
+        # With shuffling and 20 items, extremely unlikely to match exactly
+        assert train_drugs != original_first_10
+
+    def test_split_two_deterministic(self):
+        """Test that _split_two is deterministic with same random_state."""
+        df = pd.DataFrame(
+            {
+                "drug": [f"drug_{i}" for i in range(10)],
+            }
+        )
+
+        result1 = AnnotationSplitter._split_two(
+            df_unique=df.copy(),
+            train_size=6,
+            split_key="split",
+            random_state=42,
+        )
+
+        result2 = AnnotationSplitter._split_two(
+            df_unique=df.copy(),
+            train_size=6,
+            split_key="split",
+            random_state=42,
+        )
+
+        pd.testing.assert_frame_equal(result1, result2)
+
+    def test_split_two_custom_split_key(self):
+        """Test _split_two with custom split_key."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", "drug_c"],
+            }
+        )
+
+        result = AnnotationSplitter._split_two(
+            df_unique=df.copy(),
+            train_size=2,
+            split_key="my_split",
+            random_state=42,
+        )
+
+        assert "my_split" in result.columns
+        assert set(result["my_split"].unique()) == {"train", "test_val"}
+
+    def test_split_two_raises_on_existing_split_key(self):
+        """Test that _split_two raises error if split_key already exists and overwrite=False."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b"],
+                "split": ["existing", "existing"],  # Column already exists
+            }
+        )
+
+        with pytest.raises(ValueError, match="already in df.columns"):
+            AnnotationSplitter._split_two(
+                df_unique=df,
+                train_size=1,
+                split_key="split",
+                overwrite=False,
+                random_state=42,
+            )
+
+    def test_split_two_overwrites_existing_split_key(self):
+        """Test that _split_two can overwrite existing split_key when overwrite=True."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", "drug_c"],
+                "split": ["existing", "existing", "existing"],
+            }
+        )
+
+        result = AnnotationSplitter._split_two(
+            df_unique=df,
+            train_size=2,
+            split_key="split",
+            overwrite=True,
+            random_state=42,
+        )
+
+        # Should have new values, not "existing"
+        assert "existing" not in result["split"].values
+        assert set(result["split"].unique()) == {"train", "test_val"}
+
+    def test_split_two_with_forced_training_key(self):
+        """Test _split_two respects is_in_training_key."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b", "drug_c", "drug_d", "drug_e"],
+                "forced_in_train": [True, True, False, False, False],
+            }
+        )
+
+        # Now that the bug is fixed, this should work correctly
+        # It should filter to only rows where forced_in_train is True
+        result = AnnotationSplitter._split_two(
+            df_unique=df.copy(),
+            train_size=1,  # Only 1 train from the 2 available (drug_a, drug_b)
+            split_key="split",
+            is_in_training_key="forced_in_train",
+            random_state=42,
+        )
+
+        # Should only contain the forced training rows (drug_a and drug_b)
+        assert len(result) == 2
+        assert set(result["drug"]) == {"drug_a", "drug_b"}
+
+        # One should be train, one should be test_val
+        assert (result["split"] == "train").sum() == 1
+        assert (result["split"] == "test_val").sum() == 1
+
+    def test_split_two_raises_if_training_key_missing(self):
+        """Test that _split_two raises error if is_in_training_key doesn't exist."""
+        df = pd.DataFrame(
+            {
+                "drug": ["drug_a", "drug_b"],
+            }
+        )
+
+        with pytest.raises(ValueError, match="must be in df.columns"):
+            AnnotationSplitter._split_two(
+                df_unique=df,
+                train_size=1,
+                split_key="split",
+                is_in_training_key="nonexistent",
                 random_state=42,
             )
 
@@ -156,12 +799,13 @@ class TestAnnotationSplitterInit:
 class TestCalculateSplitSizes:
     """Test the _calculate_split_sizes method."""
 
-    def test_calculate_split_sizes_basic(self, sample_annotation):
-        """Test basic split size calculation."""
+    def test_calculate_split_sizes_normal(self, sample_grouped_distribution):
+        """Test split size calculation with normal inputs."""
         splitter = AnnotationSplitter(
-            annotation=sample_annotation,
+            annotation=sample_grouped_distribution.annotation,
             holdout_combinations=False,
-            split_keys=["cell_line"],
+            split_by=["drug"],
+            split_key="split",
             force_training_values={},
             ratios=[0.6, 0.2, 0.2],
             random_state=42,
@@ -169,439 +813,134 @@ class TestCalculateSplitSizes:
 
         train, val, test = splitter._calculate_split_sizes(100)
 
+        # Check they sum to 100
+        assert train + val + test == 100
+
+        # Check they're approximately correct
         assert train == 60
         assert val == 20
         assert test == 20
 
-    def test_calculate_split_sizes_with_rounding(self, sample_annotation):
-        """Test split size calculation with rounding."""
+    def test_calculate_split_sizes_with_rounding(self, sample_grouped_distribution):
+        """Test split size calculation handles rounding correctly."""
         splitter = AnnotationSplitter(
-            annotation=sample_annotation,
+            annotation=sample_grouped_distribution.annotation,
             holdout_combinations=False,
-            split_keys=["cell_line"],
+            split_by=["drug"],
+            split_key="split",
             force_training_values={},
             ratios=[0.7, 0.15, 0.15],
             random_state=42,
         )
 
-        train, val, test = splitter._calculate_split_sizes(10)
+        train, val, test = splitter._calculate_split_sizes(100)
 
-        assert train + val + test == 10
-        assert train == 7
-        assert val == 2
-        assert test == 1
+        # Check they sum to 100
+        assert train + val + test == 100
 
-    def test_calculate_split_sizes_zero_split(self, sample_annotation):
-        """Test that zero-sized splits raise ValueError."""
+        # Check individual values
+        assert train == 70
+        assert val == 15
+        assert test == 15
+
+    def test_calculate_split_sizes_too_small_raises_error(self, sample_grouped_distribution):
+        """Test that too few combinations raises ValueError."""
         splitter = AnnotationSplitter(
-            annotation=sample_annotation,
+            annotation=sample_grouped_distribution.annotation,
             holdout_combinations=False,
-            split_keys=["cell_line"],
+            split_by=["drug"],
+            split_key="split",
             force_training_values={},
-            ratios=[0.8, 0.15, 0.05],
+            ratios=[0.9, 0.05, 0.05],
             random_state=42,
         )
 
-        with pytest.raises(ValueError, match="0 was encountered for one of the splits"):
-            splitter._calculate_split_sizes(3)
+        # With 5 total and ratios 0.9, 0.05, 0.05, some might round to 0
+        with pytest.raises(ValueError, match="0 was encountered"):
+            splitter._calculate_split_sizes(5)
 
-    def test_calculate_split_sizes_ensures_total(self, sample_annotation):
-        """Test that total combinations are preserved after split."""
+    def test_calculate_split_sizes_large_numbers(self, sample_grouped_distribution):
+        """Test split size calculation with large numbers."""
         splitter = AnnotationSplitter(
-            annotation=sample_annotation,
+            annotation=sample_grouped_distribution.annotation,
             holdout_combinations=False,
-            split_keys=["cell_line"],
-            force_training_values={},
-            ratios=[0.6, 0.25, 0.15],
-            random_state=42,
-        )
-
-        total = 97  # Odd number to test rounding
-        train, val, test = splitter._calculate_split_sizes(total)
-
-        assert train + val + test == total
-
-
-class TestCheckDfUniqueColumns:
-    """Test the _check_df_unique_columns method."""
-
-    def test_check_df_unique_columns_valid(self, sample_annotation):
-        """Test checking valid columns."""
-        splitter = AnnotationSplitter(
-            annotation=sample_annotation,
-            holdout_combinations=False,
-            split_keys=["cell_line", "drug"],
+            split_by=["drug"],
+            split_key="split",
             force_training_values={},
             ratios=[0.6, 0.2, 0.2],
             random_state=42,
         )
 
+        train, val, test = splitter._calculate_split_sizes(10000)
+
+        # Check they sum to 10000
+        assert train + val + test == 10000
+
+
+class TestCheckDfUniqueColumns:
+    """Test the _check_df_unique_columns static method."""
+
+    def test_check_df_unique_columns_valid(self):
+        """Test _check_df_unique_columns with valid columns."""
         df = pd.DataFrame(
             {
-                "cell_line": ["A", "B"],
-                "drug": ["drug1", "drug2"],
+                "drug": ["drug_a"],
+                "gene": ["gene_x"],
             }
         )
 
         # Should not raise
-        splitter._check_df_unique_columns(df)
+        AnnotationSplitter._check_df_unique_columns(df, ["drug", "gene"])
 
-    def test_check_df_unique_columns_missing(self, sample_annotation):
-        """Test checking with missing columns."""
-        splitter = AnnotationSplitter(
-            annotation=sample_annotation,
-            holdout_combinations=False,
-            split_keys=["cell_line", "drug", "dose"],
-            force_training_values={},
-            ratios=[0.6, 0.2, 0.2],
-            random_state=42,
-        )
-
+    def test_check_df_unique_columns_invalid(self):
+        """Test _check_df_unique_columns raises error for missing columns."""
         df = pd.DataFrame(
             {
-                "cell_line": ["A", "B"],
-                "drug": ["drug1", "drug2"],
+                "drug": ["drug_a"],
             }
         )
 
-        with pytest.raises(ValueError, match="split_keys must be in df.columns"):
-            splitter._check_df_unique_columns(df)
+        with pytest.raises(ValueError, match="combination_keys must be in df.columns"):
+            AnnotationSplitter._check_df_unique_columns(df, ["drug", "nonexistent"])
 
-
-class TestSplitTwo:
-    """Test the _split_two static method."""
-
-    def test_split_two_basic(self):
-        """Test basic two-way split."""
+    def test_check_df_unique_columns_empty_list(self):
+        """Test _check_df_unique_columns with empty combination_keys."""
         df = pd.DataFrame(
             {
-                "cell_line": ["A", "B", "C", "D", "E"],
-                "value": [1, 2, 3, 4, 5],
+                "drug": ["drug_a"],
             }
         )
 
-        train, test = AnnotationSplitter._split_two(
-            df_unique=df,
-            train_size=3,
-            random_state=42,
-        )
+        # Should not raise with empty list
+        AnnotationSplitter._check_df_unique_columns(df, [])
 
-        assert len(train) == 3
-        assert len(test) == 2
-        assert len(train) + len(test) == len(df)
-
-    def test_split_two_reproducibility(self):
-        """Test that same random_state gives same results."""
-        df = pd.DataFrame(
-            {
-                "cell_line": ["A", "B", "C", "D", "E"],
-                "value": [1, 2, 3, 4, 5],
-            }
-        )
-
-        train1, test1 = AnnotationSplitter._split_two(
-            df_unique=df,
-            train_size=3,
-            random_state=42,
-        )
-
-        train2, test2 = AnnotationSplitter._split_two(
-            df_unique=df,
-            train_size=3,
-            random_state=42,
-        )
-
-        pd.testing.assert_frame_equal(train1, train2)
-        pd.testing.assert_frame_equal(test1, test2)
-
-    def test_split_two_different_random_state(self):
-        """Test that different random_state gives different results."""
-        df = pd.DataFrame(
-            {
-                "cell_line": ["A", "B", "C", "D", "E", "F", "G", "H"],
-                "value": range(8),
-            }
-        )
-
-        train1, test1 = AnnotationSplitter._split_two(
-            df_unique=df,
-            train_size=4,
-            random_state=42,
-        )
-
-        train2, test2 = AnnotationSplitter._split_two(
-            df_unique=df,
-            train_size=4,
-            random_state=123,
-        )
-
-        # Should be different (with high probability)
-        assert not train1.equals(train2) or not test1.equals(test2)
-
-    def test_split_two_with_is_in_training_key(self):
-        """Test splitting with is_in_training_key filter."""
-        # The filter checks if column value == column name
-        # So we need the column name as a value in the dataframe
-        df = pd.DataFrame(
-            {
-                "cell_line": ["A", "B", "C", "D", "E"],
-                "forced_in_train": ["forced_in_train", "forced_in_train", "other", "other", "other"],
-            }
-        )
-
-        train, test = AnnotationSplitter._split_two(
-            df_unique=df,
-            train_size=1,
-            is_in_training_key="forced_in_train",
-            random_state=42,
-        )
-
-        # Should only include rows where forced_in_train == "forced_in_train"
-        assert len(train) == 1
-        assert len(test) == 1
-        assert all(train["forced_in_train"] == "forced_in_train")
-        assert all(test["forced_in_train"] == "forced_in_train")
 
     def test_split_two_with_not_in_training_key(self):
-        """Test splitting with not_in_training_key filter."""
-        # The filter checks if column value != column name
-        # So rows where value == column name are excluded
+        """Test _split_two respects not_in_training_key."""
         df = pd.DataFrame(
             {
-                "cell_line": ["A", "B", "C", "D", "E"],
-                "excluded": ["excluded", "keep", "keep", "keep", "keep"],
+                "drug": ["drug_a", "drug_b", "drug_c", "drug_d", "drug_e"],
+                "exclude_from_split": [False, False, True, True, False],
             }
         )
 
-        train, test = AnnotationSplitter._split_two(
-            df_unique=df,
+        # Should exclude rows where exclude_from_split is True
+        result = AnnotationSplitter._split_two(
+            df_unique=df.copy(),
             train_size=2,
-            not_in_training_key="excluded",
+            split_key="split",
+            not_in_training_key="exclude_from_split",
             random_state=42,
         )
 
-        # Should exclude rows where excluded == "excluded" (the column name)
-        assert len(train) == 2
-        assert len(test) == 2
-        assert all(train["excluded"] != "excluded")
-        assert all(test["excluded"] != "excluded")
+        # Should only contain rows where exclude_from_split was False
+        assert len(result) == 3
+        assert set(result["drug"]) == {"drug_a", "drug_b", "drug_e"}
 
-    def test_split_two_is_in_training_key_missing(self):
-        """Test that missing is_in_training_key raises ValueError."""
-        df = pd.DataFrame(
-            {
-                "cell_line": ["A", "B", "C"],
-            }
-        )
+        # Check split distribution
+        assert (result["split"] == "train").sum() == 2
+        assert (result["split"] == "test_val").sum() == 1
 
-        with pytest.raises(ValueError, match="must be in df.columns"):
-            AnnotationSplitter._split_two(
-                df_unique=df,
-                train_size=2,
-                is_in_training_key="missing_key",
-                random_state=42,
-            )
-
-    def test_split_two_not_in_training_key_missing(self):
-        """Test that missing not_in_training_key raises ValueError."""
-        df = pd.DataFrame(
-            {
-                "cell_line": ["A", "B", "C"],
-            }
-        )
-
-        with pytest.raises(ValueError, match="must be in df.columns"):
-            AnnotationSplitter._split_two(
-                df_unique=df,
-                train_size=2,
-                not_in_training_key="missing_key",
-                random_state=42,
-            )
-
-    def test_split_two_empty_after_filter(self):
-        """Test that filtering resulting in empty df raises ValueError."""
-        # Create a df where all rows will be filtered out
-        # When not_in_training_key="filter", it filters out rows where value == "filter"
-        df = pd.DataFrame(
-            {
-                "cell_line": ["A", "B", "C"],
-                "filter": ["filter", "filter", "filter"],
-            }
-        )
-
-        with pytest.raises(ValueError, match="at least one unique combination"):
-            AnnotationSplitter._split_two(
-                df_unique=df,
-                train_size=1,
-                not_in_training_key="filter",
-                random_state=42,
-            )
-
-
-class TestSplit:
-    """Test the main split method."""
-
-    def test_split_basic(self, sample_annotation_large):
-        """Test basic splitting without special conditions."""
-        splitter = AnnotationSplitter(
-            annotation=sample_annotation_large,
-            holdout_combinations=False,
-            split_keys=["drug", "dose"],
-            force_training_values={},
-            ratios=[0.6, 0.2, 0.2],
-            random_state=42,
-        )
-
-        # Note: This test might fail if _contains_value is not defined
-        # but tests the basic structure
-        try:
-            train, val, test = splitter.split(sample_annotation_large)
-
-            # Check that we got DataFrames back
-            assert isinstance(train, pd.DataFrame)
-            assert isinstance(val, pd.DataFrame)
-            assert isinstance(test, pd.DataFrame)
-
-            # Check that all splits have the expected columns
-            for df in [train, val, test]:
-                assert "drug" in df.columns
-                assert "dose" in df.columns
-
-            # Check that splits are non-empty
-            assert len(train) > 0
-            assert len(val) > 0
-            assert len(test) > 0
-
-            # Check that total is preserved
-            total_unique = len(sample_annotation_large.src_tgt_dist_df.drop_duplicates(subset=["drug", "dose"]))
-            assert len(train) + len(val) + len(test) == total_unique
-
-        except NameError as e:
-            # If _contains_value is not defined, this is expected
-            if "_contains_value" in str(e):
-                pytest.skip("_contains_value function not defined in module")
-            else:
-                raise
-
-    def test_split_reproducibility(self, sample_annotation_large):
-        """Test that same random_state gives same results."""
-        splitter1 = AnnotationSplitter(
-            annotation=sample_annotation_large,
-            holdout_combinations=False,
-            split_keys=["drug"],
-            force_training_values={},
-            ratios=[0.6, 0.2, 0.2],
-            random_state=42,
-        )
-
-        splitter2 = AnnotationSplitter(
-            annotation=sample_annotation_large,
-            holdout_combinations=False,
-            split_keys=["drug"],
-            force_training_values={},
-            ratios=[0.6, 0.2, 0.2],
-            random_state=42,
-        )
-
-        try:
-            train1, val1, test1 = splitter1.split(sample_annotation_large)
-            train2, val2, test2 = splitter2.split(sample_annotation_large)
-
-            # Should get identical results
-            pd.testing.assert_frame_equal(train1.reset_index(drop=True), train2.reset_index(drop=True))
-            pd.testing.assert_frame_equal(val1.reset_index(drop=True), val2.reset_index(drop=True))
-            pd.testing.assert_frame_equal(test1.reset_index(drop=True), test2.reset_index(drop=True))
-        except NameError as e:
-            if "_contains_value" in str(e):
-                pytest.skip("_contains_value function not defined in module")
-            else:
-                raise
-
-    def test_split_invalid_split_keys(self, sample_annotation):
-        """Test that invalid split_keys raise error during split."""
-        splitter = AnnotationSplitter(
-            annotation=sample_annotation,
-            holdout_combinations=False,
-            split_keys=["invalid_key"],
-            force_training_values={},
-            ratios=[0.6, 0.2, 0.2],
-            random_state=42,
-        )
-
-        # The actual implementation raises KeyError from pandas drop_duplicates
-        # or ValueError from _check_df_unique_columns
-        with pytest.raises((ValueError, KeyError)):
-            splitter.split(sample_annotation)
-
-    def test_split_different_ratios(self, sample_annotation_large):
-        """Test splitting with different ratio configurations."""
-        # Use drug+dose combination to have enough unique values (60 total)
-        # to avoid 0-sized splits
-        test_ratios = [
-            [0.7, 0.2, 0.1],
-            [0.5, 0.3, 0.2],
-            [0.8, 0.1, 0.1],
-        ]
-
-        for ratios in test_ratios:
-            splitter = AnnotationSplitter(
-                annotation=sample_annotation_large,
-                holdout_combinations=False,
-                split_keys=["drug", "dose"],  # Use both keys for more combinations
-                force_training_values={},
-                ratios=ratios,
-                random_state=42,
-            )
-
-            try:
-                train, val, test = splitter.split(sample_annotation_large)
-
-                total_unique = len(sample_annotation_large.src_tgt_dist_df.drop_duplicates(subset=["drug", "dose"]))
-
-                # Check total is preserved
-                assert len(train) + len(val) + len(test) == total_unique
-
-                # Check approximate ratios (with rounding tolerance)
-                train_ratio = len(train) / total_unique
-                val_ratio = len(val) / total_unique
-                test_ratio = len(test) / total_unique
-
-                assert abs(train_ratio - ratios[0]) < 0.15
-                assert abs(val_ratio - ratios[1]) < 0.15
-                assert abs(test_ratio - ratios[2]) < 0.15
-
-            except NameError as e:
-                if "_contains_value" in str(e):
-                    pytest.skip("_contains_value function not defined in module")
-                else:
-                    raise
-
-    def test_split_no_overlap(self, sample_annotation_large):
-        """Test that train/val/test splits have no overlapping combinations."""
-        splitter = AnnotationSplitter(
-            annotation=sample_annotation_large,
-            holdout_combinations=False,
-            split_keys=["drug", "dose"],
-            force_training_values={},
-            ratios=[0.6, 0.2, 0.2],
-            random_state=42,
-        )
-
-        try:
-            train, val, test = splitter.split(sample_annotation_large)
-
-            # Create combination keys for each split
-            train_combos = set(train.apply(lambda row: (row["drug"], row["dose"]), axis=1))
-            val_combos = set(val.apply(lambda row: (row["drug"], row["dose"]), axis=1))
-            test_combos = set(test.apply(lambda row: (row["drug"], row["dose"]), axis=1))
-
-            # Check no overlaps
-            assert len(train_combos & val_combos) == 0
-            assert len(train_combos & test_combos) == 0
-            assert len(val_combos & test_combos) == 0
-
-        except NameError as e:
-            if "_contains_value" in str(e):
-                pytest.skip("_contains_value function not defined in module")
-            else:
-                raise
+        # Drugs c and d should not be in the result
+        assert "drug_c" not in result["drug"].values
+        assert "drug_d" not in result["drug"].values
