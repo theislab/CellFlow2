@@ -1,10 +1,8 @@
 # %%
-from scaleflow.data._datamanager_new import DataManager
-from scaleflow.data._anndata_location import AnnDataLocation
+from scaleflow.data import DataManager, AnnDataLocation
 from pathlib import Path
 import anndata as ad
 import h5py
-import zarr
 
 print("loading data")
 OUTPUT_PATH = Path("/lustre/groups/ml01/workspace/100mil/tahoe.zarr")

@@ -15,12 +15,12 @@ import optax
 import pandas as pd
 from ott.neural.methods.flows import dynamics
 
+from scaleflow.data import DataManager, ReservoirSampler
 from scaleflow import _constants
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
-from scaleflow.data import JaxOutOfCoreTrainSampler, PredictionSampler, TrainSampler, ValidationSampler
-from scaleflow.data._data import ConditionData, TrainingData, ValidationData
-from scaleflow.data._datamanager import DataManager
+from scaleflow.data import GroupedDistribution
 from scaleflow.model._utils import _write_predictions
+from scaleflow.data import SamplerABC
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
 from scaleflow.solvers import _genot, _otfm, _eqm
@@ -59,9 +59,9 @@ class CellFlow:
             self._vf_class = _velocity_field.EquilibriumVelocityField
         else:
             raise ValueError(f"Unknown solver: {solver}. Must be 'otfm', 'genot', or 'eqm'.")
-        self._dataloader: TrainSampler | JaxOutOfCoreTrainSampler | None = None
+        self._dataloader: SamplerABC | None = None
         self._trainer: CellFlowTrainer | None = None
-        self._validation_data: dict[str, ValidationData] = {"predict_kwargs": {}}
+        self._validation_data: dict[str, GroupedDistribution] = {"predict_kwargs": {}}
         self._solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching | None = None
         self._condition_dim: int | None = None
         self._vf: (
@@ -195,7 +195,11 @@ class CellFlow:
         )
 
         self.train_data = self._dm.get_train_data(self.adata)
-        self._data_dim = self.train_data.cell_data.shape[-1]  # type: ignore[union-attr]
+        if hasattr(self.train_data, 'data') and hasattr(self.train_data.data, 'src_data'):
+            first_src_idx = next(iter(self.train_data.data.src_data.keys()))
+            self._data_dim = self.train_data.data.src_data[first_src_idx].shape[-1]
+        else:
+            self._data_dim = self.train_data.cell_data.shape[-1]  # type: ignore[union-attr]
 
     def prepare_validation_data(
         self,
@@ -476,7 +480,7 @@ class CellFlow:
         if self._solver_class == _eqm.EquilibriumMatching:
             self.vf = self._vf_class(
                 output_dim=self._data_dim,
-                max_combination_length=self.train_data.max_combination_length,
+                max_combination_length=getattr(self.train_data, 'max_combination_length', 1),
                 condition_mode=condition_mode,
                 regularization=regularization,
                 condition_embedding_dim=condition_embedding_dim,
@@ -505,7 +509,7 @@ class CellFlow:
         else:
             self.vf = self._vf_class(
                 output_dim=self._data_dim,
-                max_combination_length=self.train_data.max_combination_length,
+                max_combination_length=getattr(self.train_data, 'max_combination_length', 1),
                 condition_mode=condition_mode,
                 regularization=regularization,
                 condition_embedding_dim=condition_embedding_dim,
@@ -557,6 +561,15 @@ class CellFlow:
             )
 
         if self._solver_class == _otfm.OTFlowMatching:
+            first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
+            flat_condition = self.train_data.data.conditions[first_tgt_idx]
+            sample_conditions = {}
+            if hasattr(self.train_data, 'annotation') and self.train_data.annotation.condition_structure:
+                for cov_name, (start, end) in self.train_data.annotation.condition_structure.items():
+                    sample_conditions[cov_name] = flat_condition[start:end].reshape(1, -1)
+            else:
+                sample_conditions = {0: flat_condition}
+
             self._solver = self._solver_class(
                 vf=self.vf,
                 match_fn=match_fn,
@@ -565,11 +578,20 @@ class CellFlow:
                 loss_weight_gex=loss_weight_gex,
                 loss_weight_functional=loss_weight_functional,
                 optimizer=optimizer,
-                conditions=self.train_data.condition_data,
+                conditions=sample_conditions,
                 rng=jax.random.PRNGKey(seed),
                 **solver_kwargs,
             )
         elif self._solver_class == _eqm.EquilibriumMatching:
+            first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
+            flat_condition = self.train_data.data.conditions[first_tgt_idx]
+            sample_conditions = {}
+            if hasattr(self.train_data, 'annotation') and self.train_data.annotation.condition_structure:
+                for cov_name, (start, end) in self.train_data.annotation.condition_structure.items():
+                    sample_conditions[cov_name] = flat_condition[start:end].reshape(1, -1)
+            else:
+                sample_conditions = {0: flat_condition}
+
             # EqM doesn't use probability_path, only match_fn
             self._solver = self._solver_class(
                 vf=self.vf,
@@ -578,11 +600,20 @@ class CellFlow:
                 loss_weight_gex=loss_weight_gex,
                 loss_weight_functional=loss_weight_functional,
                 optimizer=optimizer,
-                conditions=self.train_data.condition_data,
+                conditions=sample_conditions,
                 rng=jax.random.PRNGKey(seed),
                 **solver_kwargs,
             )
         elif self._solver_class == _genot.GENOT:
+            first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
+            flat_condition = self.train_data.data.conditions[first_tgt_idx]
+            sample_conditions = {}
+            if hasattr(self.train_data, 'annotation') and self.train_data.annotation.condition_structure:
+                for cov_name, (start, end) in self.train_data.annotation.condition_structure.items():
+                    sample_conditions[cov_name] = flat_condition[start:end].reshape(1, -1)
+            else:
+                sample_conditions = {0: flat_condition}
+
             self._solver = self._solver_class(
                 vf=self.vf,
                 data_match_fn=match_fn,
@@ -590,7 +621,7 @@ class CellFlow:
                 source_dim=self._data_dim,
                 target_dim=self._data_dim,
                 optimizer=optimizer,
-                conditions=self.train_data.condition_data,
+                conditions=sample_conditions,
                 rng=jax.random.PRNGKey(seed),
                 **solver_kwargs,
             )
@@ -657,28 +688,30 @@ class CellFlow:
             raise ValueError("Model not initialized. Please call `prepare_model` first.")
 
         if out_of_core_dataloading:
-            self._dataloader = JaxOutOfCoreTrainSampler(
-                data=self.train_data,
-                batch_size=batch_size,
-                seed=self._seed,
-                num_workers=num_workers,
-                prefetch_factor=prefetch_factor,
-            )
+            pass # TODO
+            # self._dataloader = JaxOutOfCoreTrainSampler(
+            #     data=self.train_data,
+            #     batch_size=batch_size,
+            #     seed=self._seed,
+            #     num_workers=num_workers,
+            #     prefetch_factor=prefetch_factor,
+            # )
         else:
-            self._dataloader = TrainSampler(data=self.train_data, batch_size=batch_size)
+            pass
+            # self._dataloader = TrainSampler(data=self.train_data, batch_size=batch_size)
 
-        # Pass validation_batch_size to ValidationSampler
-        validation_loaders = {
-            k: ValidationSampler(v, validation_batch_size=validation_batch_size)
-            for k, v in self.validation_data.items()
-            if k != "predict_kwargs"
-        }
+        validation_dataloaders = {}
+        for k, v in self._validation_data.items():
+            if k != "predict_kwargs":
+                val_sampler = ReservoirSampler(v, batch_size=validation_batch_size or batch_size)
+                val_sampler.init_sampler(np.random.default_rng(0))
+                validation_dataloaders[k] = val_sampler
 
         self._solver = self.trainer.train(
             dataloader=self._dataloader,
             num_iterations=num_iterations,
             valid_freq=valid_freq,
-            valid_loaders=validation_loaders,
+            valid_loaders=validation_dataloaders,
             callbacks=callbacks,
             monitor_metrics=monitor_metrics,
         )
@@ -751,7 +784,9 @@ class CellFlow:
             covariate_data=covariate_data,
             condition_id_key=condition_id_key,
         )
-        pred_loader = PredictionSampler(pred_data)
+        # TODO
+        pred_loader = None
+        # pred_loader = PredictionSampler(pred_data)
         batch = pred_loader.sample()
         src = batch["source"]
         condition = batch.get("condition", None)
@@ -778,7 +813,7 @@ class CellFlow:
 
     def get_condition_embedding(
         self,
-        covariate_data: pd.DataFrame | ConditionData,
+        covariate_data: pd.DataFrame,
         rep_dict: dict[str, str] | None = None,
         condition_id_key: str | None = None,
         key_added: str | None = _constants.CONDITION_EMBEDDING,
@@ -928,7 +963,7 @@ class CellFlow:
         return self._solver
 
     @property
-    def dataloader(self) -> TrainSampler | JaxOutOfCoreTrainSampler | None:
+    def dataloader(self) -> SamplerABC | None:
         """The dataloader used for training."""
         return self._dataloader
 
@@ -938,7 +973,7 @@ class CellFlow:
         return self._trainer
 
     @property
-    def validation_data(self) -> dict[str, ValidationData]:
+    def validation_data(self) -> dict[str, GroupedDistribution]:
         """The validation data."""
         return self._validation_data
 
@@ -960,15 +995,15 @@ class CellFlow:
         return self._vf
 
     @property
-    def train_data(self) -> TrainingData | None:
+    def train_data(self) -> GroupedDistribution | None:
         """The training data."""
         return self._train_data
 
     @train_data.setter
-    def train_data(self, data: TrainingData) -> None:
+    def train_data(self, data: GroupedDistribution) -> None:
         """Set the training data."""
-        if not isinstance(data, TrainingData):
-            raise ValueError(f"Expected `data` to be an instance of `TrainingData`, found `{type(data)}`.")
+        if not isinstance(data, GroupedDistribution):
+            raise ValueError(f"Expected `data` to be an instance of `GroupedDistribution`, found `{type(data)}`.")
         self._train_data = data
 
     @velocity_field.setter  # type: ignore[attr-defined,no-redef]

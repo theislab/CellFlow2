@@ -13,7 +13,7 @@ from ott.solvers import utils as solver_utils
 
 from scaleflow import utils
 from scaleflow._types import ArrayLike
-from scaleflow.model._utils import _multivariate_normal
+from scaleflow.solvers.utils import _multivariate_normal
 
 __all__ = ["GENOT"]
 
