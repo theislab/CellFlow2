@@ -158,7 +158,10 @@ class GroupedDistributionAnnotation:
             "src_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.src_dist_idx_to_labels.items()},
             "tgt_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.tgt_dist_idx_to_labels.items()},
             "src_tgt_dist_df": self.src_tgt_dist_df,
-            "control_values": self.control_values,
+            "default_values": self.default_values,
+            "tgt_dist_keys": self.tgt_dist_keys,
+            "src_dist_keys": self.src_dist_keys,
+            "dist_flag_key": self.dist_flag_key,
         }
         write_sharded(
             group=group,
