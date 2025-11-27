@@ -77,7 +77,7 @@ class AnnotationSplitter:
                 raise ValueError(f"{not_in_training_key} must be in df.columns: {not_in_training_key}")
         if split_key in df_unique.columns and not overwrite:
             raise ValueError(f"{split_key} already in df.columns: {split_key} and overwrite is False")
-        df_unique[split_key] = "test_val"
+        df_unique.loc[:, split_key] = "test_val"
 
         # remove the forced training combinations from the unique combinations
         if is_in_training_key is not None:
@@ -98,8 +98,7 @@ class AnnotationSplitter:
     def _split_df(self):
         # calculate the sizes of the splits
         is_in_training_key = None
-        df = self.annotation.src_tgt_dist_df.copy()
-        df_unique = df.drop_duplicates(subset=self.split_by)
+        df_unique = self.annotation.src_tgt_dist_df.drop_duplicates(subset=self.split_by).copy()
         AnnotationSplitter._check_df_unique_columns(df_unique, self.split_by)
         total_combinations = len(df_unique)
         train_size, val_size, test_size = self._calculate_split_sizes(
