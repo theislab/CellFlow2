@@ -68,6 +68,9 @@ class ReservoirSampler:
 
         if pool_fraction is None and replacement_prob is None or pool_fraction == 1.0:
             self._cache_all = True
+            self._pool_fraction = None
+            self._pool_size = None
+            self._replacement_prob = None
         else:
             if pool_fraction is None:
                 raise ValueError("pool_fraction must be provided if replacement_prob is provided.")
@@ -102,10 +105,11 @@ class ReservoirSampler:
         return None
 
     def _init_src_idx_pool(self, rng) -> None:
+        src_indices = np.array(list(self._data.data.src_data.keys()))
         if self._cache_all:
-            self._src_idx_pool = np.arange(self.n_source_dists)
+            self._src_idx_pool = src_indices
         else:
-            self._src_idx_pool = rng.choice(self.n_source_dists, size=self._pool_size, replace=False)
+            self._src_idx_pool = rng.choice(src_indices, size=self._pool_size, replace=False)
         return None
 
     def sample(self, rng) -> dict[str, Any]:
@@ -122,9 +126,7 @@ class ReservoirSampler:
         """
         source_dist_idx = self._sample_source_dist_idx(rng)
         target_dist_idx = self._sample_target_dist_idx(rng, source_dist_idx)
-        print(f"sampled source dist idx: {source_dist_idx} and target dist idx: {target_dist_idx}")
         source_batch = self._sample_source_cells(rng, source_dist_idx)
-        print(f"sampled source batch: {source_batch.shape}")
         target_batch = self._sample_target_cells(rng, source_dist_idx, target_dist_idx)
         print(f"sampled target batch: {target_batch.shape}")
         res = {"src_cell_data": source_batch, "tgt_cell_data": target_batch}
@@ -170,7 +172,7 @@ class ReservoirSampler:
 
     def _sample_source_dist_idx_in_memory(self, rng) -> int:
         source_idx = rng.choice(sorted(self._cached_srcs.keys()))
-        self._pool_usage_count[source_idx] += 1
+        self._pool_usage_count[source_idx] = self._pool_usage_count.get(source_idx, 0) + 1
         return source_idx
 
     def _sample_source_dist_idx_in_pool(self, rng) -> int:
@@ -180,7 +182,7 @@ class ReservoirSampler:
             source_idx = rng.choice(sorted(self._cached_srcs.keys()))
 
         # Increment usage count for monitoring
-        self._pool_usage_count[source_idx] += 1
+        self._pool_usage_count[source_idx] = self._pool_usage_count.get(source_idx, 0) + 1
 
         # Gradually replace elements based on replacement probability (schedule only)
         if rng.random() < self._replacement_prob:
@@ -191,37 +193,64 @@ class ReservoirSampler:
     def _schedule_replacement(self, rng):
         if self._cache_all:
             return  # No replacement if everything is cached
-        # weights same as previous logic
-        most_used_weight = (self._pool_usage_count == self._pool_usage_count.max()).astype(float)
+
+        # Get usage counts for indices in the pool
+        pool_indices = self._src_idx_pool.tolist()
+        usage_counts = np.array([self._pool_usage_count.get(idx, 0) for idx in pool_indices])
+
+        if len(usage_counts) == 0:
+            return
+
+        max_usage = usage_counts.max()
+        most_used_weight = (usage_counts == max_usage).astype(float)
         if most_used_weight.sum() == 0:
             return
         most_used_weight /= most_used_weight.sum()
-        replaced_pool_idx = rng.choice(self.n_source_dists, p=most_used_weight)
+        replaced_pool_slot = rng.choice(len(pool_indices), p=most_used_weight)
+        replaced_pool_idx = pool_indices[replaced_pool_slot]
 
         with self._lock:
-            pool_set = set(self._src_idx_pool.tolist())
-            if replaced_pool_idx not in pool_set:
-                return
-            in_pool_idx = int(np.where(self._src_idx_pool == replaced_pool_idx)[0][0])
-
             # If there's already a pending replacement for this pool slot, skip
-            if in_pool_idx in self._pending_replacements:
+            if replaced_pool_slot in self._pending_replacements:
                 return
 
-            least_used_weight = (self._pool_usage_count == self._pool_usage_count.min()).astype(float)
+            # Find all available source indices (not currently in pool)
+            all_src_indices = list(self._data.data.src_data.keys())
+            pool_set = set(pool_indices)
+            available_indices = [idx for idx in all_src_indices if idx not in pool_set]
+
+            if not available_indices:
+                return
+
+            # Get usage counts for available indices
+            available_usage = np.array([self._pool_usage_count.get(idx, 0) for idx in available_indices])
+            min_usage = available_usage.min()
+            least_used_weight = (available_usage == min_usage).astype(float)
             if least_used_weight.sum() == 0:
                 return
             least_used_weight /= least_used_weight.sum()
-            new_pool_idx = int(rng.choice(self.n_source_dists, p=least_used_weight))
+            new_idx_position = rng.choice(len(available_indices), p=least_used_weight)
+            new_pool_idx = available_indices[new_idx_position]
 
             # Kick off background load for new indices
             fut: Future = self._executor.submit(self._load_new_cache, new_pool_idx)
-            self._pending_replacements[in_pool_idx] = {
+            self._pending_replacements[replaced_pool_slot] = {
                 "old": replaced_pool_idx,
                 "new": new_pool_idx,
                 "future": fut,
             }
             print(f"scheduled replacement of {replaced_pool_idx} with {new_pool_idx} (slot {in_pool_idx})")
+
+    def _load_targets_parallel(self, tgt_indices):
+        """Load multiple target distributions in parallel."""
+        def _load_tgt(j: int):
+            return j, self._data.data.tgt_data[j][...]
+
+        max_workers = min(32, (os.cpu_count() or 4))  # TODO: avoid magic numbers
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            results = list(ex.map(_load_tgt, tgt_indices))
+        return {j: arr for j, arr in results}
+
 
     def _apply_ready_replacements(self):
         if self._cache_all:

@@ -10,6 +10,11 @@ import pandas as pd
 import zarr
 
 from scaleflow.data._utils import write_dist_data_threaded, write_sharded
+import anndata as ad
+from scaleflow._types import ArrayLike
+from scaleflow.data._utils import write_sharded, write_dist_data_threaded, write_nested_dist_data_threaded
+
+import pandas as pd
 
 __all__ = [
     "GroupedDistribution",
@@ -61,10 +66,11 @@ class BaseDataMixin:
 
 @dataclass
 class GroupedDistributionData:
-    src_to_tgt_dist_map: dict[int, list[int]]  # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
-    src_data: dict[int, np.ndarray]  # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
-    tgt_data: dict[int, np.ndarray]  # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
-    conditions: dict[int, np.ndarray]  # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
+    src_to_tgt_dist_map: dict[int, list[int]] # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
+    src_data: dict[int, np.ndarray] # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
+    tgt_data: dict[int, np.ndarray] # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
+    conditions: dict[int, np.ndarray] # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
+
 
     @classmethod
     def read_zarr(
@@ -78,7 +84,7 @@ class GroupedDistributionData:
             },
             src_data={int(k): group["src_data"][k] for k in group["src_data"].keys()},
             tgt_data={int(k): group["tgt_data"][k] for k in group["tgt_data"].keys()},
-            conditions={int(k): np.array(group["conditions"][k]) for k in group["conditions"].keys()},
+            conditions=conditions,
         )
 
     def write_zarr_group(
@@ -98,13 +104,11 @@ class GroupedDistributionData:
             shard_size=shard_size,
             compressors=None,
         )
-        to_write = {
-            "src_data": self.src_data,
-            "tgt_data": self.tgt_data,
-            "conditions": self.conditions,
-        }
-        for key, value in to_write.items():
+
+        # Write src_data and tgt_data using simple writer
+        for key in ["src_data", "tgt_data"]:
             sub_group = data.create_group(key)
+            value = getattr(self, key)
             write_dist_data_threaded(
                 group=sub_group,
                 dist_data=value,
@@ -112,6 +116,17 @@ class GroupedDistributionData:
                 shard_size=shard_size,
                 max_workers=max_workers,
             )
+
+        # Write conditions using nested writer (concatenates arrays per distribution)
+        conditions_group = data.create_group("conditions")
+        write_nested_dist_data_threaded(
+            group=conditions_group,
+            dist_data=self.conditions,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            max_workers=max_workers,
+        )
+
         return None
 
 
@@ -127,6 +142,7 @@ class GroupedDistributionAnnotation:
     tgt_dist_keys: list[str]
     src_dist_keys: list[str]
     dist_flag_key: str
+    condition_structure: dict[str, tuple[int, int]] | None = None  # Maps covariate name to (start, end) indices in flat array
 
     @classmethod
     def read_zarr(
@@ -244,6 +260,7 @@ class GroupedDistribution:
             shard_size=shard_size,
             max_workers=max_workers,
         )
+        print("writing annotation")
         self.annotation.write_zarr_group(
             group=zgroup,
             chunk_size=chunk_size,

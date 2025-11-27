@@ -202,9 +202,10 @@ class ConditionalVelocityField(nn.Module):
 
             cond_dim = self.time_encoder_dims[-1] + self.condition_embedding_dim
 
-            # Compute mlp_dim to match hidden_dims[-1] (cell encoder output)
-            # This ensures MLP in each DiT block outputs the same dimension as cell encoder
-            target_mlp_dim = self.hidden_dims[-1]
+            # Use standard Transformer MLP expansion (4x by default)
+            # mlp_dim is left as None, so it will use mlp_ratio * hidden_dim
+            # This gives: hidden_dim → (4 × hidden_dim) → hidden_dim
+            mlp_ratio = conditioning_kwargs.get("mlp_ratio", 4.0)
 
             self.adaln_blocks = [
                 AdaLNZeroBlock(
@@ -212,7 +213,7 @@ class ConditionalVelocityField(nn.Module):
                     cond_dim=cond_dim,
                     num_heads=conditioning_kwargs.get("num_heads", 8),
                     qkv_dim=conditioning_kwargs.get("qkv_dim", None),
-                    mlp_dim=target_mlp_dim,  # Fixed to match cell encoder output
+                    mlp_ratio=mlp_ratio,  # Standard 4x expansion in MLP
                     dropout_rate=self.decoder_dropout,
                     use_attention=True,
                     act_fn=self.act_fn,
@@ -771,9 +772,10 @@ class EquilibriumVelocityField(nn.Module):
 
             cond_dim = self.condition_embedding_dim
 
-            # Compute mlp_dim to match hidden_dims[-1] (cell encoder output)
-            # This ensures MLP in each DiT block outputs the same dimension as cell encoder
-            target_mlp_dim = self.hidden_dims[-1]
+            # Use standard Transformer MLP expansion (4x by default)
+            # mlp_dim is left as None, so it will use mlp_ratio * hidden_dim
+            # This gives: hidden_dim → (4 × hidden_dim) → hidden_dim
+            mlp_ratio = conditioning_kwargs.get("mlp_ratio", 4.0)
 
             self.adaln_blocks = [
                 AdaLNZeroBlock(
@@ -781,7 +783,7 @@ class EquilibriumVelocityField(nn.Module):
                     cond_dim=cond_dim,
                     num_heads=conditioning_kwargs.get("num_heads", 8),
                     qkv_dim=conditioning_kwargs.get("qkv_dim", None),
-                    mlp_dim=target_mlp_dim,  # Fixed to match cell encoder output
+                    mlp_ratio=mlp_ratio,  # Standard 4x expansion in MLP
                     dropout_rate=self.decoder_dropout,
                     use_attention=True,
                     act_fn=self.act_fn,
