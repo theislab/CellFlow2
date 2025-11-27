@@ -62,8 +62,11 @@ class ReservoirSampler:
         self.n_target_dists = len(data.data.tgt_data)
         self._data = data
         self._cache_all = False
+        self._pool_fraction = None
+        self._replacement_prob = None
+        self._pool_size = None
 
-        if pool_fraction is None and replacement_prob is None:
+        if pool_fraction is None and replacement_prob is None or pool_fraction == 1.0:
             self._cache_all = True
         else:
             if pool_fraction is None:
@@ -71,17 +74,17 @@ class ReservoirSampler:
             if replacement_prob is None:
                 raise ValueError("replacement_prob must be provided if pool_fraction is provided.")
         # Compute pool size from fraction
-        if not (0 < pool_fraction <= 1):
-            raise ValueError("pool_fraction must be in (0, 1].")
-        self._pool_fraction = pool_fraction
-        self._pool_size = math.ceil(pool_fraction * self.n_source_dists)
-        self._replacement_prob = replacement_prob
+        if not self._cache_all:
+            if not (0 < pool_fraction < 1):
+                raise ValueError("pool_fraction must be in (0, 1].")
+            self._pool_fraction = pool_fraction
+            self._pool_size = math.ceil(pool_fraction * self.n_source_dists)
+            self._replacement_prob = replacement_prob
+
         self._pool_usage_count = np.zeros(self.n_source_dists, dtype=int)
         self._initialized = False
         self._src_idx_pool = None
 
-        if pool_fraction == 1.0:
-            self._cache_all = True
 
         self._lock = nullcontext() if self._cache_all else threading.RLock()
         self._executor = None
