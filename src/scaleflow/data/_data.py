@@ -4,13 +4,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import anndata as ad
 import numpy as np
+import pandas as pd
 import zarr
 
-import anndata as ad
-from scaleflow.data._utils import write_sharded, write_dist_data_threaded
-
-import pandas as pd
+from scaleflow.data._utils import write_dist_data_threaded, write_sharded
 
 __all__ = [
     "GroupedDistribution",
@@ -72,9 +71,7 @@ class GroupedDistributionData:
         cls,
         group: zarr.Group,
     ) -> GroupedDistributionData:
-        """
-        Read the grouped distribution data from a Zarr group.
-        """
+        """Read the grouped distribution data from a Zarr group."""
         return cls(
             src_to_tgt_dist_map={
                 int(k): np.array(group["src_to_tgt_dist_map"][k]) for k in group["src_to_tgt_dist_map"].keys()
@@ -91,9 +88,7 @@ class GroupedDistributionData:
         shard_size: int,
         max_workers: int,
     ) -> None:
-        """
-        Write the grouped distribution data to a Zarr group.
-        """
+        """Write the grouped distribution data to a Zarr group."""
         data = group.create_group("data")
         write_sharded(
             group=data,
@@ -138,9 +133,7 @@ class GroupedDistributionAnnotation:
         cls,
         group: zarr.Group,
     ) -> GroupedDistributionAnnotation:
-        """
-        Read the grouped distribution annotation from a Zarr group.
-        """
+        """Read the grouped distribution annotation from a Zarr group."""
         elem = ad.io.read_elem(group)
         return cls(
             old_obs_index=elem["old_obs_index"],
@@ -159,9 +152,7 @@ class GroupedDistributionAnnotation:
         chunk_size: int,
         shard_size: int,
     ) -> None:
-        """
-        Write the grouped distribution annotation to a Zarr group.
-        """
+        """Write the grouped distribution annotation to a Zarr group."""
         to_write = {
             "old_obs_index": self.old_obs_index,
             "src_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.src_dist_idx_to_labels.items()},
@@ -219,7 +210,10 @@ class GroupedDistributionAnnotation:
             src_dist_idx_to_labels=filtered_src_labels,
             tgt_dist_idx_to_labels=filtered_tgt_labels,
             src_tgt_dist_df=filtered_df,
-            control_values=self.control_values,
+            default_values=self.default_values,
+            src_dist_keys=self.src_dist_keys,
+            tgt_dist_keys=self.tgt_dist_keys,
+            dist_flag_key=self.dist_flag_key,
         )
 
 
@@ -372,5 +366,9 @@ class GroupedDistribution:
                 src_dist_idx_to_labels=filtered_src_labels,
                 tgt_dist_idx_to_labels=filtered_tgt_labels,
                 src_tgt_dist_df=filtered_df,
+                default_values=self.annotation.default_values,
+                src_dist_keys=self.annotation.src_dist_keys,
+                tgt_dist_keys=self.annotation.tgt_dist_keys,
+                dist_flag_key=self.annotation.dist_flag_key,
             ),
         )
