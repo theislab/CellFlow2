@@ -5,7 +5,7 @@ import dask.array as da
 import numpy as np
 import pandas as pd
 
-from scaleflow.data import (
+from scaleflow.data._data import (
     GroupedDistribution,
     GroupedDistributionAnnotation,
     GroupedDistributionData,
