@@ -1,0 +1,36 @@
+# @package _global_
+
+# Quick training for debugging
+
+training:
+  num_iterations: 1000
+  batch_size: 256
+  validation_batch_size: 256
+
+  optimizer:
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    warmup_steps: 100
+    end_value: 0.00001
+    multi_steps: 10
+
+  ema: 0.01
+
+  logging:
+    log_every: 50
+    eval_every: 200
+
+  callbacks:
+    use_metrics: true
+    metrics:
+      - r_squared
+      - mmd
+      - e_distance
+    use_wandb: false
+    wandb_project: "cellflow_experiments"
+    wandb_dir: "wandb_logs"
+
+  # Model saving
+  save_model: false
+  out_dir: "outputs"
+

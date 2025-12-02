@@ -1,0 +1,32 @@
+# @package _global_
+
+# Long training for final models
+
+training:
+  num_iterations: 50000
+  batch_size: 512
+  validation_batch_size: 512
+
+  optimizer:
+    learning_rate: 0.00005
+    weight_decay: 0.01
+    warmup_steps: 2000
+    end_value: 0.0000001
+    multi_steps: 20
+
+  ema: 0.001
+
+  logging:
+    log_every: 200
+    eval_every: 2000
+
+  callbacks:
+    use_metrics: true
+    metrics:
+      - r_squared
+      - mmd
+      - e_distance
+    use_wandb: false
+    wandb_project: "cellflow_experiments"
+    wandb_dir: "wandb_logs"
+

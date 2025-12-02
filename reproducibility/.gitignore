@@ -1,0 +1,31 @@
+# Hydra outputs
+outputs/
+multirun/
+.hydra/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Weights & Biases
+wandb/
+
+# Models and checkpoints
+*.ckpt
+*.pt
+*.pth
+
+# Data (if storing locally)
+data/
+*.h5ad
+*.h5
+
+# Logs
+*.log
+

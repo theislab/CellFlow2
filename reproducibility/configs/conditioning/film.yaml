@@ -1,0 +1,21 @@
+# @package _global_
+
+# FiLM (Feature-wise Linear Modulation) conditioning
+
+architecture:
+  conditioning:
+    method: "film"
+    layer_norm_before: false
+    linear_projection_before: false
+
+  cell_transformer:
+    layers: 0
+    heads: 8
+    dim: 128
+    dropout: 0.1
+    mode: "before_condition"
+
+  decoder:
+    dims: [512, 256]
+    dropout: 0.2
+

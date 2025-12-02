@@ -1,0 +1,30 @@
+# @package _global_
+
+condition_encoder:
+  embedding_dim: 128
+  mode: "deterministic"
+  regularization: 0.1
+  output_dropout: 0.1
+
+  pooling:
+    method: "attention_token"
+    num_heads: 8
+    qkv_dim: 64
+    dropout_rate: 0.0
+
+  layers_before_pool:
+    drug:
+      - layer_type: mlp
+        dims: [1024, 512]
+        dropout_rate: 0.5
+    dosage:
+      - layer_type: mlp
+        dims: [256, 512]
+        dropout_rate: 0.0
+    cell_line:
+      - layer_type: mlp
+        dims: [1024, 512]
+        dropout_rate: 0.2
+
+  layers_after_pool: []
+

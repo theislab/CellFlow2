@@ -1,0 +1,38 @@
+# Example data configuration
+# Copy this and modify for your specific dataset
+
+# @package _global_
+
+data:
+  # Path to your AnnData file (REQUIRED - must be provided)
+  adata_path: ???
+
+  # Key in adata.obsm for cell representations
+  sample_rep: "X_pca"
+
+  # Key in adata.obs for control/treatment flag
+  control_key: "control"
+
+  # Keys for source distributions (e.g., cell lines)
+  src_dist_keys:
+    - cell_line
+
+  # Keys for target distributions (e.g., perturbations)
+  tgt_dist_keys:
+    - drug
+    - dosage
+
+  # Mapping of covariate names to their embedding keys in adata.uns
+  perturbation_covariate_reps:
+    drug: "drug_embeddings"
+    cell_line: "cell_line_embeddings"
+
+  # Data splitting configuration
+  split_by:
+    - cell_line
+
+  split_ratios:
+    - 0.7   # train
+    - 0.15  # val
+    - 0.15  # test
+

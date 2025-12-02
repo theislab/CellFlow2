@@ -1,0 +1,15 @@
+# @package _global_
+
+# Medium-sized model (default)
+
+architecture:
+  time_encoder:
+    freqs: 512
+    max_period: 10000
+    dims: [128]
+    dropout: 0.0
+
+  cell_encoder:
+    dims: [512, 256]
+    dropout: 0.0
+

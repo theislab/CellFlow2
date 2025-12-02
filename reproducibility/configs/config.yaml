@@ -1,0 +1,26 @@
+defaults:
+  - conditioning: adaln_zero
+  - condition_encoder: default
+  - architecture: medium
+  - solver: otfm
+  - training: standard
+  - optional data: default
+  - _self_
+
+# Data paths (override these when running)
+data:
+  adata_path: ???  # Must be provided
+  sample_rep: "X_pca"
+  control_key: "control"
+
+# Random seed
+seed: 42
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+

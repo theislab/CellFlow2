@@ -1,0 +1,24 @@
+# @package _global_
+
+# DiT (Diffusion Transformer) Architecture
+# Uses adaptive layer normalization with zero initialization
+
+architecture:
+  conditioning:
+    method: "adaln_zero"
+    num_heads: 8
+    qkv_dim: 256
+
+  cell_transformer:
+    layers: 0
+    heads: 8
+    dim: 128
+    dropout: 0.1
+    mode: "before_condition"
+
+  # Decoder dims specify attention dimensions in DiT blocks
+  # MLP dims are automatically set to hidden_dims[-1]
+  decoder:
+    dims: [256, 256]
+    dropout: 0.2
+

@@ -1,0 +1,21 @@
+# @package _global_
+
+# Simple concatenation of time, cell, and condition embeddings
+
+architecture:
+  conditioning:
+    method: "concatenation"
+    layer_norm_before: false
+    linear_projection_before: false
+
+  cell_transformer:
+    layers: 0
+    heads: 8
+    dim: 128
+    dropout: 0.1
+    mode: "before_condition"
+
+  decoder:
+    dims: [1024, 512, 256]
+    dropout: 0.2
+

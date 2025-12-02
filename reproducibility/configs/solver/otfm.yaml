@@ -1,0 +1,16 @@
+# @package _global_
+
+# Optimal Transport Flow Matching (OTFM)
+# Uses flow-based generative modeling with OT matching
+
+solver:
+  type: "otfm"
+
+  # OT matching parameters
+  epsilon: 1.0      # Entropic regularization
+  tau_a: 1.0        # Source marginal weight
+  tau_b: 1.0        # Target marginal weight
+
+  # Flow parameters
+  flow_type: "constant_noise"
+  flow_noise: 1.0

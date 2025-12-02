@@ -1,0 +1,15 @@
+# @package _global_
+
+# Small model for quick experimentation
+
+architecture:
+  time_encoder:
+    freqs: 256
+    max_period: 10000
+    dims: [64]
+    dropout: 0.0
+
+  cell_encoder:
+    dims: [256, 128]
+    dropout: 0.0
+

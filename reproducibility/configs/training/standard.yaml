@@ -1,0 +1,36 @@
+# @package _global_
+
+# Standard training configuration
+
+training:
+  num_iterations: 10000
+  batch_size: 512
+  validation_batch_size: 512
+
+  optimizer:
+    learning_rate: 0.00005
+    weight_decay: 0.01
+    warmup_steps: 1000
+    end_value: 0.000001
+    multi_steps: 20
+
+  ema: 0.01
+
+  logging:
+    log_every: 100
+    eval_every: 1000
+
+  callbacks:
+    use_metrics: true
+    metrics:
+      - r_squared
+      - mmd
+      - e_distance
+    use_wandb: false
+    wandb_project: "cellflow_experiments"
+    wandb_dir: "wandb_logs"
+
+  # Model saving
+  save_model: false
+  out_dir: "outputs"
+

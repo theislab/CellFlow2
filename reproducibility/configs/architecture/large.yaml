@@ -1,0 +1,15 @@
+# @package _global_
+
+# Large model for best performance
+
+architecture:
+  time_encoder:
+    freqs: 1024
+    max_period: 10000
+    dims: [256, 256]
+    dropout: 0.0
+
+  cell_encoder:
+    dims: [1024, 512]
+    dropout: 0.0
+

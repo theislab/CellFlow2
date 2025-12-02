@@ -1,0 +1,13 @@
+# @package _global_
+
+# Equilibrium Matching (EQM)
+# Learns equilibrium distributions directly
+
+solver:
+  type: "eqm"
+
+  # OT matching parameters (used if matching is enabled)
+  epsilon: 1.0      # Entropic regularization
+  tau_a: 1.0        # Source marginal weight
+  tau_b: 1.0        # Target marginal weight
+

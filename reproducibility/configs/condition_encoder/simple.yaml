@@ -1,0 +1,29 @@
+# @package _global_
+
+# Simpler condition encoder with less dropout
+
+condition_encoder:
+  embedding_dim: 128
+  mode: "deterministic"
+  regularization: 0.1
+  output_dropout: 0.0
+
+  pooling:
+    method: "mean"
+
+  layers_before_pool:
+    drug:
+      - layer_type: mlp
+        dims: [512, 256]
+        dropout_rate: 0.0
+    dosage:
+      - layer_type: mlp
+        dims: [128, 256]
+        dropout_rate: 0.0
+    cell_line:
+      - layer_type: mlp
+        dims: [512, 256]
+        dropout_rate: 0.0
+
+  layers_after_pool: []
+
