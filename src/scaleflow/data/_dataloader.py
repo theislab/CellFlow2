@@ -185,7 +185,7 @@ class ReservoirSampler:
 
     def _sample_source_dist_idx_in_memory(self, rng) -> int:
         source_idx = rng.choice(sorted(self._cached_srcs.keys()))
-        self._pool_usage_count[source_idx] = self._pool_usage_count.get(source_idx, 0) + 1
+        self._pool_usage_count[source_idx] = self._pool_usage_count[source_idx] + 1
         return source_idx
 
     def _sample_source_dist_idx_in_pool(self, rng) -> int:
@@ -195,7 +195,7 @@ class ReservoirSampler:
             source_idx = rng.choice(sorted(self._cached_srcs.keys()))
 
         # Increment usage count for monitoring
-        self._pool_usage_count[source_idx] = self._pool_usage_count.get(source_idx, 0) + 1
+        self._pool_usage_count[source_idx] = self._pool_usage_count[source_idx] + 1
 
         # Gradually replace elements based on replacement probability (schedule only)
         if rng.random() < self._replacement_prob:
@@ -209,7 +209,7 @@ class ReservoirSampler:
 
         # Get usage counts for indices in the pool
         pool_indices = self._src_idx_pool.tolist()
-        usage_counts = np.array([self._pool_usage_count.get(idx, 0) for idx in pool_indices])
+        usage_counts = np.array([self._pool_usage_count[idx] for idx in pool_indices])
 
         if len(usage_counts) == 0:
             return
@@ -236,7 +236,7 @@ class ReservoirSampler:
                 return
 
             # Get usage counts for available indices
-            available_usage = np.array([self._pool_usage_count.get(idx, 0) for idx in available_indices])
+            available_usage = np.array([self._pool_usage_count[idx] for idx in available_indices])
             min_usage = available_usage.min()
             least_used_weight = (available_usage == min_usage).astype(float)
             if least_used_weight.sum() == 0:

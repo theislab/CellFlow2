@@ -424,4 +424,4 @@ class TestReservoirSamplerEdgeCases:
         sampler.init_sampler(rng)
 
         result = sampler.sample(rng)
-        assert isinstance(result["condition"], np.ndarray)
+        assert isinstance(result["condition"], dict)
