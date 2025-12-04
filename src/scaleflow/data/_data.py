@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
+from scaleflow.data._anndata_location import AnnDataLocation
 from scaleflow.data._utils import write_dist_data_threaded, write_nested_dist_data_threaded, write_sharded
 
 __all__ = [
@@ -222,6 +223,7 @@ class GroupedDistributionAnnotation:
     tgt_dist_keys: list[str]
     src_dist_keys: list[str]
     dist_flag_key: str
+    data_location: AnnDataLocation | None = None  # The location of the data in the AnnData object
 
     @classmethod
     def read_zarr(
@@ -230,6 +232,13 @@ class GroupedDistributionAnnotation:
     ) -> GroupedDistributionAnnotation:
         """Read the grouped distribution annotation from a Zarr group."""
         elem = ad.io.read_elem(group)
+
+        # Handle data_location - may not exist in older zarr files
+        data_location = None
+        if "data_location" in elem and elem["data_location"] is not None:
+            # Convert from stored format (JSON string) back to AnnDataLocation
+            data_location = AnnDataLocation.from_json(elem["data_location"])
+
         return cls(
             old_obs_index=elem["old_obs_index"],
             src_dist_idx_to_labels={int(k): v for k, v in elem["src_dist_idx_to_labels"].items()},
@@ -239,6 +248,7 @@ class GroupedDistributionAnnotation:
             tgt_dist_keys=np.array(elem["tgt_dist_keys"]).tolist(),
             src_dist_keys=np.array(elem["src_dist_keys"]).tolist(),
             dist_flag_key=elem["dist_flag_key"],
+            data_location=data_location,
         )
 
     def write_zarr_group(
@@ -257,6 +267,7 @@ class GroupedDistributionAnnotation:
             "tgt_dist_keys": self.tgt_dist_keys,
             "src_dist_keys": self.src_dist_keys,
             "dist_flag_key": self.dist_flag_key,
+            "data_location": self.data_location.to_json() if self.data_location is not None else None,
         }
         write_sharded(
             group=group,

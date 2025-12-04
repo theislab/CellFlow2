@@ -163,6 +163,7 @@ class DataManager:
                 src_dist_idx_to_labels=src_dist_labels,
                 tgt_dist_idx_to_labels=tgt_dist_labels,
                 default_values=default_values,
+                data_location=self.data_location,
             ),
         )
 

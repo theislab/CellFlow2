@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 import zarr
 
+from scaleflow.data import AnnDataLocation
 from scaleflow.data._data import (
     GroupedDistribution,
     GroupedDistributionAnnotation,
@@ -38,6 +39,7 @@ def dummy_grouped_distribution_annotation():
     tgt_dist_keys = ["key1", "key2"]
     src_dist_keys = ["skey1"]
     dist_flag_key = "flag"
+    data_location = AnnDataLocation().obsm["X_pca"]
 
     return GroupedDistributionAnnotation(
         old_obs_index=old_obs_index,
@@ -48,6 +50,7 @@ def dummy_grouped_distribution_annotation():
         tgt_dist_keys=tgt_dist_keys,
         src_dist_keys=src_dist_keys,
         dist_flag_key=dist_flag_key,
+        data_location=data_location,
     )
 
 
@@ -121,6 +124,13 @@ def test_grouped_distribution_annotation_io(tmp_path, dummy_grouped_distribution
     assert read_annotation.tgt_dist_keys == dummy_grouped_distribution_annotation.tgt_dist_keys
     assert read_annotation.src_dist_keys == dummy_grouped_distribution_annotation.src_dist_keys
     assert read_annotation.dist_flag_key == dummy_grouped_distribution_annotation.dist_flag_key
+
+    # Check data_location is preserved
+    assert read_annotation.data_location is not None
+    assert (
+        read_annotation.data_location._path
+        == dummy_grouped_distribution_annotation.data_location._path
+    )
 
 
 def test_grouped_distribution_io(tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation):
@@ -806,3 +816,202 @@ class TestLazyVsInMemorySplitting:
         result = sampler.sample()
         assert result["src_cell_data"].shape[0] == 16
         assert "condition" in result
+
+
+class TestAnnDataLocationSerialization:
+    """Tests for AnnDataLocation serialization (to_path/from_path)."""
+
+    def test_to_path_empty(self):
+        """Test to_path for empty AnnDataLocation."""
+        adl = AnnDataLocation()
+        assert adl.to_path() == []
+
+    def test_to_path_simple_attr(self):
+        """Test to_path for simple attribute access."""
+        adl = AnnDataLocation().obsm
+        assert adl.to_path() == [["getattr", "obsm"]]
+
+    def test_to_path_attr_and_item(self):
+        """Test to_path for attribute and item access."""
+        adl = AnnDataLocation().obsm["X_pca"]
+        expected = [["getattr", "obsm"], ["getitem", "X_pca"]]
+        assert adl.to_path() == expected
+
+    def test_to_path_complex(self):
+        """Test to_path for complex nested access."""
+        adl = AnnDataLocation().layers["counts"]
+        expected = [["getattr", "layers"], ["getitem", "counts"]]
+        assert adl.to_path() == expected
+
+    def test_from_path_empty(self):
+        """Test from_path for empty path."""
+        adl = AnnDataLocation.from_path([])
+        assert adl._path == []
+
+    def test_from_path_simple(self):
+        """Test from_path for simple path."""
+        adl = AnnDataLocation.from_path([["getattr", "X"]])
+        assert adl._path == [("getattr", "X")]
+
+    def test_from_path_complex(self):
+        """Test from_path for complex path."""
+        path = [["getattr", "obsm"], ["getitem", "X_pca"]]
+        adl = AnnDataLocation.from_path(path)
+        expected_path = [("getattr", "obsm"), ("getitem", "X_pca")]
+        assert adl._path == expected_path
+
+    def test_roundtrip(self):
+        """Test roundtrip: to_path followed by from_path."""
+        original = AnnDataLocation().obsm["X_pca"]
+        serialized = original.to_path()
+        restored = AnnDataLocation.from_path(serialized)
+        assert restored._path == original._path
+
+    def test_roundtrip_various_paths(self):
+        """Test roundtrip for various path configurations."""
+        test_cases = [
+            AnnDataLocation(),
+            AnnDataLocation().X,
+            AnnDataLocation().obs["cell_type"],
+            AnnDataLocation().obsm["X_pca"],
+            AnnDataLocation().layers["counts"],
+            AnnDataLocation().uns["embeddings"]["drug"],
+        ]
+        for original in test_cases:
+            serialized = original.to_path()
+            restored = AnnDataLocation.from_path(serialized)
+            assert restored._path == original._path, f"Roundtrip failed for {original}"
+
+    def test_to_json(self):
+        """Test to_json serialization."""
+        adl = AnnDataLocation().obsm["X_pca"]
+        json_str = adl.to_json()
+        assert json_str == '[["getattr", "obsm"], ["getitem", "X_pca"]]'
+
+    def test_from_json(self):
+        """Test from_json deserialization."""
+        json_str = '[["getattr", "obsm"], ["getitem", "X_pca"]]'
+        adl = AnnDataLocation.from_json(json_str)
+        expected_path = [("getattr", "obsm"), ("getitem", "X_pca")]
+        assert adl._path == expected_path
+
+    def test_json_roundtrip(self):
+        """Test roundtrip through JSON serialization."""
+        test_cases = [
+            AnnDataLocation(),
+            AnnDataLocation().X,
+            AnnDataLocation().obs["cell_type"],
+            AnnDataLocation().obsm["X_pca"],
+            AnnDataLocation().layers["counts"],
+            AnnDataLocation().uns["embeddings"]["drug"],
+        ]
+        for original in test_cases:
+            json_str = original.to_json()
+            restored = AnnDataLocation.from_json(json_str)
+            assert restored._path == original._path, f"JSON roundtrip failed for {original}"
+
+
+class TestAnnotationDataLocation:
+    """Tests for data_location field in GroupedDistributionAnnotation."""
+
+    @pytest.fixture
+    def base_annotation_kwargs(self):
+        """Base kwargs for creating annotation without data_location."""
+        return {
+            "old_obs_index": np.arange(20),
+            "src_dist_idx_to_labels": {0: ["label1", "label2"], 1: ["label3"]},
+            "tgt_dist_idx_to_labels": {0: ["tlabel1"], 1: ["tlabel2"], 2: ["tlabel3"]},
+            "src_tgt_dist_df": pd.DataFrame({
+                "src_dist_idx": [0, 0, 1],
+                "tgt_dist_idx": [0, 1, 2],
+                "other_col": ["a", "b", "c"],
+            }),
+            "default_values": {"param1": 1, "param2": "val"},
+            "tgt_dist_keys": ["key1", "key2"],
+            "src_dist_keys": ["skey1"],
+            "dist_flag_key": "flag",
+        }
+
+    def test_annotation_with_none_data_location(self, tmp_path, base_annotation_kwargs):
+        """Test annotation IO with data_location=None."""
+        annotation = GroupedDistributionAnnotation(**base_annotation_kwargs, data_location=None)
+
+        store_path = tmp_path / "test_none_location.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+        annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+        read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        assert read_annotation.data_location is None
+
+    def test_annotation_with_obsm_data_location(self, tmp_path, base_annotation_kwargs):
+        """Test annotation IO with obsm data_location."""
+        data_location = AnnDataLocation().obsm["X_pca"]
+        annotation = GroupedDistributionAnnotation(
+            **base_annotation_kwargs,
+            data_location=data_location,
+        )
+
+        store_path = tmp_path / "test_obsm_location.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+        annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+        read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        assert read_annotation.data_location is not None
+        assert read_annotation.data_location._path == data_location._path
+
+    def test_annotation_with_X_data_location(self, tmp_path, base_annotation_kwargs):
+        """Test annotation IO with X (main matrix) data_location."""
+        data_location = AnnDataLocation().X
+        annotation = GroupedDistributionAnnotation(
+            **base_annotation_kwargs,
+            data_location=data_location,
+        )
+
+        store_path = tmp_path / "test_X_location.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+        annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+        read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        assert read_annotation.data_location is not None
+        assert read_annotation.data_location._path == data_location._path
+
+    def test_annotation_with_layers_data_location(self, tmp_path, base_annotation_kwargs):
+        """Test annotation IO with layers data_location."""
+        data_location = AnnDataLocation().layers["counts"]
+        annotation = GroupedDistributionAnnotation(
+            **base_annotation_kwargs,
+            data_location=data_location,
+        )
+
+        store_path = tmp_path / "test_layers_location.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+        annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+        read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        assert read_annotation.data_location is not None
+        assert read_annotation.data_location._path == data_location._path
+
+    def test_grouped_distribution_preserves_data_location(
+        self,
+        tmp_path,
+        dummy_grouped_distribution_data,
+        base_annotation_kwargs,
+    ):
+        """Test that GroupedDistribution preserves data_location through write/read."""
+        data_location = AnnDataLocation().obsm["X_scVI"]
+        annotation = GroupedDistributionAnnotation(
+            **base_annotation_kwargs,
+            data_location=data_location,
+        )
+
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=annotation,
+        )
+
+        store_path = tmp_path / "test_gd_location.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        read_gd = GroupedDistribution.read_zarr(str(store_path))
+        assert read_gd.annotation.data_location is not None
+        assert read_gd.annotation.data_location._path == data_location._path
