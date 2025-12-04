@@ -932,6 +932,69 @@ class TestAnnotationDataLocation:
             "dist_flag_key": "flag",
         }
 
+    def test_data_location_via_datamanager_and_write(self, tmp_path, sample_grouped_distribution):
+        """Test that data_location survives full roundtrip via DataManager and write_zarr.
+
+        This tests the integration path: DataManager.prepare_data -> write_zarr -> read_zarr
+        which is how users typically use the library.
+        """
+        # sample_grouped_distribution comes from DataManager.prepare_data with data_location set
+        assert sample_grouped_distribution.annotation.data_location is not None
+
+        store_path = tmp_path / "test_datamanager_data_location.zarr"
+        sample_grouped_distribution.write_zarr(
+            path=str(store_path),
+            chunk_size=10,
+            shard_size=100,
+            max_workers=1,
+        )
+
+        # Read back and verify
+        read_gd = GroupedDistribution.read_zarr(str(store_path))
+        assert read_gd.annotation.data_location is not None
+        assert (
+            read_gd.annotation.data_location._path
+            == sample_grouped_distribution.annotation.data_location._path
+        )
+
+    def test_data_location_via_prepare_datasets(self, tmp_path, adata_test):
+        """Test data_location roundtrip using prepare_datasets convenience function.
+
+        This matches the exact usage pattern:
+        gd1 = prepare_datasets({"adata1": adata1}, data_manager=data_manager)
+        gd1 = gd1["adata1"]
+        gd1.write_zarr("data/gd1.zarr")
+        """
+        from scaleflow.data import DataManager, prepare_datasets
+
+        adl = AnnDataLocation()
+        data_manager = DataManager(
+            dist_flag_key="control",
+            src_dist_keys=["cell_line"],
+            tgt_dist_keys=["drug", "gene"],
+            rep_keys={
+                "cell_line": "cell_line_embeddings",
+                "drug": "drug_embeddings",
+                "gene": "gene_embeddings",
+            },
+            data_location=adl.obsm["X_pca"],
+        )
+
+        gd_dict = prepare_datasets({"adata1": adata_test}, data_manager=data_manager)
+        gd = gd_dict["adata1"]
+
+        # Verify data_location is set
+        assert gd.annotation.data_location is not None
+        assert gd.annotation.data_location._path == [("getattr", "obsm"), ("getitem", "X_pca")]
+
+        # Write and read back
+        store_path = tmp_path / "test_prepare_datasets_data_location.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        read_gd = GroupedDistribution.read_zarr(str(store_path))
+        assert read_gd.annotation.data_location is not None
+        assert read_gd.annotation.data_location._path == gd.annotation.data_location._path
+
     def test_annotation_with_none_data_location(self, tmp_path, base_annotation_kwargs):
         """Test annotation IO with data_location=None."""
         annotation = GroupedDistributionAnnotation(**base_annotation_kwargs, data_location=None)

@@ -163,3 +163,4 @@ scripts/logs
 
 *.err
 *.out
+data/*
