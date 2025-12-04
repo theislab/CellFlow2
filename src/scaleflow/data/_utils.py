@@ -190,11 +190,12 @@ def write_sharded(
             # Calculate greatest common divisor for first dimension
             # or use smallest dimension as chunk size
 
-            chunk_size_used, shard_size_used = _get_size(elem.shape, chunk_size, shard_size)
+            shape = elem.shape if hasattr(elem, "shape") else (len(elem),)
+            chunk_size_used, shard_size_used = _get_size(shape, chunk_size, shard_size)
 
             dataset_kwargs = {
-                "shards": (shard_size_used,) + (elem.shape[1:]),  # only shard over 1st dim
-                "chunks": (chunk_size_used,) + (elem.shape[1:]),  # only chunk over 1st dim
+                "shards": (shard_size_used,) + (shape[1:]),  # only shard over 1st dim
+                "chunks": (chunk_size_used,) + (shape[1:]),  # only chunk over 1st dim
                 "compressors": compressors,
                 **dataset_kwargs,
             }
