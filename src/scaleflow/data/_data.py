@@ -4,7 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import anndata as ad
 import numpy as np
+import pandas as pd
 import zarr
 
 import anndata as ad
@@ -117,9 +119,7 @@ class GroupedDistributionData:
         shard_size: int,
         max_workers: int,
     ) -> None:
-        """
-        Write the grouped distribution data to a Zarr group.
-        """
+        """Write the grouped distribution data to a Zarr group."""
         data = group.create_group("data")
         write_sharded(
             group=data,
@@ -174,9 +174,7 @@ class GroupedDistributionAnnotation:
         cls,
         group: zarr.Group,
     ) -> GroupedDistributionAnnotation:
-        """
-        Read the grouped distribution annotation from a Zarr group.
-        """
+        """Read the grouped distribution annotation from a Zarr group."""
         elem = ad.io.read_elem(group)
         return cls(
             old_obs_index=elem["old_obs_index"],
@@ -195,15 +193,16 @@ class GroupedDistributionAnnotation:
         chunk_size: int,
         shard_size: int,
     ) -> None:
-        """
-        Write the grouped distribution annotation to a Zarr group.
-        """
+        """Write the grouped distribution annotation to a Zarr group."""
         to_write = {
             "old_obs_index": self.old_obs_index,
             "src_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.src_dist_idx_to_labels.items()},
             "tgt_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.tgt_dist_idx_to_labels.items()},
             "src_tgt_dist_df": self.src_tgt_dist_df,
-            "control_values": self.control_values,
+            "default_values": self.default_values,
+            "tgt_dist_keys": self.tgt_dist_keys,
+            "src_dist_keys": self.src_dist_keys,
+            "dist_flag_key": self.dist_flag_key,
         }
         write_sharded(
             group=group,
@@ -215,48 +214,51 @@ class GroupedDistributionAnnotation:
         )
         return None
 
-    def filter_by_tgt_dist_indices(self, tgt_dist_indices: list[int]) -> GroupedDistributionAnnotation:
-        """
-        Create a new GroupedDistributionAnnotation containing only the specified target distribution indices.
+    # def filter_by_tgt_dist_indices(self, tgt_dist_indices: list[int]) -> GroupedDistributionAnnotation:
+    #     """
+    #     Create a new GroupedDistributionAnnotation containing only the specified target distribution indices.
 
-        Parameters
-        ----------
-        tgt_dist_indices : list[int]
-            List of target distribution indices to include
+    #     Parameters
+    #     ----------
+    #     tgt_dist_indices : list[int]
+    #         List of target distribution indices to include
 
-        Returns
-        -------
-        GroupedDistributionAnnotation
-            New annotation with filtered data
-        """
-        tgt_dist_indices_set = set(tgt_dist_indices)
+    #     Returns
+    #     -------
+    #     GroupedDistributionAnnotation
+    #         New annotation with filtered data
+    #     """
+    #     tgt_dist_indices_set = set(tgt_dist_indices)
 
-        # Filter dataframe
-        filtered_df = self.src_tgt_dist_df[self.src_tgt_dist_df["tgt_dist_idx"].isin(tgt_dist_indices_set)].copy()
+    #     # Filter dataframe
+    #     filtered_df = self.src_tgt_dist_df[self.src_tgt_dist_df["tgt_dist_idx"].isin(tgt_dist_indices_set)].copy()
 
-        # Get involved source distributions
-        involved_src_dists = set(filtered_df["src_dist_idx"].unique())
+    #     # Get involved source distributions
+    #     involved_src_dists = set(filtered_df["src_dist_idx"].unique())
 
-        # Filter labels
-        filtered_tgt_labels = {
-            tgt_idx: self.tgt_dist_idx_to_labels[tgt_idx]
-            for tgt_idx in tgt_dist_indices
-            if tgt_idx in self.tgt_dist_idx_to_labels
-        }
+    #     # Filter labels
+    #     filtered_tgt_labels = {
+    #         tgt_idx: self.tgt_dist_idx_to_labels[tgt_idx]
+    #         for tgt_idx in tgt_dist_indices
+    #         if tgt_idx in self.tgt_dist_idx_to_labels
+    #     }
 
-        filtered_src_labels = {
-            src_idx: self.src_dist_idx_to_labels[src_idx]
-            for src_idx in involved_src_dists
-            if src_idx in self.src_dist_idx_to_labels
-        }
+    #     filtered_src_labels = {
+    #         src_idx: self.src_dist_idx_to_labels[src_idx]
+    #         for src_idx in involved_src_dists
+    #         if src_idx in self.src_dist_idx_to_labels
+    #     }
 
-        return GroupedDistributionAnnotation(
-            old_obs_index=self.old_obs_index,  # Keep original mapping
-            src_dist_idx_to_labels=filtered_src_labels,
-            tgt_dist_idx_to_labels=filtered_tgt_labels,
-            src_tgt_dist_df=filtered_df,
-            control_values=self.control_values,
-        )
+    #     return GroupedDistributionAnnotation(
+    #         old_obs_index=self.old_obs_index,  # Keep original mapping
+    #         src_dist_idx_to_labels=filtered_src_labels,
+    #         tgt_dist_idx_to_labels=filtered_tgt_labels,
+    #         src_tgt_dist_df=filtered_df,
+    #         default_values=self.default_values,
+    #         src_dist_keys=self.src_dist_keys,
+    #         tgt_dist_keys=self.tgt_dist_keys,
+    #         dist_flag_key=self.dist_flag_key,
+    #     )
 
 
 @dataclass
@@ -305,110 +307,3 @@ class GroupedDistribution:
             data=data,
         )
 
-    def split_by_dist_df(self, dist_df: pd.DataFrame, column: str) -> dict[str, GroupedDistributionData]:
-        """Split the grouped distribution by the given distribution dataframe."""
-        if column not in dist_df.columns:
-            raise ValueError(f"Column {column} not found in dist_df.")
-        # assert categorical,boolean, or string
-        if (
-            not pd.api.types.is_categorical_dtype(dist_df[column])
-            and not pd.api.types.is_bool_dtype(dist_df[column])
-            and not pd.api.types.is_string_dtype(dist_df[column])
-        ):
-            raise ValueError(f"Column {column} must be categorical, boolean, or string.")
-
-        split_values = dist_df[column].unique()
-        # get the src_dist_idx and tgt_dist_idx for each value
-        split_data = {}
-        for value in split_values:
-            filtered_df = dist_df.loc[dist_df[column] == value]
-            # group by to map src_dist_idx and tgt_dist_idx
-            src_tgt_dist_map = (
-                filtered_df[["src_dist_idx", "tgt_dist_idx"]]
-                .groupby("src_dist_idx")["tgt_dist_idx"]
-                .apply(list)
-                .to_dict()
-            )
-            src_data = {int(k): self.data.src_data[k] for k in src_tgt_dist_map.keys()}
-            tgt_indices = {int(j) for tgt_list in src_tgt_dist_map.values() for j in tgt_list}
-            tgt_data = {int(k): self.data.tgt_data[k] for k in tgt_indices}
-            conditions = {int(k): self.data.conditions[k] for k in tgt_indices}
-            split_data[value] = GroupedDistributionData(
-                src_to_tgt_dist_map=src_tgt_dist_map,
-                src_data=src_data,
-                tgt_data=tgt_data,
-                conditions=conditions,
-            )
-        return split_data
-
-    def filter_by_tgt_dist_indices(self, tgt_dist_indices: list[int]) -> GroupedDistribution:
-        """
-        Create a new GroupedDistribution containing only the specified target distribution indices.
-
-        Parameters
-        ----------
-        tgt_dist_indices : list[int]
-            List of target distribution indices to include
-
-        Returns
-        -------
-        GroupedDistribution
-            New GroupedDistribution with filtered data
-        """
-        tgt_dist_indices_set = set(tgt_dist_indices)
-
-        # Filter annotation data
-        filtered_df = self.annotation.src_tgt_dist_df[
-            self.annotation.src_tgt_dist_df["tgt_dist_idx"].isin(tgt_dist_indices_set)
-        ].copy()
-
-        # Get involved source distributions
-        involved_src_dists = set(filtered_df["src_dist_idx"].unique())
-
-        # Filter data structures
-        filtered_src_to_tgt = {
-            src_idx: [tgt_idx for tgt_idx in tgt_list if tgt_idx in tgt_dist_indices_set]
-            for src_idx, tgt_list in self.data.src_to_tgt_dist_map.items()
-            if src_idx in involved_src_dists
-        }
-        # Remove empty mappings
-        filtered_src_to_tgt = {k: v for k, v in filtered_src_to_tgt.items() if len(v) > 0}
-
-        filtered_src_data = {src_idx: self.data.src_data[src_idx] for src_idx in filtered_src_to_tgt.keys()}
-
-        filtered_tgt_data = {
-            tgt_idx: self.data.tgt_data[tgt_idx] for tgt_idx in tgt_dist_indices if tgt_idx in self.data.tgt_data
-        }
-
-        filtered_conditions = {
-            tgt_idx: self.data.conditions[tgt_idx] for tgt_idx in tgt_dist_indices if tgt_idx in self.data.conditions
-        }
-
-        filtered_tgt_labels = {
-            tgt_idx: self.annotation.tgt_dist_idx_to_labels[tgt_idx]
-            for tgt_idx in tgt_dist_indices
-            if tgt_idx in self.annotation.tgt_dist_idx_to_labels
-        }
-
-        filtered_src_labels = {
-            src_idx: self.annotation.src_dist_idx_to_labels[src_idx]
-            for src_idx in filtered_src_to_tgt.keys()
-            if src_idx in self.annotation.src_dist_idx_to_labels
-        }
-
-        # Note: old_obs_index remains the same as it maps to original data
-
-        return GroupedDistribution(
-            data=GroupedDistributionData(
-                src_to_tgt_dist_map=filtered_src_to_tgt,
-                src_data=filtered_src_data,
-                tgt_data=filtered_tgt_data,
-                conditions=filtered_conditions,
-            ),
-            annotation=GroupedDistributionAnnotation(
-                old_obs_index=self.annotation.old_obs_index,
-                src_dist_idx_to_labels=filtered_src_labels,
-                tgt_dist_idx_to_labels=filtered_tgt_labels,
-                src_tgt_dist_df=filtered_df,
-            ),
-        )

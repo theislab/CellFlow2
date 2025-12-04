@@ -88,14 +88,15 @@ optional-dependencies.pp = [
   "rdkit",
 ]
 optional-dependencies.test = [
-  "scaleflow-tools[embedding]",
-  "scaleflow-tools[external]",
-  "scaleflow-tools[pp]",
   "coverage[toml]>=7",
   "pytest",
   "pytest-cov>=6",
   "pytest-mock>=3.5",
   "pytest-xdist>=3",
+  "pytest-benchmark>=5",
+  "scaleflow-tools[embedding]",
+  "scaleflow-tools[external]",
+  "scaleflow-tools[pp]",
 ]
 
 urls.Documentation = "https://scaleflow.readthedocs.io/"
@@ -165,9 +166,11 @@ testpaths = [ "tests" ]
 xfail_strict = true
 addopts = [
   "--import-mode=importlib", # allow using test files with same name
+  "--benchmark-skip",  # skip benchmarks in normal runs
 ]
 markers = [
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "benchmark: marks tests as benchmarks",
 ]
 
 [tool.coverage.run]

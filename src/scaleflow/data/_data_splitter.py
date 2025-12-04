@@ -1,25 +1,27 @@
-"""Data splitter for creating train/validation/test splits from TrainingData objects."""
+"""Data splitter for creating train/validation/test splits from GroupedDistribution objects."""
 
 import logging
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
-from scaleflow.data._data import GroupedDistributionAnnotation
+from scaleflow.data._data import GroupedDistribution, GroupedDistributionAnnotation
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AnnotationSplitter:
-    annotation: GroupedDistributionAnnotation
+class GroupedDistributionSplitter:
+    gd: GroupedDistribution
     holdout_combinations: bool
     split_by: list[str]
     split_key: str
     force_training_values: dict[str, Any]
     ratios: list[float]
     random_state: int
+    _computed_split_df: pd.DataFrame | None = None
 
     def __post_init__(self):
         if len(self.split_by) == 0:
@@ -37,6 +39,11 @@ class AnnotationSplitter:
         self.train_ratio = self.ratios[0]
         self.val_ratio = self.ratios[1]
         self.test_ratio = self.ratios[2]
+
+    @property
+    def annotation(self) -> GroupedDistributionAnnotation:
+        """Convenience property to access the annotation from the GroupedDistribution."""
+        return self.gd.annotation
 
     def _calculate_split_sizes(self, total_combinations: int) -> tuple[int, int, int]:
         train_size = round(self.train_ratio * total_combinations)
@@ -76,7 +83,7 @@ class AnnotationSplitter:
                 raise ValueError(f"{not_in_training_key} must be in df.columns: {not_in_training_key}")
         if split_key in df_unique.columns and not overwrite:
             raise ValueError(f"{split_key} already in df.columns: {split_key} and overwrite is False")
-        df_unique[split_key] = "test_val"
+        df_unique.loc[:, split_key] = "test_val"
 
         # remove the forced training combinations from the unique combinations
         if is_in_training_key is not None:
@@ -97,9 +104,8 @@ class AnnotationSplitter:
     def _split_df(self):
         # calculate the sizes of the splits
         is_in_training_key = None
-        df = self.annotation.src_tgt_dist_df.copy()
-        df_unique = df.drop_duplicates(subset=self.split_by)
-        AnnotationSplitter._check_df_unique_columns(df_unique, self.split_by)
+        df_unique = self.annotation.src_tgt_dist_df.drop_duplicates(subset=self.split_by).copy()
+        GroupedDistributionSplitter._check_df_unique_columns(df_unique, self.split_by)
         total_combinations = len(df_unique)
         train_size, val_size, test_size = self._calculate_split_sizes(
             total_combinations=total_combinations,
@@ -107,7 +113,7 @@ class AnnotationSplitter:
 
         if self.holdout_combinations:
             is_in_training_key = "forced_in_train"
-            AnnotationSplitter._contains_value(
+            GroupedDistributionSplitter._contains_value(
                 df_unique=df_unique,
                 combination_keys=self.split_by,
                 values=self.annotation.default_values,
@@ -116,7 +122,7 @@ class AnnotationSplitter:
             )
         if len(self.force_training_values) > 0:
             is_in_training_key = "forced_in_train"
-            AnnotationSplitter._contains_value(
+            GroupedDistributionSplitter._contains_value(
                 df_unique=df_unique,
                 combination_keys=self.split_by,
                 values=self.force_training_values,
@@ -172,7 +178,7 @@ class AnnotationSplitter:
         accept_nan: bool
             Whether to accept NaN values.
         """
-        AnnotationSplitter._check_df_unique_columns(
+        GroupedDistributionSplitter._check_df_unique_columns(
             df_unique=df_unique,
             combination_keys=combination_keys,
         )
@@ -194,3 +200,166 @@ class AnnotationSplitter:
 
             # Use OR operator to update column_key
             df_unique[column_key] = df_unique[column_key] | mask
+
+    def _split_src_tgt_dist_df(self) -> pd.DataFrame:
+        """Split the src_tgt_dist_df into train, val, and test dataframes."""
+        df_split = self._split_df()
+
+        # Convert split column to categorical for faster operations
+        df_split[self.split_key] = pd.Categorical(
+            df_split[self.split_key],
+            categories=["train", "val", "test"],
+        )
+
+        # Get the full dataframe and merge on the unique key (src_dist_idx, tgt_dist_idx)
+        full_df = self.annotation.src_tgt_dist_df.copy()
+
+        # The unique combination is (src_dist_idx, tgt_dist_idx)
+        # We need to merge the split assignments back to the full dataframe
+        # df_split contains split_by columns + split_key, we need to merge on split_by
+        merge_cols = self.split_by + [self.split_key]
+        df_merged = full_df.merge(
+            df_split[merge_cols],
+            on=self.split_by,
+            how="left",
+        )
+
+        # Convert split column to categorical in merged df
+        df_merged[self.split_key] = pd.Categorical(
+            df_merged[self.split_key],
+            categories=["train", "val", "test"],
+        )
+        df_merged.sort_values(by=self.split_key, inplace=True)
+        return df_merged
+
+    def split_annotation(self) -> dict[str, GroupedDistributionAnnotation]:
+        """
+        Split the annotation into train, val, and test GroupedDistributionAnnotations.
+
+        Returns
+        -------
+        dict[str, GroupedDistributionAnnotation]
+            Dictionary with keys 'train', 'val', 'test', each containing a
+            GroupedDistributionAnnotation with filtered src_tgt_dist_df and
+            corresponding label dictionaries.
+        """
+        # Get the merged dataframe with split assignments
+        df_merged = self._split_src_tgt_dist_df()
+
+        result = {}
+        for split_name in ["train", "val", "test"]:
+            # Filter the dataframe for this split
+            split_df = df_merged[df_merged[self.split_key] == split_name].copy()
+
+            # Drop the split column from the resulting dataframe
+            split_df = split_df.drop(columns=[self.split_key])
+
+            # Get the unique src_dist_idx and tgt_dist_idx for this split
+            split_tgt_idxs = set(split_df["tgt_dist_idx"].unique())
+            split_src_idxs = set(split_df["src_dist_idx"].unique())
+
+            # Filter the label dictionaries to only include relevant indices
+            filtered_src_labels = {
+                src_idx: self.annotation.src_dist_idx_to_labels[src_idx]
+                for src_idx in split_src_idxs
+                if src_idx in self.annotation.src_dist_idx_to_labels
+            }
+            filtered_tgt_labels = {
+                tgt_idx: self.annotation.tgt_dist_idx_to_labels[tgt_idx]
+                for tgt_idx in split_tgt_idxs
+                if tgt_idx in self.annotation.tgt_dist_idx_to_labels
+            }
+
+            # Create a new GroupedDistributionAnnotation for this split
+            result[split_name] = GroupedDistributionAnnotation(
+                old_obs_index=self.annotation.old_obs_index,  # Shared across all splits
+                src_dist_idx_to_labels=filtered_src_labels,
+                tgt_dist_idx_to_labels=filtered_tgt_labels,
+                src_tgt_dist_df=split_df,
+                default_values=self.annotation.default_values,
+                tgt_dist_keys=self.annotation.tgt_dist_keys,
+                src_dist_keys=self.annotation.src_dist_keys,
+                dist_flag_key=self.annotation.dist_flag_key,
+            )
+
+        return result
+
+    def split(self) -> dict[str, "GroupedDistribution"]:
+        """
+        Split the GroupedDistribution into train, val, and test GroupedDistributions.
+
+        Returns
+        -------
+        dict[str, GroupedDistribution]
+            Dictionary with keys 'train', 'val', 'test', each containing a
+            GroupedDistribution with filtered data and annotation.
+        """
+        from scaleflow.data._data import GroupedDistribution, GroupedDistributionData
+
+        # Get split annotations first
+        split_annotations = self.split_annotation()
+
+        result = {}
+        for split_name, split_annotation in split_annotations.items():
+            # Get the unique indices for this split
+            split_tgt_idxs = set(split_annotation.src_tgt_dist_df["tgt_dist_idx"].unique())
+            split_src_idxs = set(split_annotation.src_tgt_dist_df["src_dist_idx"].unique())
+
+            # Filter tgt_data, conditions to only include relevant tgt_dist_idx
+            filtered_tgt_data = {
+                tgt_idx: self.gd.data.tgt_data[tgt_idx]
+                for tgt_idx in split_tgt_idxs
+                if tgt_idx in self.gd.data.tgt_data
+            }
+            filtered_conditions = {
+                tgt_idx: self.gd.data.conditions[tgt_idx]
+                for tgt_idx in split_tgt_idxs
+                if tgt_idx in self.gd.data.conditions
+            }
+
+            # Filter src_data to only include relevant src_dist_idx
+            filtered_src_data = {
+                src_idx: self.gd.data.src_data[src_idx]
+                for src_idx in split_src_idxs
+                if src_idx in self.gd.data.src_data
+            }
+
+            # Build filtered src_to_tgt_dist_map
+            # Only include mappings where both src and tgt are in this split
+            filtered_src_to_tgt_map = {}
+            for src_idx in split_src_idxs:
+                if src_idx in self.gd.data.src_to_tgt_dist_map:
+                    # Filter to only targets that are in this split
+                    filtered_tgts = [
+                        tgt_idx for tgt_idx in self.gd.data.src_to_tgt_dist_map[src_idx] if tgt_idx in split_tgt_idxs
+                    ]
+                    if filtered_tgts:
+                        filtered_src_to_tgt_map[src_idx] = filtered_tgts
+
+            # Create the filtered GroupedDistributionData
+            filtered_data = GroupedDistributionData(
+                src_to_tgt_dist_map=filtered_src_to_tgt_map,
+                src_data=filtered_src_data,
+                tgt_data=filtered_tgt_data,
+                conditions=filtered_conditions,
+            )
+
+            # Create the GroupedDistribution for this split
+            result[split_name] = GroupedDistribution(
+                data=filtered_data,
+                annotation=split_annotation,
+            )
+
+        return result
+
+    def __repr__(self) -> str:
+        """Show the split dataframe."""
+        res = ""
+        if self._computed_split_df is None:
+            self._computed_split_df = self._split_src_tgt_dist_df()
+        tmp_dict = dict(tuple(self._computed_split_df.groupby(self.split_key, observed=False)))
+        for split_name, df in tmp_dict.items():
+            res += f"Split {split_name}:\n"
+            res += df.drop(columns=[self.split_key]).to_string(index=False)
+            res += "\n"
+        return res

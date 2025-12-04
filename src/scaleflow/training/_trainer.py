@@ -167,7 +167,9 @@ class CellFlowTrainer:
                     mean_loss_gex = np.mean([l for l in self.training_logs["loss_gex"][-valid_freq:] if l is not None])
                     additional_metrics["train_loss_gex"] = mean_loss_gex
                 if self.training_logs["loss_functional"]:
-                    mean_loss_func = np.mean([l for l in self.training_logs["loss_functional"][-valid_freq:] if l is not None])
+                    mean_loss_func = np.mean(
+                        [l for l in self.training_logs["loss_functional"][-valid_freq:] if l is not None]
+                    )
                     additional_metrics["train_loss_functional"] = mean_loss_func
 
                 # Run callbacks with loss as additional metric

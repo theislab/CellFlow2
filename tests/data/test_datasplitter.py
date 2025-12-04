@@ -1,20 +1,19 @@
-"""Test suite for AnnotationSplitter with high coverage."""
+"""Test suite for GroupedDistributionSplitter with high coverage."""
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from scaleflow.data import GroupedDistribution
-from scaleflow.data._data_splitter import AnnotationSplitter
+from scaleflow.data._data_splitter import GroupedDistributionSplitter
 
 
-class TestAnnotationSplitterInit:
-    """Test AnnotationSplitter initialization."""
+class TestGroupedDistributionSplitterInit:
+    """Test GroupedDistributionSplitter initialization."""
 
     def test_init_valid_params(self, sample_grouped_distribution):
-        """Test that AnnotationSplitter initializes with valid parameters."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        """Test that GroupedDistributionSplitter initializes with valid parameters."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -32,8 +31,8 @@ class TestAnnotationSplitterInit:
 
     def test_init_custom_split_key(self, sample_grouped_distribution):
         """Test initialization with custom split_key."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="my_custom_split",
@@ -47,8 +46,8 @@ class TestAnnotationSplitterInit:
     def test_init_invalid_split_by_empty(self, sample_grouped_distribution):
         """Test that empty split_by raises ValueError."""
         with pytest.raises(ValueError, match="split_by must be a non-empty list"):
-            AnnotationSplitter(
-                annotation=sample_grouped_distribution.annotation,
+            GroupedDistributionSplitter(
+                gd=sample_grouped_distribution,
                 holdout_combinations=False,
                 split_by=[],
                 split_key="split",
@@ -60,8 +59,8 @@ class TestAnnotationSplitterInit:
     def test_init_invalid_ratios_length(self, sample_grouped_distribution):
         """Test that ratios with wrong length raises ValueError."""
         with pytest.raises(ValueError, match="ratios must be a list of 3 values"):
-            AnnotationSplitter(
-                annotation=sample_grouped_distribution.annotation,
+            GroupedDistributionSplitter(
+                gd=sample_grouped_distribution,
                 holdout_combinations=False,
                 split_by=["drug"],
                 split_key="split",
@@ -73,8 +72,8 @@ class TestAnnotationSplitterInit:
     def test_init_invalid_ratios_sum(self, sample_grouped_distribution):
         """Test that ratios not summing to 1.0 raises ValueError."""
         with pytest.raises(ValueError, match="ratios must sum to 1.0"):
-            AnnotationSplitter(
-                annotation=sample_grouped_distribution.annotation,
+            GroupedDistributionSplitter(
+                gd=sample_grouped_distribution,
                 holdout_combinations=False,
                 split_by=["drug"],
                 split_key="split",
@@ -86,8 +85,8 @@ class TestAnnotationSplitterInit:
     def test_init_invalid_ratios_with_zero(self, sample_grouped_distribution):
         """Test that ratios with 0 raises ValueError."""
         with pytest.raises(ValueError, match="ratios must be between 0.0 and 1.0"):
-            AnnotationSplitter(
-                annotation=sample_grouped_distribution.annotation,
+            GroupedDistributionSplitter(
+                gd=sample_grouped_distribution,
                 holdout_combinations=False,
                 split_by=["drug"],
                 split_key="split",
@@ -99,8 +98,8 @@ class TestAnnotationSplitterInit:
     def test_init_invalid_ratios_with_one(self, sample_grouped_distribution):
         """Test that ratios with 1.0 raises ValueError."""
         with pytest.raises(ValueError, match="ratios must be between 0.0 and 1.0"):
-            AnnotationSplitter(
-                annotation=sample_grouped_distribution.annotation,
+            GroupedDistributionSplitter(
+                gd=sample_grouped_distribution,
                 holdout_combinations=False,
                 split_by=["drug"],
                 split_key="split",
@@ -112,8 +111,8 @@ class TestAnnotationSplitterInit:
     def test_init_invalid_force_training_values(self, sample_grouped_distribution):
         """Test that force_training_values with keys not in split_by raises ValueError."""
         with pytest.raises(ValueError, match="force_training_values keys must be a subset of split_by"):
-            AnnotationSplitter(
-                annotation=sample_grouped_distribution.annotation,
+            GroupedDistributionSplitter(
+                gd=sample_grouped_distribution,
                 holdout_combinations=False,
                 split_by=["drug"],
                 split_key="split",
@@ -123,13 +122,13 @@ class TestAnnotationSplitterInit:
             )
 
 
-class TestAnnotationSplitterSplit:
-    """Test the split method of AnnotationSplitter."""
+class TestGroupedDistributionSplitterSplitDf:
+    """Test the _split_df method of GroupedDistributionSplitter."""
 
     def test_split_basic(self, sample_grouped_distribution):
         """Test basic splitting functionality."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -152,8 +151,8 @@ class TestAnnotationSplitterSplit:
 
     def test_split_with_custom_split_key(self, sample_grouped_distribution):
         """Test splitting with a custom split_key name."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="my_split",
@@ -174,8 +173,8 @@ class TestAnnotationSplitterSplit:
 
     def test_split_single_key(self, sample_grouped_distribution):
         """Test splitting by a single key."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="split",
@@ -193,8 +192,8 @@ class TestAnnotationSplitterSplit:
 
     def test_split_ratios_approximately_correct(self, sample_grouped_distribution):
         """Test that split ratios are approximately correct."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -223,8 +222,8 @@ class TestAnnotationSplitterSplit:
 
     def test_split_deterministic_with_random_state(self, sample_grouped_distribution):
         """Test that splitting is deterministic given a random_state."""
-        splitter1 = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter1 = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -233,8 +232,8 @@ class TestAnnotationSplitterSplit:
             random_state=42,
         )
 
-        splitter2 = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter2 = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -251,8 +250,8 @@ class TestAnnotationSplitterSplit:
 
     def test_split_different_with_different_random_state(self, sample_grouped_distribution):
         """Test that different random states produce different splits."""
-        splitter1 = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter1 = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -261,8 +260,8 @@ class TestAnnotationSplitterSplit:
             random_state=42,
         )
 
-        splitter2 = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter2 = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -275,12 +274,12 @@ class TestAnnotationSplitterSplit:
         df_split2 = splitter2._split_df()
 
         # Results should be different
-        assert not df_split1[["split","drug","gene"]].equals(df_split2[["split","drug","gene"]])
+        assert not df_split1[["split", "drug", "gene"]].equals(df_split2[["split", "drug", "gene"]])
 
     def test_split_no_duplicate_combinations_in_multiple_splits(self, sample_grouped_distribution):
         """Test that no combination appears in multiple splits."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -292,20 +291,20 @@ class TestAnnotationSplitterSplit:
         df_split = splitter._split_df()
 
         # Group by split_by keys and check each group has only one split value
-        for (drug, gene), group in df_split.groupby(["drug", "gene"]):
+        for (drug, gene), group in df_split.groupby(["drug", "gene"], observed=False):
             unique_splits = group["split"].unique()
             assert len(unique_splits) == 1, (
                 f"Combination (drug={drug}, gene={gene}) appears in multiple splits: {unique_splits}"
             )
 
 
-class TestAnnotationSplitterForceTraining:
+class TestGroupedDistributionSplitterForceTraining:
     """Test force_training_values functionality."""
 
     def test_force_training_single_value(self, sample_grouped_distribution):
         """Test that forced training values end up in training set."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="split",
@@ -323,8 +322,8 @@ class TestAnnotationSplitterForceTraining:
 
     def test_force_training_multiple_keys_or_logic(self, sample_grouped_distribution):
         """Test forcing multiple keys uses OR logic."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -343,8 +342,8 @@ class TestAnnotationSplitterForceTraining:
     def test_force_training_reduces_available_combinations(self, sample_grouped_distribution):
         """Test that forcing values to training reduces available combinations for test/val."""
         # Without forcing
-        splitter_no_force = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter_no_force = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="split",
@@ -356,8 +355,8 @@ class TestAnnotationSplitterForceTraining:
         df_no_force = splitter_no_force._split_df()
 
         # With forcing
-        splitter_with_force = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter_with_force = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="split",
@@ -376,13 +375,13 @@ class TestAnnotationSplitterForceTraining:
         assert "drug_0" in train_with_force
 
 
-class TestAnnotationSplitterHoldout:
+class TestGroupedDistributionSplitterHoldout:
     """Test holdout_combinations functionality."""
 
     def test_holdout_combinations_control_in_train(self, sample_grouped_distribution):
         """Test that when holdout_combinations=True, default values are in training."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=True,
             split_by=["drug", "gene"],
             split_key="split",
@@ -408,8 +407,8 @@ class TestAnnotationSplitterHoldout:
 
     def test_holdout_false_allows_controls_in_all_splits(self, sample_grouped_distribution):
         """Test that when holdout_combinations=False, controls can be in any split."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug", "gene"],
             split_key="split",
@@ -436,7 +435,7 @@ class TestContainsValue:
             }
         )
 
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug", "gene"],
             values={"drug": "drug_a"},
@@ -456,7 +455,7 @@ class TestContainsValue:
             }
         )
 
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug", "gene"],
             values={"drug": "drug_a", "gene": "gene_x"},
@@ -476,7 +475,7 @@ class TestContainsValue:
             }
         )
 
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug", "gene"],
             values={"drug": "drug_a"},
@@ -496,7 +495,7 @@ class TestContainsValue:
             }
         )
 
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug", "gene"],
             values={"drug": "drug_a"},
@@ -518,7 +517,7 @@ class TestContainsValue:
         )
 
         # First call
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug", "gene"],
             values={"drug": "drug_a"},
@@ -529,7 +528,7 @@ class TestContainsValue:
         assert df["is_target"].tolist() == [True, False, False]
 
         # Second call with different value - should OR with previous
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug", "gene"],
             values={"drug": "drug_b"},
@@ -550,7 +549,7 @@ class TestContainsValue:
 
         assert "is_target" not in df.columns
 
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug"],
             values={"drug": "drug_a"},
@@ -570,7 +569,7 @@ class TestContainsValue:
             }
         )
 
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug"],  # Only drug, not gene
             values={"drug": "drug_a", "gene": "gene_x"},  # gene_x should be ignored
@@ -589,7 +588,7 @@ class TestContainsValue:
             }
         )
 
-        AnnotationSplitter._contains_value(
+        GroupedDistributionSplitter._contains_value(
             df_unique=df,
             combination_keys=["drug"],
             values={},  # Empty
@@ -609,7 +608,7 @@ class TestContainsValue:
         )
 
         with pytest.raises(ValueError, match="combination_keys must be in df.columns"):
-            AnnotationSplitter._contains_value(
+            GroupedDistributionSplitter._contains_value(
                 df_unique=df,
                 combination_keys=["nonexistent_column"],
                 values={"drug": "drug_a"},
@@ -630,7 +629,7 @@ class TestSplitTwo:
             }
         )
 
-        result = AnnotationSplitter._split_two(
+        result = GroupedDistributionSplitter._split_two(
             df_unique=df.copy(),
             train_size=3,
             split_key="split",
@@ -656,7 +655,7 @@ class TestSplitTwo:
             }
         )
 
-        result = AnnotationSplitter._split_two(
+        result = GroupedDistributionSplitter._split_two(
             df_unique=df.copy(),
             train_size=10,
             split_key="split",
@@ -678,14 +677,14 @@ class TestSplitTwo:
             }
         )
 
-        result1 = AnnotationSplitter._split_two(
+        result1 = GroupedDistributionSplitter._split_two(
             df_unique=df.copy(),
             train_size=6,
             split_key="split",
             random_state=42,
         )
 
-        result2 = AnnotationSplitter._split_two(
+        result2 = GroupedDistributionSplitter._split_two(
             df_unique=df.copy(),
             train_size=6,
             split_key="split",
@@ -702,7 +701,7 @@ class TestSplitTwo:
             }
         )
 
-        result = AnnotationSplitter._split_two(
+        result = GroupedDistributionSplitter._split_two(
             df_unique=df.copy(),
             train_size=2,
             split_key="my_split",
@@ -722,7 +721,7 @@ class TestSplitTwo:
         )
 
         with pytest.raises(ValueError, match="already in df.columns"):
-            AnnotationSplitter._split_two(
+            GroupedDistributionSplitter._split_two(
                 df_unique=df,
                 train_size=1,
                 split_key="split",
@@ -739,7 +738,7 @@ class TestSplitTwo:
             }
         )
 
-        result = AnnotationSplitter._split_two(
+        result = GroupedDistributionSplitter._split_two(
             df_unique=df,
             train_size=2,
             split_key="split",
@@ -762,7 +761,7 @@ class TestSplitTwo:
 
         # Now that the bug is fixed, this should work correctly
         # It should filter to only rows where forced_in_train is True
-        result = AnnotationSplitter._split_two(
+        result = GroupedDistributionSplitter._split_two(
             df_unique=df.copy(),
             train_size=1,  # Only 1 train from the 2 available (drug_a, drug_b)
             split_key="split",
@@ -787,7 +786,7 @@ class TestSplitTwo:
         )
 
         with pytest.raises(ValueError, match="must be in df.columns"):
-            AnnotationSplitter._split_two(
+            GroupedDistributionSplitter._split_two(
                 df_unique=df,
                 train_size=1,
                 split_key="split",
@@ -801,8 +800,8 @@ class TestCalculateSplitSizes:
 
     def test_calculate_split_sizes_normal(self, sample_grouped_distribution):
         """Test split size calculation with normal inputs."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="split",
@@ -823,8 +822,8 @@ class TestCalculateSplitSizes:
 
     def test_calculate_split_sizes_with_rounding(self, sample_grouped_distribution):
         """Test split size calculation handles rounding correctly."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="split",
@@ -845,8 +844,8 @@ class TestCalculateSplitSizes:
 
     def test_calculate_split_sizes_too_small_raises_error(self, sample_grouped_distribution):
         """Test that too few combinations raises ValueError."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="split",
@@ -861,8 +860,8 @@ class TestCalculateSplitSizes:
 
     def test_calculate_split_sizes_large_numbers(self, sample_grouped_distribution):
         """Test split size calculation with large numbers."""
-        splitter = AnnotationSplitter(
-            annotation=sample_grouped_distribution.annotation,
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
             holdout_combinations=False,
             split_by=["drug"],
             split_key="split",
@@ -890,7 +889,7 @@ class TestCheckDfUniqueColumns:
         )
 
         # Should not raise
-        AnnotationSplitter._check_df_unique_columns(df, ["drug", "gene"])
+        GroupedDistributionSplitter._check_df_unique_columns(df, ["drug", "gene"])
 
     def test_check_df_unique_columns_invalid(self):
         """Test _check_df_unique_columns raises error for missing columns."""
@@ -901,7 +900,7 @@ class TestCheckDfUniqueColumns:
         )
 
         with pytest.raises(ValueError, match="combination_keys must be in df.columns"):
-            AnnotationSplitter._check_df_unique_columns(df, ["drug", "nonexistent"])
+            GroupedDistributionSplitter._check_df_unique_columns(df, ["drug", "nonexistent"])
 
     def test_check_df_unique_columns_empty_list(self):
         """Test _check_df_unique_columns with empty combination_keys."""
@@ -912,8 +911,7 @@ class TestCheckDfUniqueColumns:
         )
 
         # Should not raise with empty list
-        AnnotationSplitter._check_df_unique_columns(df, [])
-
+        GroupedDistributionSplitter._check_df_unique_columns(df, [])
 
     def test_split_two_with_not_in_training_key(self):
         """Test _split_two respects not_in_training_key."""
@@ -925,7 +923,7 @@ class TestCheckDfUniqueColumns:
         )
 
         # Should exclude rows where exclude_from_split is True
-        result = AnnotationSplitter._split_two(
+        result = GroupedDistributionSplitter._split_two(
             df_unique=df.copy(),
             train_size=2,
             split_key="split",
@@ -944,3 +942,635 @@ class TestCheckDfUniqueColumns:
         # Drugs c and d should not be in the result
         assert "drug_c" not in result["drug"].values
         assert "drug_d" not in result["drug"].values
+
+
+class TestGroupedDistributionSplitterSplitMethod:
+    """Test the split method that returns split GroupedDistributionAnnotations."""
+
+    def test_split_returns_dict_with_three_keys(self, sample_grouped_distribution):
+        """Test that split returns a dict with train, val, test keys."""
+        from scaleflow.data._data import GroupedDistributionAnnotation
+
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+
+        assert isinstance(result, dict)
+        assert set(result.keys()) == {"train", "val", "test"}
+        for split_name, annotation in result.items():
+            assert isinstance(annotation, GroupedDistributionAnnotation), (
+                f"Split {split_name} should be a GroupedDistributionAnnotation"
+            )
+
+    def test_split_tgt_dist_indices_are_disjoint(self, sample_grouped_distribution):
+        """Test that target distribution indices across splits are disjoint."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+
+        train_tgt_idxs = set(result["train"].src_tgt_dist_df["tgt_dist_idx"].unique())
+        val_tgt_idxs = set(result["val"].src_tgt_dist_df["tgt_dist_idx"].unique())
+        test_tgt_idxs = set(result["test"].src_tgt_dist_df["tgt_dist_idx"].unique())
+
+        # No overlap between any pair
+        assert train_tgt_idxs.isdisjoint(val_tgt_idxs), "Train and val should have disjoint tgt_dist_idx"
+        assert train_tgt_idxs.isdisjoint(test_tgt_idxs), "Train and test should have disjoint tgt_dist_idx"
+        assert val_tgt_idxs.isdisjoint(test_tgt_idxs), "Val and test should have disjoint tgt_dist_idx"
+
+    def test_split_union_covers_all_original_tgt_dist_indices(self, sample_grouped_distribution):
+        """Test that the union of all splits covers all original target distribution indices."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+
+        # Get original tgt_dist_idx set
+        original_tgt_idxs = set(sample_grouped_distribution.annotation.src_tgt_dist_df["tgt_dist_idx"].unique())
+
+        # Get union of all splits
+        train_tgt_idxs = set(result["train"].src_tgt_dist_df["tgt_dist_idx"].unique())
+        val_tgt_idxs = set(result["val"].src_tgt_dist_df["tgt_dist_idx"].unique())
+        test_tgt_idxs = set(result["test"].src_tgt_dist_df["tgt_dist_idx"].unique())
+
+        union_tgt_idxs = train_tgt_idxs | val_tgt_idxs | test_tgt_idxs
+
+        assert union_tgt_idxs == original_tgt_idxs, "Union of splits should cover all original tgt_dist_idx"
+
+    def test_split_preserves_src_dist_idx_to_labels(self, sample_grouped_distribution):
+        """Test that each split contains correct src_dist_idx_to_labels."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+        original_annotation = sample_grouped_distribution.annotation
+
+        for split_name, split_annotation in result.items():
+            # Get the src_dist_idx that appear in this split
+            split_src_idxs = set(split_annotation.src_tgt_dist_df["src_dist_idx"].unique())
+
+            # Verify labels are preserved for those src_dist_idx
+            for src_idx in split_src_idxs:
+                assert src_idx in split_annotation.src_dist_idx_to_labels, (
+                    f"src_dist_idx {src_idx} should be in {split_name} labels"
+                )
+                assert (
+                    split_annotation.src_dist_idx_to_labels[src_idx]
+                    == original_annotation.src_dist_idx_to_labels[src_idx]
+                ), f"Label for src_dist_idx {src_idx} should match original in {split_name}"
+
+    def test_split_preserves_tgt_dist_idx_to_labels(self, sample_grouped_distribution):
+        """Test that each split contains correct tgt_dist_idx_to_labels."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+        original_annotation = sample_grouped_distribution.annotation
+
+        for split_name, split_annotation in result.items():
+            # Get the tgt_dist_idx that appear in this split
+            split_tgt_idxs = set(split_annotation.src_tgt_dist_df["tgt_dist_idx"].unique())
+
+            # Verify labels are preserved for those tgt_dist_idx
+            for tgt_idx in split_tgt_idxs:
+                assert tgt_idx in split_annotation.tgt_dist_idx_to_labels, (
+                    f"tgt_dist_idx {tgt_idx} should be in {split_name} labels"
+                )
+                assert (
+                    split_annotation.tgt_dist_idx_to_labels[tgt_idx]
+                    == original_annotation.tgt_dist_idx_to_labels[tgt_idx]
+                ), f"Label for tgt_dist_idx {tgt_idx} should match original in {split_name}"
+
+    def test_split_preserves_metadata(self, sample_grouped_distribution):
+        """Test that split preserves default_values, dist_flag_key, src_dist_keys, tgt_dist_keys."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+        original_annotation = sample_grouped_distribution.annotation
+
+        for split_name, split_annotation in result.items():
+            assert split_annotation.default_values == original_annotation.default_values, (
+                f"default_values should match in {split_name}"
+            )
+            assert split_annotation.dist_flag_key == original_annotation.dist_flag_key, (
+                f"dist_flag_key should match in {split_name}"
+            )
+            assert split_annotation.src_dist_keys == original_annotation.src_dist_keys, (
+                f"src_dist_keys should match in {split_name}"
+            )
+            assert split_annotation.tgt_dist_keys == original_annotation.tgt_dist_keys, (
+                f"tgt_dist_keys should match in {split_name}"
+            )
+
+    def test_split_old_obs_index_is_shared(self, sample_grouped_distribution):
+        """Test that old_obs_index is shared across all splits (same reference or equal)."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+        original_annotation = sample_grouped_distribution.annotation
+
+        for split_name, split_annotation in result.items():
+            # old_obs_index should be the same as original (enables reconstruction)
+            assert np.array_equal(split_annotation.old_obs_index, original_annotation.old_obs_index), (
+                f"old_obs_index should match original in {split_name}"
+            )
+
+    def test_split_deterministic_with_random_state(self, sample_grouped_distribution):
+        """Test that split is deterministic given a random_state."""
+        splitter1 = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        splitter2 = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result1 = splitter1.split_annotation()
+        result2 = splitter2.split_annotation()
+
+        for split_name in ["train", "val", "test"]:
+            # Compare src_tgt_dist_df
+            pd.testing.assert_frame_equal(
+                result1[split_name].src_tgt_dist_df.reset_index(drop=True),
+                result2[split_name].src_tgt_dist_df.reset_index(drop=True),
+            )
+
+
+class TestSplitReconstruction:
+    """Test that we can reconstruct original obs indices from splits."""
+
+    def test_can_trace_split_tgt_dist_to_original_obs(self, sample_grouped_distribution, adata_test):
+        """Test that we can trace from split tgt_dist_idx back to original adata obs."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+        original_annotation = sample_grouped_distribution.annotation
+
+        # For each split, verify we can trace back to original adata
+        for split_name, split_annotation in result.items():
+            for tgt_idx in split_annotation.src_tgt_dist_df["tgt_dist_idx"].unique():
+                # Get the label for this tgt_dist_idx
+                tgt_label = split_annotation.tgt_dist_idx_to_labels[tgt_idx]
+
+                # The label should be a tuple of (drug, gene) values
+                assert len(tgt_label) == len(original_annotation.tgt_dist_keys), (
+                    f"Label {tgt_label} should have same length as tgt_dist_keys"
+                )
+
+                # Verify the label exists in original adata
+                drug_val, gene_val = tgt_label
+                matching = adata_test.obs[(adata_test.obs["drug"] == drug_val) & (adata_test.obs["gene"] == gene_val)]
+                assert len(matching) > 0, f"Could not find cells with drug={drug_val}, gene={gene_val} in {split_name}"
+
+    def test_split_src_tgt_df_rows_map_to_original(self, sample_grouped_distribution):
+        """Test that all rows in split src_tgt_dist_df exist in original."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+        original_df = sample_grouped_distribution.annotation.src_tgt_dist_df
+
+        for split_name, split_annotation in result.items():
+            split_df = split_annotation.src_tgt_dist_df
+
+            # Each row in split should exist in original
+            for _, row in split_df.iterrows():
+                src_idx = row["src_dist_idx"]
+                tgt_idx = row["tgt_dist_idx"]
+
+                # Find matching row in original
+                match = original_df[(original_df["src_dist_idx"] == src_idx) & (original_df["tgt_dist_idx"] == tgt_idx)]
+                assert len(match) == 1, f"Could not find unique match for src={src_idx}, tgt={tgt_idx} in {split_name}"
+
+    def test_reconstruct_all_src_tgt_pairs_from_splits(self, sample_grouped_distribution):
+        """Test that we can reconstruct all original (src, tgt) pairs from the splits."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+        original_df = sample_grouped_distribution.annotation.src_tgt_dist_df
+
+        # Collect all (src_dist_idx, tgt_dist_idx) pairs from splits
+        all_pairs = set()
+        for split_annotation in result.values():
+            split_df = split_annotation.src_tgt_dist_df
+            for _, row in split_df.iterrows():
+                all_pairs.add((row["src_dist_idx"], row["tgt_dist_idx"]))
+
+        # Collect original pairs
+        original_pairs = set()
+        for _, row in original_df.iterrows():
+            original_pairs.add((row["src_dist_idx"], row["tgt_dist_idx"]))
+
+        assert all_pairs == original_pairs, "All (src, tgt) pairs should be reconstructible from splits"
+
+    def test_no_duplicate_tgt_dist_across_splits(self, sample_grouped_distribution):
+        """Verify that no tgt_dist_idx appears in more than one split."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split_annotation()
+
+        seen_tgt_idxs = {}
+        for split_name, split_annotation in result.items():
+            for tgt_idx in split_annotation.src_tgt_dist_df["tgt_dist_idx"].unique():
+                if tgt_idx in seen_tgt_idxs:
+                    pytest.fail(f"tgt_dist_idx {tgt_idx} appears in both {seen_tgt_idxs[tgt_idx]} and {split_name}")
+                seen_tgt_idxs[tgt_idx] = split_name
+
+
+class TestGroupedDistributionSplitterSplitData:
+    """Test the split method that returns split GroupedDistributions."""
+
+    def test_split_returns_dict_of_grouped_distributions(self, sample_grouped_distribution):
+        """Test that split returns a dict with GroupedDistribution objects."""
+        from scaleflow.data._data import GroupedDistribution
+
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+
+        assert isinstance(result, dict)
+        assert set(result.keys()) == {"train", "val", "test"}
+        for split_name, gd in result.items():
+            assert isinstance(gd, GroupedDistribution), f"Split {split_name} should be a GroupedDistribution"
+
+    def test_split_tgt_data_is_disjoint(self, sample_grouped_distribution):
+        """Test that target data across splits are disjoint."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+
+        train_tgt_idxs = set(result["train"].data.tgt_data.keys())
+        val_tgt_idxs = set(result["val"].data.tgt_data.keys())
+        test_tgt_idxs = set(result["test"].data.tgt_data.keys())
+
+        # No overlap between any pair
+        assert train_tgt_idxs.isdisjoint(val_tgt_idxs)
+        assert train_tgt_idxs.isdisjoint(test_tgt_idxs)
+        assert val_tgt_idxs.isdisjoint(test_tgt_idxs)
+
+    def test_split_union_covers_all_tgt_data(self, sample_grouped_distribution):
+        """Test that the union of all splits covers all original tgt_data."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+
+        original_tgt_idxs = set(sample_grouped_distribution.data.tgt_data.keys())
+
+        union_tgt_idxs = (
+            set(result["train"].data.tgt_data.keys())
+            | set(result["val"].data.tgt_data.keys())
+            | set(result["test"].data.tgt_data.keys())
+        )
+
+        assert union_tgt_idxs == original_tgt_idxs
+
+    def test_split_tgt_data_values_match_original(self, sample_grouped_distribution):
+        """Test that tgt_data values in splits match the original."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+
+        for split_name, split_gd in result.items():
+            for tgt_idx, tgt_data in split_gd.data.tgt_data.items():
+                original_data = sample_grouped_distribution.data.tgt_data[tgt_idx]
+                assert np.array_equal(tgt_data, original_data), (
+                    f"tgt_data[{tgt_idx}] in {split_name} should match original"
+                )
+
+    def test_split_conditions_match_original(self, sample_grouped_distribution):
+        """Test that conditions in splits match the original."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+
+        for split_name, split_gd in result.items():
+            for tgt_idx, condition in split_gd.data.conditions.items():
+                original_condition = sample_grouped_distribution.data.conditions[tgt_idx]
+                assert np.array_equal(condition, original_condition), (
+                    f"conditions[{tgt_idx}] in {split_name} should match original"
+                )
+
+    def test_split_src_to_tgt_map_consistent(self, sample_grouped_distribution):
+        """Test that src_to_tgt_dist_map is consistent with split data."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+
+        for split_name, split_gd in result.items():
+            # All sources in the map should exist in src_data
+            for src_idx in split_gd.data.src_to_tgt_dist_map.keys():
+                assert src_idx in split_gd.data.src_data, (
+                    f"src_idx {src_idx} in map but not in src_data for {split_name}"
+                )
+
+            # All targets in the map should exist in tgt_data
+            for src_idx, tgt_idxs in split_gd.data.src_to_tgt_dist_map.items():
+                for tgt_idx in tgt_idxs:
+                    assert tgt_idx in split_gd.data.tgt_data, (
+                        f"tgt_idx {tgt_idx} in map but not in tgt_data for {split_name}"
+                    )
+
+
+class TestRoundTripAdataToSplitAndBack:
+    """Test round-trip: adata → GroupedDistribution → split → verify data integrity."""
+
+    def test_roundtrip_tgt_data_can_be_reconstructed(self, sample_grouped_distribution, adata_test):
+        """Test that all tgt_data can be traced back to original adata."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+        original_gd = sample_grouped_distribution
+
+        # Reconstruct all tgt_data from splits
+        reconstructed_tgt_data = {}
+        for split_gd in result.values():
+            reconstructed_tgt_data.update(split_gd.data.tgt_data)
+
+        # Verify all original tgt_data is in reconstructed
+        for tgt_idx, original_data in original_gd.data.tgt_data.items():
+            assert tgt_idx in reconstructed_tgt_data, f"tgt_idx {tgt_idx} missing from reconstructed data"
+            assert np.array_equal(reconstructed_tgt_data[tgt_idx], original_data), (
+                f"tgt_data[{tgt_idx}] doesn't match original"
+            )
+
+    def test_roundtrip_conditions_can_be_reconstructed(self, sample_grouped_distribution):
+        """Test that all conditions can be reconstructed from splits."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+        original_gd = sample_grouped_distribution
+
+        # Reconstruct all conditions from splits
+        reconstructed_conditions = {}
+        for split_gd in result.values():
+            reconstructed_conditions.update(split_gd.data.conditions)
+
+        # Verify all original conditions are in reconstructed
+        for tgt_idx, original_cond in original_gd.data.conditions.items():
+            assert tgt_idx in reconstructed_conditions, f"tgt_idx {tgt_idx} missing from reconstructed conditions"
+            assert np.array_equal(reconstructed_conditions[tgt_idx], original_cond), (
+                f"conditions[{tgt_idx}] doesn't match original"
+            )
+
+    def test_roundtrip_src_tgt_pairs_preserved(self, sample_grouped_distribution):
+        """Test that all (src, tgt) pairs can be reconstructed from splits."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+        original_gd = sample_grouped_distribution
+
+        # Collect original (src, tgt) pairs
+        original_pairs = set()
+        for src_idx, tgt_idxs in original_gd.data.src_to_tgt_dist_map.items():
+            for tgt_idx in tgt_idxs:
+                original_pairs.add((src_idx, tgt_idx))
+
+        # Collect reconstructed (src, tgt) pairs from splits
+        reconstructed_pairs = set()
+        for split_gd in result.values():
+            for src_idx, tgt_idxs in split_gd.data.src_to_tgt_dist_map.items():
+                for tgt_idx in tgt_idxs:
+                    reconstructed_pairs.add((src_idx, tgt_idx))
+
+        assert reconstructed_pairs == original_pairs, "All (src, tgt) pairs should be reconstructible from splits"
+
+    def test_roundtrip_labels_trace_to_adata(self, sample_grouped_distribution, adata_test):
+        """Test that labels from split can trace back to adata obs values."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+
+        for split_name, split_gd in result.items():
+            # For each target distribution, verify labels exist in adata
+            for tgt_idx, tgt_label in split_gd.annotation.tgt_dist_idx_to_labels.items():
+                drug_val, gene_val = tgt_label
+                # Find matching rows in adata
+                matching = adata_test.obs[(adata_test.obs["drug"] == drug_val) & (adata_test.obs["gene"] == gene_val)]
+                assert len(matching) > 0, f"No cells found for drug={drug_val}, gene={gene_val} in {split_name}"
+
+    def test_roundtrip_data_dimensions_preserved(self, sample_grouped_distribution):
+        """Test that data dimensions are preserved through split."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+        original_gd = sample_grouped_distribution
+
+        # Check that feature dimensions are preserved
+        for split_gd in result.values():
+            for tgt_idx, tgt_data in split_gd.data.tgt_data.items():
+                original_data = original_gd.data.tgt_data[tgt_idx]
+                assert tgt_data.shape == original_data.shape, f"Shape mismatch for tgt_idx {tgt_idx}"
+
+            for src_idx, src_data in split_gd.data.src_data.items():
+                original_data = original_gd.data.src_data[src_idx]
+                assert src_data.shape == original_data.shape, f"Shape mismatch for src_idx {src_idx}"
+
+    def test_total_cells_preserved_in_tgt_data(self, sample_grouped_distribution):
+        """Test that total number of cells in tgt_data is preserved."""
+        splitter = GroupedDistributionSplitter(
+            gd=sample_grouped_distribution,
+            holdout_combinations=False,
+            split_by=["drug", "gene"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.6, 0.2, 0.2],
+            random_state=42,
+        )
+
+        result = splitter.split()
+        original_gd = sample_grouped_distribution
+
+        # Count total cells in original tgt_data
+        original_total_cells = sum(data.shape[0] for data in original_gd.data.tgt_data.values())
+
+        # Count total cells in split tgt_data
+        split_total_cells = sum(
+            data.shape[0] for split_gd in result.values() for data in split_gd.data.tgt_data.values()
+        )
+
+        assert split_total_cells == original_total_cells, (
+            f"Total cells mismatch: {split_total_cells} vs {original_total_cells}"
+        )

@@ -167,6 +167,7 @@ class ConditionalVelocityField(nn.Module):
 
         if self.cell_transformer_layers > 0:
             from scaleflow.networks._utils import SelfAttentionBlock
+
             self.cell_transformer = SelfAttentionBlock(
                 num_heads=[self.cell_transformer_heads] * self.cell_transformer_layers,
                 qkv_dim=[self.cell_transformer_dim] * self.cell_transformer_layers,
@@ -198,6 +199,7 @@ class ConditionalVelocityField(nn.Module):
             )
         elif self.conditioning == "adaln_zero":
             from scaleflow.networks._utils import AdaLNZeroBlock
+
             cond_dim = self.time_encoder_dims[-1] + self.condition_embedding_dim
 
             # Use standard Transformer MLP expansion (4x by default)
@@ -735,6 +737,7 @@ class EquilibriumVelocityField(nn.Module):
 
         if self.cell_transformer_layers > 0:
             from scaleflow.networks._utils import SelfAttentionBlock
+
             self.cell_transformer = SelfAttentionBlock(
                 num_heads=[self.cell_transformer_heads] * self.cell_transformer_layers,
                 qkv_dim=[self.cell_transformer_dim] * self.cell_transformer_layers,
@@ -766,6 +769,7 @@ class EquilibriumVelocityField(nn.Module):
             )
         elif self.conditioning == "adaln_zero":
             from scaleflow.networks._utils import AdaLNZeroBlock
+
             cond_dim = self.condition_embedding_dim
 
             # Use standard Transformer MLP expansion (4x by default)
