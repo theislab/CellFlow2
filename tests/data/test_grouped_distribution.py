@@ -477,3 +477,332 @@ class TestConditionsWriteRead:
             indptr = cond_group.attrs[f"indptr_{col_name}"]
             assert indptr[0] == 0, "indptr should start with 0"
             assert indptr[-1] == expected_total, "indptr should end with total length"
+
+
+class TestInMemoryAndToMemory:
+    """Tests for in_memory parameter and to_memory method."""
+
+    def test_read_zarr_lazy_by_default(
+        self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
+    ):
+        """Test that read_zarr returns lazy zarr arrays by default."""
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_lazy.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read without in_memory flag
+        read_gd = GroupedDistribution.read_zarr(str(store_path))
+
+        # Data should be lazy (zarr arrays)
+        assert read_gd.data.is_in_memory is False
+
+    def test_read_zarr_in_memory(
+        self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
+    ):
+        """Test that read_zarr with in_memory=True loads data into memory."""
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_in_memory.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read with in_memory=True
+        read_gd = GroupedDistribution.read_zarr(str(store_path), in_memory=True)
+
+        # Data should be in memory (numpy arrays)
+        assert read_gd.data.is_in_memory is True
+
+        # Verify data is correct
+        for k in dummy_grouped_distribution_data.src_data:
+            np.testing.assert_array_equal(
+                read_gd.data.src_data[k],
+                dummy_grouped_distribution_data.src_data[k],
+            )
+
+    def test_to_memory_converts_lazy_to_numpy(
+        self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
+    ):
+        """Test that to_memory converts lazy zarr arrays to numpy arrays."""
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_to_memory.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read lazy
+        read_gd = GroupedDistribution.read_zarr(str(store_path))
+        assert read_gd.data.is_in_memory is False
+
+        # Convert to memory
+        read_gd.to_memory()
+        assert read_gd.data.is_in_memory is True
+
+        # Verify data is correct
+        for k in dummy_grouped_distribution_data.src_data:
+            np.testing.assert_array_equal(
+                read_gd.data.src_data[k],
+                dummy_grouped_distribution_data.src_data[k],
+            )
+
+    def test_to_memory_idempotent(
+        self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
+    ):
+        """Test that calling to_memory multiple times is safe."""
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_idempotent.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        read_gd = GroupedDistribution.read_zarr(str(store_path))
+        read_gd.to_memory()
+        assert read_gd.data.is_in_memory is True
+
+        # Call again - should not raise
+        read_gd.to_memory()
+        assert read_gd.data.is_in_memory is True
+
+    def test_is_in_memory_for_datamanager_created_data(self, sample_grouped_distribution):
+        """Test that data created by DataManager is already in memory."""
+        # Data from DataManager fixture should be in memory (numpy arrays)
+        assert sample_grouped_distribution.data.is_in_memory is True
+
+    def test_grouped_distribution_data_is_in_memory_property(self):
+        """Test is_in_memory property for manually created data."""
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1]},
+            src_data={0: np.random.rand(10, 5)},
+            tgt_data={0: np.random.rand(5, 5), 1: np.random.rand(5, 5)},
+            conditions={0: {"cond": np.array([1, 2])}, 1: {"cond": np.array([3, 4])}},
+        )
+        # Numpy arrays should be in memory
+        assert data.is_in_memory is True
+
+
+class TestLazyVsInMemorySplitting:
+    """Tests comparing lazy zarr data vs in-memory data when splitting."""
+
+    def test_split_lazy_data(self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation):
+        """Test splitting lazy zarr data."""
+        from scaleflow.data._data_splitter import GroupedDistributionSplitter
+
+        # Write to zarr
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_lazy_split.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read as lazy
+        lazy_gd = GroupedDistribution.read_zarr(str(store_path), in_memory=False)
+        assert lazy_gd.data.is_in_memory is False
+
+        # Split the lazy data
+        splitter = GroupedDistributionSplitter(
+            gd=lazy_gd,
+            holdout_combinations=False,
+            split_by=["other_col"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.5, 0.25, 0.25],
+            random_state=42,
+        )
+
+        splits = splitter.split()
+
+        # Splits should still reference zarr arrays (lazy)
+        assert "train" in splits
+        assert "val" in splits
+        assert "test" in splits
+
+    def test_split_in_memory_data(
+        self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
+    ):
+        """Test splitting in-memory data."""
+        from scaleflow.data._data_splitter import GroupedDistributionSplitter
+
+        # Write to zarr
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_inmem_split.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read as in-memory
+        inmem_gd = GroupedDistribution.read_zarr(str(store_path), in_memory=True)
+        assert inmem_gd.data.is_in_memory is True
+
+        # Split the in-memory data
+        splitter = GroupedDistributionSplitter(
+            gd=inmem_gd,
+            holdout_combinations=False,
+            split_by=["other_col"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.5, 0.25, 0.25],
+            random_state=42,
+        )
+
+        splits = splitter.split()
+
+        assert "train" in splits
+        assert "val" in splits
+        assert "test" in splits
+
+    def test_lazy_and_inmemory_splits_produce_same_structure(
+        self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
+    ):
+        """Test that lazy and in-memory splits produce equivalent structure."""
+        from scaleflow.data._data_splitter import GroupedDistributionSplitter
+
+        # Write to zarr
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_compare_split.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read as lazy
+        lazy_gd = GroupedDistribution.read_zarr(str(store_path), in_memory=False)
+
+        # Read as in-memory
+        inmem_gd = GroupedDistribution.read_zarr(str(store_path), in_memory=True)
+
+        # Split both with same seed
+        lazy_splitter = GroupedDistributionSplitter(
+            gd=lazy_gd,
+            holdout_combinations=False,
+            split_by=["other_col"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.5, 0.25, 0.25],
+            random_state=42,
+        )
+
+        inmem_splitter = GroupedDistributionSplitter(
+            gd=inmem_gd,
+            holdout_combinations=False,
+            split_by=["other_col"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.5, 0.25, 0.25],
+            random_state=42,
+        )
+
+        lazy_splits = lazy_splitter.split()
+        inmem_splits = inmem_splitter.split()
+
+        # Compare split keys
+        assert lazy_splits.keys() == inmem_splits.keys()
+
+        # Compare annotation structures (should be identical)
+        for split_name in lazy_splits:
+            lazy_split = lazy_splits[split_name]
+            inmem_split = inmem_splits[split_name]
+
+            # Same number of distributions
+            assert len(lazy_split.data.src_data) == len(inmem_split.data.src_data)
+            assert len(lazy_split.data.tgt_data) == len(inmem_split.data.tgt_data)
+            assert len(lazy_split.data.conditions) == len(inmem_split.data.conditions)
+
+            # Same keys
+            assert set(lazy_split.data.src_data.keys()) == set(inmem_split.data.src_data.keys())
+            assert set(lazy_split.data.tgt_data.keys()) == set(inmem_split.data.tgt_data.keys())
+
+    def test_sampler_works_with_lazy_split_after_to_memory(
+        self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
+    ):
+        """Test that InMemorySampler works with lazy split data after calling to_memory."""
+        from scaleflow.data._data_splitter import GroupedDistributionSplitter
+        from scaleflow.data._dataloader import InMemorySampler
+
+        # Write to zarr
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_sampler_lazy.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read as lazy
+        lazy_gd = GroupedDistribution.read_zarr(str(store_path), in_memory=False)
+        assert lazy_gd.data.is_in_memory is False
+
+        # Split
+        splitter = GroupedDistributionSplitter(
+            gd=lazy_gd,
+            holdout_combinations=False,
+            split_by=["other_col"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.5, 0.25, 0.25],
+            random_state=42,
+        )
+
+        splits = splitter.split()
+        train_data = splits["train"]
+
+        # Create sampler (will call to_memory internally)
+        rng = np.random.default_rng(42)
+        sampler = InMemorySampler(data=train_data, rng=rng, batch_size=16)
+        sampler.init_sampler()
+
+        # Data should now be in memory
+        assert train_data.data.is_in_memory is True
+
+        # Sample should work
+        result = sampler.sample()
+        assert result["src_cell_data"].shape[0] == 16
+        assert "condition" in result
+
+    def test_sampler_works_with_inmemory_split(
+        self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
+    ):
+        """Test that InMemorySampler works directly with in-memory split data."""
+        from scaleflow.data._data_splitter import GroupedDistributionSplitter
+        from scaleflow.data._dataloader import InMemorySampler
+
+        # Write to zarr
+        gd = GroupedDistribution(
+            data=dummy_grouped_distribution_data,
+            annotation=dummy_grouped_distribution_annotation,
+        )
+        store_path = tmp_path / "test_sampler_inmem.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read as in-memory
+        inmem_gd = GroupedDistribution.read_zarr(str(store_path), in_memory=True)
+        assert inmem_gd.data.is_in_memory is True
+
+        # Split
+        splitter = GroupedDistributionSplitter(
+            gd=inmem_gd,
+            holdout_combinations=False,
+            split_by=["other_col"],
+            split_key="split",
+            force_training_values={},
+            ratios=[0.5, 0.25, 0.25],
+            random_state=42,
+        )
+
+        splits = splitter.split()
+        train_data = splits["train"]
+
+        # Create sampler
+        rng = np.random.default_rng(42)
+        sampler = InMemorySampler(data=train_data, rng=rng, batch_size=16)
+        sampler.init_sampler()
+
+        # Sample should work
+        result = sampler.sample()
+        assert result["src_cell_data"].shape[0] == 16
+        assert "condition" in result

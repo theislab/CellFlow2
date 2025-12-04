@@ -3,7 +3,6 @@ import os
 import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -13,6 +12,8 @@ from scaleflow.data._data import (
 )
 
 __all__ = [
+    "CombinedSampler",
+    "InMemorySampler",
     "ReservoirSampler",
     "SamplerABC",
 ]
@@ -28,12 +29,198 @@ class SamplerABC(ABC):
         pass
 
 
-class ReservoirSampler:
+class InMemorySampler(SamplerABC):
+    """Simple in-memory data sampler that caches all data.
+
+    This sampler loads all source and target distributions into memory
+    during initialization. Best for smaller datasets that fit in memory.
+
+    Parameters
+    ----------
+    data
+        The training data.
+    rng
+        Random number generator to use for all sampling operations.
+    batch_size
+        The batch size.
+    """
+
+    def __init__(
+        self,
+        data: GroupedDistribution,
+        rng: np.random.Generator,
+        batch_size: int = 1024,
+    ) -> None:
+        self.batch_size = batch_size
+        self.n_source_dists = len(data.data.src_data)
+        self.n_target_dists = len(data.data.tgt_data)
+        self._data = data
+        self._rng = rng
+        self._initialized = False
+        self._cached_srcs: dict[int, np.ndarray] = {}
+        self._cached_tgts: dict[int, np.ndarray] = {}
+
+    def init_sampler(self) -> None:
+        """Initialize the sampler by loading all data into memory."""
+        if self._initialized:
+            raise ValueError("Sampler already initialized. Call init_sampler() only once.")
+
+        # Load data into memory if it's lazy (zarr arrays)
+        if not self._data.data.is_in_memory:
+            self._data.data.to_memory()
+
+        # Reference the in-memory arrays directly
+        self._cached_srcs = {int(k): v for k, v in self._data.data.src_data.items()}
+        self._cached_tgts = {int(k): v for k, v in self._data.data.tgt_data.items()}
+
+        self._initialized = True
+
+    def sample(self) -> dict[str, Any]:
+        """Sample a batch for gene expression (flow matching) task.
+
+        Returns
+        -------
+        Dictionary with source cells, target cells, condition, and task type
+        """
+        if not self._initialized:
+            raise ValueError("Sampler not initialized. Call init_sampler() first.")
+
+        # Sample source distribution
+        src_keys = list(self._cached_srcs.keys())
+        source_dist_idx = self._rng.choice(src_keys)
+
+        # Sample target distribution from those mapped to this source
+        tgt_indices = self._data.data.src_to_tgt_dist_map[source_dist_idx]
+        target_dist_idx = self._rng.choice(tgt_indices)
+
+        # Sample cells
+        src_arr = self._cached_srcs[source_dist_idx]
+        src_idxs = self._rng.choice(src_arr.shape[0], size=self.batch_size, replace=True)
+        source_batch = src_arr[src_idxs]
+
+        tgt_arr = self._cached_tgts[target_dist_idx]
+        tgt_idxs = self._rng.choice(tgt_arr.shape[0], size=self.batch_size, replace=True)
+        target_batch = tgt_arr[tgt_idxs]
+
+        # Get condition
+        cond_dict = self._data.data.conditions[target_dist_idx]
+
+        return {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": cond_dict}
+
+
+class CombinedSampler(SamplerABC):
+    """Sampler that combines multiple samplers with configurable sampling weights.
+
+    This allows sampling from multiple datasets with different probabilities,
+    useful for multi-dataset training scenarios.
+
+    Parameters
+    ----------
+    samplers
+        Dictionary mapping dataset names to their samplers.
+    rng
+        Random number generator for selecting which sampler to use.
+    weights
+        Optional dictionary mapping dataset names to sampling weights.
+        If None, uniform weights are used. Weights are normalized to sum to 1.
+
+    Examples
+    --------
+    >>> sampler1 = InMemorySampler(data1, rng1, batch_size=64)
+    >>> sampler2 = InMemorySampler(data2, rng2, batch_size=64)
+    >>> combined = CombinedSampler(
+    ...     samplers={"dataset1": sampler1, "dataset2": sampler2},
+    ...     rng=np.random.default_rng(42),
+    ...     weights={"dataset1": 0.7, "dataset2": 0.3},
+    ... )
+    >>> combined.init_sampler()
+    >>> batch = combined.sample()
+    >>> batch["dataset_name"]  # Returns "dataset1" or "dataset2"
+    """
+
+    def __init__(
+        self,
+        samplers: dict[str, SamplerABC],
+        rng: np.random.Generator,
+        weights: dict[str, float] | None = None,
+    ) -> None:
+        if not samplers:
+            raise ValueError("samplers dict must not be empty")
+
+        self._samplers = samplers
+        self._rng = rng
+        self._dataset_names = list(samplers.keys())
+        self._initialized = False
+
+        # Normalize weights
+        if weights is None:
+            # Uniform weights
+            n = len(self._dataset_names)
+            self._weights = np.array([1.0 / n] * n)
+        else:
+            # Validate weights keys match samplers keys
+            if set(weights.keys()) != set(self._dataset_names):
+                raise ValueError(
+                    f"weights keys {set(weights.keys())} must match samplers keys {set(self._dataset_names)}"
+                )
+            # Normalize to sum to 1
+            weight_values = np.array([weights[name] for name in self._dataset_names])
+            if np.any(weight_values < 0):
+                raise ValueError("weights must be non-negative")
+            if weight_values.sum() == 0:
+                raise ValueError("weights must sum to a positive value")
+            self._weights = weight_values / weight_values.sum()
+
+    def init_sampler(self) -> None:
+        """Initialize all underlying samplers."""
+        if self._initialized:
+            raise ValueError("Sampler already initialized. Call init_sampler() only once.")
+
+        for name, sampler in self._samplers.items():
+            sampler.init_sampler()
+
+        self._initialized = True
+
+    def sample(self) -> dict[str, Any]:
+        """Sample from one of the underlying samplers based on weights.
+
+        Returns
+        -------
+        Dictionary with source cells, target cells, condition, and dataset_name
+        """
+        if not self._initialized:
+            raise ValueError("Sampler not initialized. Call init_sampler() first.")
+
+        # Select dataset based on weights
+        dataset_idx = self._rng.choice(len(self._dataset_names), p=self._weights)
+        dataset_name = self._dataset_names[dataset_idx]
+
+        # Sample from selected sampler
+        batch = self._samplers[dataset_name].sample()
+
+        # Add dataset name to batch
+        batch["dataset_name"] = dataset_name
+
+        return batch
+
+    @property
+    def dataset_names(self) -> list[str]:
+        """Return list of dataset names."""
+        return self._dataset_names.copy()
+
+    @property
+    def weights(self) -> dict[str, float]:
+        """Return dictionary of dataset weights."""
+        return {name: float(w) for name, w in zip(self._dataset_names, self._weights, strict=False)}
+
+
+class ReservoirSampler(SamplerABC):
     """Data sampler with gradual pool replacement using reservoir sampling.
 
     This approach replaces pool elements one by one rather than refreshing
     the entire pool, providing better cache locality while maintaining
-    reasonable randomness.
+    reasonable randomness. Use `InMemorySampler` for simpler use cases
+    where all data fits in memory.
 
     Parameters
     ----------
@@ -44,8 +231,8 @@ class ReservoirSampler:
     batch_size
         The batch size.
     pool_fraction
-        Fraction of source distributions to cache (0 < pool_fraction <= 1).
-        If 1.0, all sources are cached and no replacement is performed.
+        Fraction of source distributions to cache (0 < pool_fraction < 1).
+        For caching all sources, use `InMemorySampler` instead.
     replacement_prob
         Probability of replacing a pool element after each sample.
         Lower values = longer cache retention, less randomness.
@@ -57,47 +244,31 @@ class ReservoirSampler:
         data: GroupedDistribution,
         rng: np.random.Generator,
         batch_size: int = 1024,
-        pool_fraction: float | None = None,
-        replacement_prob: float | None = None,
+        pool_fraction: float = 0.5,
+        replacement_prob: float = 0.1,
     ) -> None:
+        # Validate pool_fraction
+        if pool_fraction is None or pool_fraction >= 1.0:
+            raise ValueError("pool_fraction must be in (0, 1). Use InMemorySampler for caching all data.")
+        if not (0 < pool_fraction < 1):
+            raise ValueError("pool_fraction must be in (0, 1). Use InMemorySampler for caching all data.")
+
         self.batch_size = batch_size
         self.n_source_dists = len(data.data.src_data)
         self.n_target_dists = len(data.data.tgt_data)
         self._data = data
         self._rng = rng
-        self._cache_all = False
-        self._pool_fraction = None
-        self._replacement_prob = None
-        self._pool_size = None
-
-        if pool_fraction is None and replacement_prob is None or pool_fraction == 1.0:
-            self._cache_all = True
-            self._pool_fraction = None
-            self._pool_size = None
-            self._replacement_prob = None
-        else:
-            if pool_fraction is None:
-                raise ValueError("pool_fraction must be provided if replacement_prob is provided.")
-            if replacement_prob is None:
-                raise ValueError("replacement_prob must be provided if pool_fraction is provided.")
-        # Compute pool size from fraction
-        if not self._cache_all:
-            if not (0 < pool_fraction < 1):
-                raise ValueError("pool_fraction must be in (0, 1].")
-            self._pool_fraction = pool_fraction
-            self._pool_size = math.ceil(pool_fraction * self.n_source_dists)
-            self._replacement_prob = replacement_prob
+        self._pool_fraction = pool_fraction
+        self._replacement_prob = replacement_prob
+        self._pool_size = math.ceil(pool_fraction * self.n_source_dists)
 
         self._pool_usage_count = np.zeros(self.n_source_dists, dtype=int)
         self._initialized = False
         self._src_idx_pool = None
 
-        self._lock = nullcontext() if self._cache_all else threading.RLock()
-        self._executor = None
-        self._pending_replacements = {}
-        if not self._cache_all:
-            self._executor = ThreadPoolExecutor(max_workers=2)  # TODO: avoid magic numbers
-            self._pending_replacements: dict[int, dict[str, Any]] = {}
+        self._lock = threading.RLock()
+        self._executor = ThreadPoolExecutor(max_workers=2)  # TODO: avoid magic numbers
+        self._pending_replacements: dict[int, dict[str, Any]] = {}
 
     def init_sampler(self) -> None:
         """Initialize the sampler by loading data into cache.
@@ -113,10 +284,7 @@ class ReservoirSampler:
 
     def _init_src_idx_pool(self) -> None:
         src_indices = np.array(list(self._data.data.src_data.keys()))
-        if self._cache_all:
-            self._src_idx_pool = src_indices
-        else:
-            self._src_idx_pool = self._rng.choice(src_indices, size=self._pool_size, replace=False)
+        self._src_idx_pool = self._rng.choice(src_indices, size=self._pool_size, replace=False)
         return None
 
     def sample(self) -> dict[str, Any]:
@@ -167,15 +335,6 @@ class ReservoirSampler:
         """Sample a source distribution index with gradual pool replacement."""
         if not self._initialized:
             raise ValueError("Sampler not initialized. Call init_sampler() first.")
-
-        return self._sample_source_dist_idx_in_pool() if not self._cache_all else self._sample_source_dist_idx_in_memory()
-
-    def _sample_source_dist_idx_in_memory(self) -> int:
-        source_idx = self._rng.choice(sorted(self._cached_srcs.keys()))
-        self._pool_usage_count[source_idx] = self._pool_usage_count[source_idx] + 1
-        return source_idx
-
-    def _sample_source_dist_idx_in_pool(self) -> int:
         self._apply_ready_replacements()
         # Sample from current pool
         with self._lock:
@@ -191,9 +350,6 @@ class ReservoirSampler:
         return source_idx
 
     def _schedule_replacement(self):
-        if self._cache_all:
-            return  # No replacement if everything is cached
-
         # Get usage counts for indices in the pool
         pool_indices = self._src_idx_pool.tolist()
         usage_counts = np.array([self._pool_usage_count[idx] for idx in pool_indices])
@@ -242,8 +398,6 @@ class ReservoirSampler:
             print(f"scheduled replacement of {replaced_pool_idx} with {new_pool_idx} (slot {replaced_pool_slot})")
 
     def _apply_ready_replacements(self):
-        if self._cache_all:
-            return  # No replacement if everything is cached
         """Apply any finished background loads; non-blocking."""
         to_apply: list[int] = []
         with self._lock:

@@ -70,15 +70,24 @@ class GroupedDistributionData:
     def read_zarr(
         cls,
         group: zarr.Group,
+        in_memory: bool = False,
     ) -> GroupedDistributionData:
         """
         Read the grouped distribution data from a Zarr group.
+
+        Parameters
+        ----------
+        group
+            Zarr group containing the data.
+        in_memory
+            If True, load all arrays into memory as numpy arrays.
+            If False (default), keep arrays as lazy zarr arrays.
 
         Conditions are stored in CSR-like format:
         - Each column is a contiguous array (all dists concatenated)
         - Metadata contains dist_ids and indptr for each column
         """
-        # Read conditions from CSR-like structure
+        # Read conditions from CSR-like structure (always in memory)
         conditions = {}
         if "conditions" in group:
             cond_group = group["conditions"]
@@ -105,14 +114,58 @@ class GroupedDistributionData:
                         end = indptr[i + 1]
                         conditions[dist_id][col_name] = concatenated[start:end]
 
+        # Read src_data and tgt_data (optionally load into memory)
+        if in_memory:
+            src_data = {int(k): group["src_data"][k][...] for k in group["src_data"].keys()}
+            tgt_data = {int(k): group["tgt_data"][k][...] for k in group["tgt_data"].keys()}
+        else:
+            src_data = {int(k): group["src_data"][k] for k in group["src_data"].keys()}
+            tgt_data = {int(k): group["tgt_data"][k] for k in group["tgt_data"].keys()}
+
         return cls(
             src_to_tgt_dist_map={
                 int(k): np.array(group["src_to_tgt_dist_map"][k]) for k in group["src_to_tgt_dist_map"].keys()
             },
-            src_data={int(k): group["src_data"][k] for k in group["src_data"].keys()},
-            tgt_data={int(k): group["tgt_data"][k] for k in group["tgt_data"].keys()},
+            src_data=src_data,
+            tgt_data=tgt_data,
             conditions=conditions,
         )
+
+    @property
+    def is_in_memory(self) -> bool:
+        """Check if all data is loaded in memory (numpy arrays) vs lazy (zarr arrays).
+
+        Returns True if all src_data and tgt_data arrays are numpy arrays.
+        Returns False if any are zarr arrays (lazy loading).
+        """
+        if not self.src_data and not self.tgt_data:
+            return True  # Empty data is considered in-memory
+
+        # Check first src_data array
+        if self.src_data:
+            first_src = next(iter(self.src_data.values()))
+            if isinstance(first_src, zarr.Array):
+                return False
+
+        # Check first tgt_data array
+        if self.tgt_data:
+            first_tgt = next(iter(self.tgt_data.values()))
+            if isinstance(first_tgt, zarr.Array):
+                return False
+
+        return True
+
+    def to_memory(self) -> None:
+        """Convert all lazy zarr arrays to in-memory numpy arrays (in-place).
+
+        Does nothing if data is already in memory.
+        """
+        if self.is_in_memory:
+            return None
+
+        self.src_data = {int(k): self.src_data[k][...] for k in self.src_data.keys()}
+        self.tgt_data = {int(k): self.tgt_data[k][...] for k in self.tgt_data.keys()}
+        return None
 
     def write_zarr_group(
         self,
@@ -298,12 +351,26 @@ class GroupedDistribution:
     def read_zarr(
         cls,
         path: str,
+        in_memory: bool = False,
     ) -> GroupedDistribution:
-        """Read the grouped distribution from a Zarr group."""
+        """Read the grouped distribution from a Zarr group.
+
+        Parameters
+        ----------
+        path
+            Path to the Zarr store.
+        in_memory
+            If True, load all arrays into memory as numpy arrays.
+            If False (default), keep arrays as lazy zarr arrays.
+        """
         zgroup = zarr.open_group(path, mode="r")
         annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
-        data = GroupedDistributionData.read_zarr(zgroup["data"])
+        data = GroupedDistributionData.read_zarr(zgroup["data"], in_memory=in_memory)
         return cls(
             annotation=annotation,
             data=data,
         )
+
+    def to_memory(self) -> None:
+        """Convert all lazy zarr arrays to in-memory numpy arrays (in-place)."""
+        self.data.to_memory()
