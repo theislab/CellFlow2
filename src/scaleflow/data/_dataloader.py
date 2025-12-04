@@ -20,11 +20,11 @@ __all__ = [
 
 class SamplerABC(ABC):
     @abstractmethod
-    def sample(self, rng: np.random.Generator) -> dict[str, Any]:
+    def sample(self) -> dict[str, Any]:
         pass
 
     @abstractmethod
-    def init_sampler(self, rng: np.random.Generator) -> None:
+    def init_sampler(self) -> None:
         pass
 
 
@@ -39,6 +39,8 @@ class ReservoirSampler:
     ----------
     data
         The training data.
+    rng
+        Random number generator to use for all sampling operations.
     batch_size
         The batch size.
     pool_fraction
@@ -53,6 +55,7 @@ class ReservoirSampler:
     def __init__(
         self,
         data: GroupedDistribution,
+        rng: np.random.Generator,
         batch_size: int = 1024,
         pool_fraction: float | None = None,
         replacement_prob: float | None = None,
@@ -61,6 +64,7 @@ class ReservoirSampler:
         self.n_source_dists = len(data.data.src_data)
         self.n_target_dists = len(data.data.tgt_data)
         self._data = data
+        self._rng = rng
         self._cache_all = False
         self._pool_fraction = None
         self._replacement_prob = None
@@ -95,49 +99,42 @@ class ReservoirSampler:
             self._executor = ThreadPoolExecutor(max_workers=2)  # TODO: avoid magic numbers
             self._pending_replacements: dict[int, dict[str, Any]] = {}
 
-    def init_sampler(self, rng) -> None:
+    def init_sampler(self) -> None:
+        """Initialize the sampler by loading data into cache.
+
+        Must be called before sampling. Uses the rng provided in the constructor.
+        """
         if self._initialized:
             raise ValueError("Sampler already initialized. Call init_sampler() only once.")
-        self._init_src_idx_pool(rng)
+        self._init_src_idx_pool()
         self._init_cache_pool_elements()
         self._initialized = True
         return None
 
-    def _init_src_idx_pool(self, rng) -> None:
+    def _init_src_idx_pool(self) -> None:
         src_indices = np.array(list(self._data.data.src_data.keys()))
         if self._cache_all:
             self._src_idx_pool = src_indices
         else:
-            self._src_idx_pool = rng.choice(src_indices, size=self._pool_size, replace=False)
+            self._src_idx_pool = self._rng.choice(src_indices, size=self._pool_size, replace=False)
         return None
 
-    def sample(self, rng) -> dict[str, Any]:
+    def sample(self) -> dict[str, Any]:
         """Sample a batch for gene expression (flow matching) task.
-
-        Parameters
-        ----------
-        rng
-            Random number generator
 
         Returns
         -------
         Dictionary with source cells, target cells, condition, and task type
         """
-        source_dist_idx = self._sample_source_dist_idx(rng)
-        target_dist_idx = self._sample_target_dist_idx(rng, source_dist_idx)
-        source_batch = self._sample_source_cells(rng, source_dist_idx)
-        target_batch = self._sample_target_cells(rng, source_dist_idx, target_dist_idx)
+        source_dist_idx = self._sample_source_dist_idx()
+        target_dist_idx = self._sample_target_dist_idx(source_dist_idx)
+        source_batch = self._sample_source_cells(source_dist_idx)
+        target_batch = self._sample_target_cells(target_dist_idx)
 
         # Conditions are stored as nested dicts: {col_name: array}
         cond_dict = self._data.data.conditions[target_dist_idx]
-        max_combination_length = getattr(self._data, "max_combination_length", 1)
 
-        # Reshape each condition array to (1, max_combination_length, -1)
-        condition = {}
-        for col_name, arr in cond_dict.items():
-            condition[col_name] = arr.reshape(1, max_combination_length, -1)
-
-        res = {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": condition}
+        res = {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": cond_dict}
         return res
 
     def _load_targets_parallel(self, tgt_indices):
@@ -162,42 +159,38 @@ class ReservoirSampler:
 
         return None
 
-    def _sample_target_dist_idx(self, rng, source_dist_idx: int) -> int:
+    def _sample_target_dist_idx(self, source_dist_idx: int) -> int:
         """Sample a target distribution index given the source distribution index."""
-        return rng.choice(self._data.data.src_to_tgt_dist_map[source_dist_idx])
+        return self._rng.choice(self._data.data.src_to_tgt_dist_map[source_dist_idx])
 
-    def _sample_source_dist_idx(self, rng) -> int:
+    def _sample_source_dist_idx(self) -> int:
         """Sample a source distribution index with gradual pool replacement."""
         if not self._initialized:
             raise ValueError("Sampler not initialized. Call init_sampler() first.")
 
-        return (
-            self._sample_source_dist_idx_in_pool(rng)
-            if not self._cache_all
-            else self._sample_source_dist_idx_in_memory(rng)
-        )
+        return self._sample_source_dist_idx_in_pool() if not self._cache_all else self._sample_source_dist_idx_in_memory()
 
-    def _sample_source_dist_idx_in_memory(self, rng) -> int:
-        source_idx = rng.choice(sorted(self._cached_srcs.keys()))
+    def _sample_source_dist_idx_in_memory(self) -> int:
+        source_idx = self._rng.choice(sorted(self._cached_srcs.keys()))
         self._pool_usage_count[source_idx] = self._pool_usage_count[source_idx] + 1
         return source_idx
 
-    def _sample_source_dist_idx_in_pool(self, rng) -> int:
+    def _sample_source_dist_idx_in_pool(self) -> int:
         self._apply_ready_replacements()
         # Sample from current pool
         with self._lock:
-            source_idx = rng.choice(sorted(self._cached_srcs.keys()))
+            source_idx = self._rng.choice(sorted(self._cached_srcs.keys()))
 
         # Increment usage count for monitoring
         self._pool_usage_count[source_idx] = self._pool_usage_count[source_idx] + 1
 
         # Gradually replace elements based on replacement probability (schedule only)
-        if rng.random() < self._replacement_prob:
-            self._schedule_replacement(rng)
+        if self._rng.random() < self._replacement_prob:
+            self._schedule_replacement()
 
         return source_idx
 
-    def _schedule_replacement(self, rng):
+    def _schedule_replacement(self):
         if self._cache_all:
             return  # No replacement if everything is cached
 
@@ -213,7 +206,7 @@ class ReservoirSampler:
         if most_used_weight.sum() == 0:
             return
         most_used_weight /= most_used_weight.sum()
-        replaced_pool_slot = rng.choice(len(pool_indices), p=most_used_weight)
+        replaced_pool_slot = self._rng.choice(len(pool_indices), p=most_used_weight)
         replaced_pool_idx = pool_indices[replaced_pool_slot]
 
         with self._lock:
@@ -236,7 +229,7 @@ class ReservoirSampler:
             if least_used_weight.sum() == 0:
                 return
             least_used_weight /= least_used_weight.sum()
-            new_idx_position = rng.choice(len(available_indices), p=least_used_weight)
+            new_idx_position = self._rng.choice(len(available_indices), p=least_used_weight)
             new_pool_idx = available_indices[new_idx_position]
 
             # Kick off background load for new indices
@@ -296,15 +289,14 @@ class ReservoirSampler:
         tgt_dict = {k: self._data.data.tgt_data[k][...] for k in self._data.data.src_to_tgt_dist_map[src_idx]}
         return {"src": src_arr, "tgts": tgt_dict}
 
-    def _sample_source_cells(self, rng, source_dist_idx: int) -> np.ndarray:
+    def _sample_source_cells(self, source_dist_idx: int) -> np.ndarray:
         with self._lock:
             arr = self._cached_srcs[source_dist_idx]
-        idxs = rng.choice(arr.shape[0], size=self.batch_size, replace=True)
+        idxs = self._rng.choice(arr.shape[0], size=self.batch_size, replace=True)
         return arr[idxs]
 
-    def _sample_target_cells(self, rng, source_dist_idx: int, target_dist_idx: int) -> np.ndarray:
-        del source_dist_idx  # unused
+    def _sample_target_cells(self, target_dist_idx: int) -> np.ndarray:
         with self._lock:
             arr = self._cached_tgts[target_dist_idx]
-        idxs = rng.choice(arr.shape[0], size=self.batch_size, replace=True)
+        idxs = self._rng.choice(arr.shape[0], size=self.batch_size, replace=True)
         return arr[idxs]

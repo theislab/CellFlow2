@@ -562,8 +562,7 @@ class CellFlow:
         # Get sample conditions from first target distribution
         # Conditions are stored as nested dicts: {col_name: array}
         first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
-        cond_dict = self.train_data.data.conditions[first_tgt_idx]
-        sample_conditions = {col_name: arr.reshape(1, -1) for col_name, arr in cond_dict.items()}
+        sample_conditions = self.train_data.data.conditions[first_tgt_idx]
 
         if self._solver_class == _otfm.OTFlowMatching:
             self._solver = self._solver_class(
