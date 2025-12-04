@@ -15,10 +15,9 @@ import optax
 import pandas as pd
 from ott.neural.methods.flows import dynamics
 
-from scaleflow.data import DataManager, ReservoirSampler
 from scaleflow import _constants
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
-from scaleflow.data import DataManager, GroupedDistribution, SamplerABC
+from scaleflow.data import DataManager, GroupedDistribution, ReservoirSampler, SamplerABC
 from scaleflow.model._utils import _write_predictions
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
@@ -194,7 +193,7 @@ class CellFlow:
         )
 
         self.train_data = self._dm.get_train_data(self.adata)
-        if hasattr(self.train_data, 'data') and hasattr(self.train_data.data, 'src_data'):
+        if hasattr(self.train_data, "data") and hasattr(self.train_data.data, "src_data"):
             first_src_idx = next(iter(self.train_data.data.src_data.keys()))
             self._data_dim = self.train_data.data.src_data[first_src_idx].shape[-1]
         else:
@@ -479,7 +478,7 @@ class CellFlow:
         if self._solver_class == _eqm.EquilibriumMatching:
             self.vf = self._vf_class(
                 output_dim=self._data_dim,
-                max_combination_length=getattr(self.train_data, 'max_combination_length', 1),
+                max_combination_length=getattr(self.train_data, "max_combination_length", 1),
                 condition_mode=condition_mode,
                 regularization=regularization,
                 condition_embedding_dim=condition_embedding_dim,
@@ -508,7 +507,7 @@ class CellFlow:
         else:
             self.vf = self._vf_class(
                 output_dim=self._data_dim,
-                max_combination_length=getattr(self.train_data, 'max_combination_length', 1),
+                max_combination_length=getattr(self.train_data, "max_combination_length", 1),
                 condition_mode=condition_mode,
                 regularization=regularization,
                 condition_embedding_dim=condition_embedding_dim,
@@ -560,16 +559,13 @@ class CellFlow:
                 output_dim=phenotype_output_dim,
             )
 
-        if self._solver_class == _otfm.OTFlowMatching:
-            first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
-            flat_condition = self.train_data.data.conditions[first_tgt_idx]
-            sample_conditions = {}
-            if hasattr(self.train_data, 'annotation') and self.train_data.annotation.condition_structure:
-                for cov_name, (start, end) in self.train_data.annotation.condition_structure.items():
-                    sample_conditions[cov_name] = flat_condition[start:end].reshape(1, -1)
-            else:
-                sample_conditions = {0: flat_condition}
+        # Get sample conditions from first target distribution
+        # Conditions are stored as nested dicts: {col_name: array}
+        first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
+        cond_dict = self.train_data.data.conditions[first_tgt_idx]
+        sample_conditions = {col_name: arr.reshape(1, -1) for col_name, arr in cond_dict.items()}
 
+        if self._solver_class == _otfm.OTFlowMatching:
             self._solver = self._solver_class(
                 vf=self.vf,
                 match_fn=match_fn,
@@ -583,15 +579,6 @@ class CellFlow:
                 **solver_kwargs,
             )
         elif self._solver_class == _eqm.EquilibriumMatching:
-            first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
-            flat_condition = self.train_data.data.conditions[first_tgt_idx]
-            sample_conditions = {}
-            if hasattr(self.train_data, 'annotation') and self.train_data.annotation.condition_structure:
-                for cov_name, (start, end) in self.train_data.annotation.condition_structure.items():
-                    sample_conditions[cov_name] = flat_condition[start:end].reshape(1, -1)
-            else:
-                sample_conditions = {0: flat_condition}
-
             # EqM doesn't use probability_path, only match_fn
             self._solver = self._solver_class(
                 vf=self.vf,
@@ -605,15 +592,6 @@ class CellFlow:
                 **solver_kwargs,
             )
         elif self._solver_class == _genot.GENOT:
-            first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
-            flat_condition = self.train_data.data.conditions[first_tgt_idx]
-            sample_conditions = {}
-            if hasattr(self.train_data, 'annotation') and self.train_data.annotation.condition_structure:
-                for cov_name, (start, end) in self.train_data.annotation.condition_structure.items():
-                    sample_conditions[cov_name] = flat_condition[start:end].reshape(1, -1)
-            else:
-                sample_conditions = {0: flat_condition}
-
             self._solver = self._solver_class(
                 vf=self.vf,
                 data_match_fn=match_fn,

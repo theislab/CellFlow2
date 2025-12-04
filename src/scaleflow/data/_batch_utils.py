@@ -19,7 +19,7 @@ __all__ = [
 
 
 def prepare_multiple_datasets(
-    datasets: dict[str, "anndata.AnnData"],
+    datasets: dict[str, anndata.AnnData],
     data_manager: DataManager,
     verbose: bool = False,
 ) -> dict[str, GroupedDistribution]:
@@ -58,10 +58,7 @@ def prepare_multiple_datasets(
     >>> gd_dict = prepare_multiple_datasets(datasets, dm)
     >>> gd_dict["pbmc"]  # GroupedDistribution for pbmc
     """
-    return {
-        name: data_manager.prepare_data(adata, verbose=verbose)
-        for name, adata in datasets.items()
-    }
+    return {name: data_manager.prepare_data(adata, verbose=verbose) for name, adata in datasets.items()}
 
 
 def split_multiple_datasets(
@@ -134,7 +131,7 @@ def split_multiple_datasets(
 
 
 def prepare_and_split_multiple_datasets(
-    datasets: dict[str, "anndata.AnnData"],
+    datasets: dict[str, anndata.AnnData],
     data_manager: DataManager,
     *,
     holdout_combinations: bool,

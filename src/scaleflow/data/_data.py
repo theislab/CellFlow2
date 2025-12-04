@@ -9,11 +9,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
-import anndata as ad
-from scaleflow._types import ArrayLike
-from scaleflow.data._utils import write_sharded, write_dist_data_threaded, write_nested_dist_data_threaded
-
-import pandas as pd
+from scaleflow.data._utils import write_dist_data_threaded, write_nested_dist_data_threaded, write_sharded
 
 __all__ = [
     "GroupedDistribution",
@@ -65,11 +61,10 @@ class BaseDataMixin:
 
 @dataclass
 class GroupedDistributionData:
-    src_to_tgt_dist_map: dict[int, list[int]] # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
-    src_data: dict[int, np.ndarray] # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
-    tgt_data: dict[int, np.ndarray] # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
-    conditions: dict[int, np.ndarray] # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
-
+    src_to_tgt_dist_map: dict[int, list[int]]  # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
+    src_data: dict[int, np.ndarray]  # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
+    tgt_data: dict[int, np.ndarray]  # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
+    conditions: dict[int, dict[str, np.ndarray]]  # (n_tgt_dists) → {col_name: (n_rows, *dims)}
 
     @classmethod
     def read_zarr(
@@ -78,29 +73,36 @@ class GroupedDistributionData:
     ) -> GroupedDistributionData:
         """
         Read the grouped distribution data from a Zarr group.
+
+        Conditions are stored in CSR-like format:
+        - Each column is a contiguous array (all dists concatenated)
+        - Metadata contains dist_ids and indptr for each column
         """
-        # Read conditions from nested structure with keys and positions stored in attrs
+        # Read conditions from CSR-like structure
         conditions = {}
         if "conditions" in group:
             cond_group = group["conditions"]
-            # Iterate through each distribution group
-            for dist_id_str in cond_group.keys():
-                dist_id = int(dist_id_str)
-                dist_group = cond_group[dist_id_str]
 
-                # Get metadata from attrs
-                if 'keys' in dist_group.attrs and 'positions' in dist_group.attrs:
-                    sorted_keys = dist_group.attrs['keys']
-                    positions = dist_group.attrs['positions']
+            # Get metadata
+            dist_ids = list(cond_group.attrs.get("dist_ids", []))
 
-                    # Read the concatenated array
-                    concatenated = np.array(dist_group["data"])
+            if dist_ids:
+                # Get column names (everything that's not metadata)
+                col_names = [k for k in cond_group.keys()]
 
-                    # Split back into individual arrays
+                # Initialize conditions dict for each dist_id
+                for dist_id in dist_ids:
                     conditions[dist_id] = {}
-                    for i, col_name in enumerate(sorted_keys):
-                        start = positions[i]
-                        end = positions[i + 1]
+
+                # Read each column and split by indptr
+                for col_name in col_names:
+                    indptr = cond_group.attrs.get(f"indptr_{col_name}", [])
+                    concatenated = np.asarray(cond_group[col_name])
+
+                    # Split the concatenated array for each distribution
+                    for i, dist_id in enumerate(dist_ids):
+                        start = indptr[i]
+                        end = indptr[i + 1]
                         conditions[dist_id][col_name] = concatenated[start:end]
 
         return cls(
@@ -167,7 +169,6 @@ class GroupedDistributionAnnotation:
     tgt_dist_keys: list[str]
     src_dist_keys: list[str]
     dist_flag_key: str
-    condition_structure: dict[str, tuple[int, int]] | None = None  # Maps covariate name to (start, end) indices in flat array
 
     @classmethod
     def read_zarr(
@@ -306,4 +307,3 @@ class GroupedDistribution:
             annotation=annotation,
             data=data,
         )
-

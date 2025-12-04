@@ -88,7 +88,6 @@ class ReservoirSampler:
         self._initialized = False
         self._src_idx_pool = None
 
-
         self._lock = nullcontext() if self._cache_all else threading.RLock()
         self._executor = None
         self._pending_replacements = {}
@@ -129,21 +128,16 @@ class ReservoirSampler:
         source_batch = self._sample_source_cells(rng, source_dist_idx)
         target_batch = self._sample_target_cells(rng, source_dist_idx, target_dist_idx)
 
-        flat_condition = self._data.data.conditions[target_dist_idx]
+        # Conditions are stored as nested dicts: {col_name: array}
+        cond_dict = self._data.data.conditions[target_dist_idx]
+        max_combination_length = getattr(self._data, "max_combination_length", 1)
 
-        if hasattr(self._data, 'annotation') and self._data.annotation.condition_structure:
-            condition = {}
-            max_combination_length = getattr(self._data, 'max_combination_length', 1)
-            for cov_name, (start, end) in self._data.annotation.condition_structure.items():
-                condition[cov_name] = flat_condition[start:end].reshape(1, max_combination_length, -1)
-        else:
-            condition = flat_condition
+        # Reshape each condition array to (1, max_combination_length, -1)
+        condition = {}
+        for col_name, arr in cond_dict.items():
+            condition[col_name] = arr.reshape(1, max_combination_length, -1)
 
-        res = {
-            "src_cell_data": source_batch,
-            "tgt_cell_data": target_batch,
-            "condition": condition
-        }
+        res = {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": condition}
         return res
 
     def _load_targets_parallel(self, tgt_indices):
@@ -253,7 +247,6 @@ class ReservoirSampler:
                 "future": fut,
             }
             print(f"scheduled replacement of {replaced_pool_idx} with {new_pool_idx} (slot {replaced_pool_slot})")
-
 
     def _apply_ready_replacements(self):
         if self._cache_all:

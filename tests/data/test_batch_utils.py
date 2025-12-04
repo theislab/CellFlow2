@@ -28,11 +28,13 @@ def create_test_adata(n_obs: int = 500, seed: int = 42) -> ad.AnnData:
     genes = ["control"] + [f"gene_{i}" for i in range(n_genes)]
     cell_lines = [f"cell_line_{i}" for i in range(n_cell_lines)]
 
-    obs = pd.DataFrame({
-        "drug": np.random.choice(drugs, n_obs),
-        "gene": np.random.choice(genes, n_obs),
-        "cell_line": np.random.choice(cell_lines, n_obs),
-    })
+    obs = pd.DataFrame(
+        {
+            "drug": np.random.choice(drugs, n_obs),
+            "gene": np.random.choice(genes, n_obs),
+            "cell_line": np.random.choice(cell_lines, n_obs),
+        }
+    )
     obs["control"] = (obs["drug"] == "control") & (obs["gene"] == "control")
 
     for col in ["drug", "gene", "cell_line"]:

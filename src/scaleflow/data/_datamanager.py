@@ -115,46 +115,26 @@ class DataManager:
             zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None), strict=True)
         )
 
-        # prepare conditions and structure metadata
+        # prepare conditions as nested dicts: {tgt_dist_idx: {col_name: array}}
         col_to_repr = {key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()}
-
-        # Compute condition_structure from first available label
-        condition_structure = {}
-        offset = 0
-        first_src_label = next(iter(src_dist_labels.values()))
-        first_tgt_label = next(iter(tgt_dist_labels.values()))
-
-        for col, label in zip(self.src_dist_keys, first_src_label, strict=True):
-            if col in col_to_repr:
-                dim = len(col_to_repr[col][label])
-                condition_structure[col] = (offset, offset + dim)
-                offset += dim
-
-        for col, label in zip(self.tgt_dist_keys, first_tgt_label, strict=True):
-            if col in col_to_repr:
-                dim = len(col_to_repr[col][label])
-                condition_structure[col] = (offset, offset + dim)
-                offset += dim
-            elif isinstance(label, (int, float)):
-                # Scalar value (like dosage)
-                condition_structure[col] = (offset, offset + 1)
-                offset += 1
 
         with timer("Getting conditions", verbose=verbose):
             conditions = {}
             for src_dist_idx, tgt_dist_idxs in src_to_tgt_dist_map.items():
                 src_label = src_dist_labels[src_dist_idx]
-                src_repr = [
-                    DataManager._col_to_repr(col_to_repr, col, label)
-                    for col, label in zip(self.src_dist_keys, src_label, strict=True)
-                ]
                 for tgt_dist_idx in tgt_dist_idxs:
                     tgt_label = tgt_dist_labels[tgt_dist_idx]
-                    tgt_repr = [
-                        DataManager._col_to_repr(col_to_repr, col, label)
-                        for col, label in zip(self.tgt_dist_keys, tgt_label, strict=True)
-                    ]
-                    conditions[tgt_dist_idx] = np.concatenate([*src_repr, *tgt_repr])
+                    cond_dict = {}
+
+                    # Add source distribution conditions
+                    for col, label in zip(self.src_dist_keys, src_label, strict=True):
+                        cond_dict[col] = DataManager._col_to_repr(col_to_repr, col, label)
+
+                    # Add target distribution conditions
+                    for col, label in zip(self.tgt_dist_keys, tgt_label, strict=True):
+                        cond_dict[col] = DataManager._col_to_repr(col_to_repr, col, label)
+
+                    conditions[tgt_dist_idx] = cond_dict
 
         # prepare src_data and tgt_data
         arr = self.data_location(adata)
@@ -183,7 +163,6 @@ class DataManager:
                 src_dist_idx_to_labels=src_dist_labels,
                 tgt_dist_idx_to_labels=tgt_dist_labels,
                 default_values=default_values,
-                condition_structure=condition_structure,
             ),
         )
 

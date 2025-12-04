@@ -3,7 +3,6 @@
 import numpy as np
 import pytest
 
-from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution
 from scaleflow.data._dataloader import ReservoirSampler
 
 
@@ -222,7 +221,7 @@ class TestReservoirSamplerSampling:
 
         sampler.init_sampler(rng1)
         result1 = sampler.sample(rng1)
-        
+
         # Re-initialize for clean comparison
         sampler2 = ReservoirSampler(
             data=sample_grouped_distribution,
@@ -232,8 +231,9 @@ class TestReservoirSamplerSampling:
         result2 = sampler2.sample(rng2)
 
         # At least one should differ (with very high probability)
-        assert not np.array_equal(result1["src_cell_data"], result2["src_cell_data"]) or \
-               not np.array_equal(result1["tgt_cell_data"], result2["tgt_cell_data"])
+        assert not np.array_equal(result1["src_cell_data"], result2["src_cell_data"]) or not np.array_equal(
+            result1["tgt_cell_data"], result2["tgt_cell_data"]
+        )
 
     def test_multiple_samples(self, sample_grouped_distribution):
         """Test that multiple samples can be drawn."""
