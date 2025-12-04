@@ -178,12 +178,12 @@ class GroupedDistributionAnnotation:
         elem = ad.io.read_elem(group)
         return cls(
             old_obs_index=elem["old_obs_index"],
-            src_dist_idx_to_labels=elem["src_dist_idx_to_labels"],
-            tgt_dist_idx_to_labels=elem["tgt_dist_idx_to_labels"],
+            src_dist_idx_to_labels={int(k): v for k, v in elem["src_dist_idx_to_labels"].items()},
+            tgt_dist_idx_to_labels={int(k): v for k, v in elem["tgt_dist_idx_to_labels"].items()},
             src_tgt_dist_df=elem["src_tgt_dist_df"],
             default_values=elem["default_values"],
-            tgt_dist_keys=elem["tgt_dist_keys"],
-            src_dist_keys=elem["src_dist_keys"],
+            tgt_dist_keys=np.array(elem["tgt_dist_keys"]).tolist(),
+            src_dist_keys=np.array(elem["src_dist_keys"]).tolist(),
             dist_flag_key=elem["dist_flag_key"],
         )
 
