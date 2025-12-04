@@ -1,4 +1,3 @@
-
 """Performance benchmarks for GroupedDistributionSplitter."""
 
 import numpy as np
@@ -23,11 +22,13 @@ def create_large_adata(n_obs: int = 10000, n_drugs: int = 20, n_genes: int = 10)
 
     # Generate random obs data
     np.random.seed(42)
-    obs = pd.DataFrame({
-        "drug": np.random.choice(drugs, n_obs),
-        "gene": np.random.choice(genes, n_obs),
-        "cell_line": np.random.choice(cell_lines, n_obs),
-    })
+    obs = pd.DataFrame(
+        {
+            "drug": np.random.choice(drugs, n_obs),
+            "gene": np.random.choice(genes, n_obs),
+            "cell_line": np.random.choice(cell_lines, n_obs),
+        }
+    )
 
     # Mark controls
     obs["control"] = (obs["drug"] == "control") & (obs["gene"] == "control")

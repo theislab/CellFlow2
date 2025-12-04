@@ -21,10 +21,10 @@ dm = DataManager(
     src_dist_keys=["cell_line"],
     tgt_dist_keys=["drug", "dosage"],
     rep_keys={
-        'cell_line': 'cell_line_embeddings',
-        'drug': 'drug_embeddings',
+        "cell_line": "cell_line_embeddings",
+        "drug": "drug_embeddings",
     },
-    data_location=adl.obsm['X_pca'][:,:50],
+    data_location=adl.obsm["X_pca"][:, :50],
 )
 
 print("data loaded")

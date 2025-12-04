@@ -12,14 +12,14 @@ if TYPE_CHECKING:
     import anndata
 
 __all__ = [
-    "prepare_multiple_datasets",
-    "split_multiple_datasets",
-    "prepare_and_split_multiple_datasets",
+    "prepare_datasets",
+    "split_datasets",
+    "prepare_and_split_datasets",
 ]
 
 
-def prepare_multiple_datasets(
-    datasets: dict[str, "anndata.AnnData"],
+def prepare_datasets(
+    datasets: dict[str, anndata.AnnData],
     data_manager: DataManager,
     verbose: bool = False,
 ) -> dict[str, GroupedDistribution]:
@@ -55,16 +55,13 @@ def prepare_multiple_datasets(
     ...     data_location=adl.obsm["X_pca"],
     ... )
     >>> datasets = {"pbmc": adata_pbmc, "zebrafish": adata_zebrafish}
-    >>> gd_dict = prepare_multiple_datasets(datasets, dm)
+    >>> gd_dict = prepare_datasets(datasets, dm)
     >>> gd_dict["pbmc"]  # GroupedDistribution for pbmc
     """
-    return {
-        name: data_manager.prepare_data(adata, verbose=verbose)
-        for name, adata in datasets.items()
-    }
+    return {name: data_manager.prepare_data(adata, verbose=verbose) for name, adata in datasets.items()}
 
 
-def split_multiple_datasets(
+def split_datasets(
     grouped_distributions: dict[str, GroupedDistribution],
     *,
     holdout_combinations: bool,
@@ -102,7 +99,7 @@ def split_multiple_datasets(
     Examples
     --------
     >>> gd_dict = {"pbmc": gd_pbmc, "zebrafish": gd_zebrafish}
-    >>> splits = split_multiple_datasets(
+    >>> splits = split_datasets(
     ...     gd_dict,
     ...     holdout_combinations=False,
     ...     split_by=["drug", "gene"],
@@ -133,8 +130,8 @@ def split_multiple_datasets(
     return result
 
 
-def prepare_and_split_multiple_datasets(
-    datasets: dict[str, "anndata.AnnData"],
+def prepare_and_split_datasets(
+    datasets: dict[str, anndata.AnnData],
     data_manager: DataManager,
     *,
     holdout_combinations: bool,
@@ -148,8 +145,8 @@ def prepare_and_split_multiple_datasets(
     """
     Prepare and split multiple AnnData objects in one step.
 
-    This is a convenience function that combines prepare_multiple_datasets
-    and split_multiple_datasets.
+    This is a convenience function that combines prepare_datasets
+    and split_datasets.
 
     Parameters
     ----------
@@ -192,7 +189,7 @@ def prepare_and_split_multiple_datasets(
     ...     data_location=adl.obsm["X_pca"],
     ... )
     >>> datasets = {"pbmc": adata_pbmc, "zebrafish": adata_zebrafish}
-    >>> splits = prepare_and_split_multiple_datasets(
+    >>> splits = prepare_and_split_datasets(
     ...     datasets,
     ...     dm,
     ...     holdout_combinations=False,
@@ -201,13 +198,13 @@ def prepare_and_split_multiple_datasets(
     ... )
     >>> splits["pbmc"]["train"]  # Training data for pbmc
     """
-    grouped_distributions = prepare_multiple_datasets(
+    grouped_distributions = prepare_datasets(
         datasets=datasets,
         data_manager=data_manager,
         verbose=verbose,
     )
 
-    return split_multiple_datasets(
+    return split_datasets(
         grouped_distributions=grouped_distributions,
         holdout_combinations=holdout_combinations,
         split_by=split_by,

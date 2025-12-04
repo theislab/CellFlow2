@@ -9,9 +9,9 @@ from scaleflow.data import (
     AnnDataLocation,
     DataManager,
     GroupedDistribution,
-    prepare_and_split_multiple_datasets,
-    prepare_multiple_datasets,
-    split_multiple_datasets,
+    prepare_and_split_datasets,
+    prepare_datasets,
+    split_datasets,
 )
 
 
@@ -28,11 +28,13 @@ def create_test_adata(n_obs: int = 500, seed: int = 42) -> ad.AnnData:
     genes = ["control"] + [f"gene_{i}" for i in range(n_genes)]
     cell_lines = [f"cell_line_{i}" for i in range(n_cell_lines)]
 
-    obs = pd.DataFrame({
-        "drug": np.random.choice(drugs, n_obs),
-        "gene": np.random.choice(genes, n_obs),
-        "cell_line": np.random.choice(cell_lines, n_obs),
-    })
+    obs = pd.DataFrame(
+        {
+            "drug": np.random.choice(drugs, n_obs),
+            "gene": np.random.choice(genes, n_obs),
+            "cell_line": np.random.choice(cell_lines, n_obs),
+        }
+    )
     obs["control"] = (obs["drug"] == "control") & (obs["gene"] == "control")
 
     for col in ["drug", "gene", "cell_line"]:
@@ -79,12 +81,12 @@ def sample_datasets() -> dict[str, ad.AnnData]:
     }
 
 
-class TestPrepareMultipleDatasets:
-    """Test prepare_multiple_datasets function."""
+class TestPrepareDatasets:
+    """Test prepare_datasets function."""
 
     def test_basic_functionality(self, sample_datasets, sample_data_manager):
         """Test basic preparation of multiple datasets."""
-        result = prepare_multiple_datasets(
+        result = prepare_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
         )
@@ -99,7 +101,7 @@ class TestPrepareMultipleDatasets:
 
     def test_empty_dict(self, sample_data_manager):
         """Test with empty datasets dict."""
-        result = prepare_multiple_datasets(
+        result = prepare_datasets(
             datasets={},
             data_manager=sample_data_manager,
         )
@@ -108,7 +110,7 @@ class TestPrepareMultipleDatasets:
     def test_single_dataset(self, sample_data_manager):
         """Test with single dataset."""
         datasets = {"only_one": create_test_adata()}
-        result = prepare_multiple_datasets(
+        result = prepare_datasets(
             datasets=datasets,
             data_manager=sample_data_manager,
         )
@@ -119,7 +121,7 @@ class TestPrepareMultipleDatasets:
 
     def test_verbose_mode(self, sample_datasets, sample_data_manager, capsys):
         """Test verbose mode prints timing info."""
-        prepare_multiple_datasets(
+        prepare_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
             verbose=True,
@@ -129,17 +131,17 @@ class TestPrepareMultipleDatasets:
         # At minimum it shouldn't error; timing output goes to logger not stdout
 
 
-class TestSplitMultipleDatasets:
-    """Test split_multiple_datasets function."""
+class TestSplitDatasets:
+    """Test split_datasets function."""
 
     def test_basic_functionality(self, sample_datasets, sample_data_manager):
         """Test basic splitting of multiple datasets."""
-        gd_dict = prepare_multiple_datasets(
+        gd_dict = prepare_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
         )
 
-        result = split_multiple_datasets(
+        result = split_datasets(
             grouped_distributions=gd_dict,
             holdout_combinations=False,
             split_by=["drug", "gene"],
@@ -158,12 +160,12 @@ class TestSplitMultipleDatasets:
 
     def test_custom_ratios(self, sample_datasets, sample_data_manager):
         """Test with custom split ratios."""
-        gd_dict = prepare_multiple_datasets(
+        gd_dict = prepare_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
         )
 
-        result = split_multiple_datasets(
+        result = split_datasets(
             grouped_distributions=gd_dict,
             holdout_combinations=False,
             split_by=["drug"],
@@ -178,12 +180,12 @@ class TestSplitMultipleDatasets:
 
     def test_deterministic_with_same_seed(self, sample_datasets, sample_data_manager):
         """Test that same random_state produces same splits."""
-        gd_dict = prepare_multiple_datasets(
+        gd_dict = prepare_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
         )
 
-        result1 = split_multiple_datasets(
+        result1 = split_datasets(
             grouped_distributions=gd_dict,
             holdout_combinations=False,
             split_by=["drug", "gene"],
@@ -191,7 +193,7 @@ class TestSplitMultipleDatasets:
             random_state=42,
         )
 
-        result2 = split_multiple_datasets(
+        result2 = split_datasets(
             grouped_distributions=gd_dict,
             holdout_combinations=False,
             split_by=["drug", "gene"],
@@ -207,12 +209,12 @@ class TestSplitMultipleDatasets:
 
     def test_different_with_different_seed(self, sample_datasets, sample_data_manager):
         """Test that different random_state produces different splits."""
-        gd_dict = prepare_multiple_datasets(
+        gd_dict = prepare_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
         )
 
-        result1 = split_multiple_datasets(
+        result1 = split_datasets(
             grouped_distributions=gd_dict,
             holdout_combinations=False,
             split_by=["drug", "gene"],
@@ -220,7 +222,7 @@ class TestSplitMultipleDatasets:
             random_state=42,
         )
 
-        result2 = split_multiple_datasets(
+        result2 = split_datasets(
             grouped_distributions=gd_dict,
             holdout_combinations=False,
             split_by=["drug", "gene"],
@@ -243,7 +245,7 @@ class TestSplitMultipleDatasets:
 
     def test_empty_dict(self):
         """Test with empty grouped_distributions dict."""
-        result = split_multiple_datasets(
+        result = split_datasets(
             grouped_distributions={},
             holdout_combinations=False,
             split_by=["drug"],
@@ -254,12 +256,12 @@ class TestSplitMultipleDatasets:
 
     def test_force_training_values(self, sample_datasets, sample_data_manager):
         """Test with force_training_values."""
-        gd_dict = prepare_multiple_datasets(
+        gd_dict = prepare_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
         )
 
-        result = split_multiple_datasets(
+        result = split_datasets(
             grouped_distributions=gd_dict,
             holdout_combinations=False,
             split_by=["drug"],
@@ -275,12 +277,12 @@ class TestSplitMultipleDatasets:
                 assert True  # drug_0 is in training
 
 
-class TestPrepareAndSplitMultipleDatasets:
-    """Test prepare_and_split_multiple_datasets convenience function."""
+class TestPrepareAndSplitDatasets:
+    """Test prepare_and_split_datasets convenience function."""
 
     def test_basic_functionality(self, sample_datasets, sample_data_manager):
         """Test the combined prepare and split function."""
-        result = prepare_and_split_multiple_datasets(
+        result = prepare_and_split_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
             holdout_combinations=False,
@@ -301,7 +303,7 @@ class TestPrepareAndSplitMultipleDatasets:
     def test_equivalent_to_separate_calls(self, sample_datasets, sample_data_manager):
         """Test that combined function is equivalent to separate calls."""
         # Combined call
-        result_combined = prepare_and_split_multiple_datasets(
+        result_combined = prepare_and_split_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
             holdout_combinations=False,
@@ -311,11 +313,11 @@ class TestPrepareAndSplitMultipleDatasets:
         )
 
         # Separate calls
-        gd_dict = prepare_multiple_datasets(
+        gd_dict = prepare_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
         )
-        result_separate = split_multiple_datasets(
+        result_separate = split_datasets(
             grouped_distributions=gd_dict,
             holdout_combinations=False,
             split_by=["drug", "gene"],
@@ -330,7 +332,7 @@ class TestPrepareAndSplitMultipleDatasets:
 
     def test_default_ratios(self, sample_datasets, sample_data_manager):
         """Test that default ratios work."""
-        result = prepare_and_split_multiple_datasets(
+        result = prepare_and_split_datasets(
             datasets=sample_datasets,
             data_manager=sample_data_manager,
             holdout_combinations=False,

@@ -13,6 +13,64 @@ class AnnDataLocation:
         # The path is a list of tuples, e.g., [('getattr', 'obsm'), ('getitem', 's')]
         self._path = path if path is not None else []
 
+    @classmethod
+    def from_path(cls, path: list[list[str]]) -> "AnnDataLocation":
+        """Create an AnnDataLocation from a serialized path.
+
+        Parameters
+        ----------
+        path
+            A list of lists, where each inner list is [op_type, op_arg].
+            For example: [["getattr", "obsm"], ["getitem", "X_pca"]]
+
+        Returns
+        -------
+        AnnDataLocation
+            A new AnnDataLocation instance with the given path.
+        """
+        return cls(path=[tuple(op) for op in path])
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "AnnDataLocation":
+        """Create an AnnDataLocation from a JSON string.
+
+        Parameters
+        ----------
+        json_str
+            A JSON string representation of the path.
+
+        Returns
+        -------
+        AnnDataLocation
+            A new AnnDataLocation instance with the given path.
+        """
+        import json
+
+        path = json.loads(json_str)
+        return cls.from_path(path)
+
+    def to_path(self) -> list[list[str]]:
+        """Serialize the path to a list of lists for storage.
+
+        Returns
+        -------
+        list[list[str]]
+            The path as a list of lists, e.g. [["getattr", "obsm"], ["getitem", "X_pca"]]
+        """
+        return [list(op) for op in self._path]
+
+    def to_json(self) -> str:
+        """Serialize the path to a JSON string for storage.
+
+        Returns
+        -------
+        str
+            A JSON string representation of the path.
+        """
+        import json
+
+        return json.dumps(self.to_path())
+
     def __getattr__(self, name):
         """Handles attribute access, like .obs or .X."""
         if name.startswith("__") and name.endswith("__"):

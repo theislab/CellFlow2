@@ -75,12 +75,18 @@ def write_nested_dist_data_threaded(
     max_workers: int = 24,
 ) -> None:
     """Write nested distribution data (dict of dicts) using threading for I/O parallelism.
-    
-    For each distribution, concatenates all arrays into one long array and stores:
-    - Sorted keys in .attrs
-    - Split positions in .attrs to reconstruct individual arrays
-    - Single concatenated array as zarr array
-    
+
+    Uses a CSR-like format: each column is stored as one contiguous array across
+    all distributions, with metadata storing the index pointers (indptr) for each dist_id.
+
+    Structure on disk:
+        group/
+            {col_name_1}: contiguous array (all dists concatenated)
+            {col_name_2}: contiguous array (all dists concatenated)
+            ...
+        group.attrs['dist_ids']: sorted list of distribution IDs
+        group.attrs['indptr_{col_name}']: index pointers for each column
+
     Parameters
     ----------
     group
@@ -94,58 +100,63 @@ def write_nested_dist_data_threaded(
     max_workers
         Number of threads for parallel writing
     """
-    # Prepare concatenated arrays for each distribution
-    concatenated_data = {}
-    
-    for dist_id, col_dict in dist_data.items():
-        # Sort keys for consistent ordering
-        sorted_keys = sorted(col_dict.keys())
-        
-        # Concatenate arrays and track positions
-        arrays_to_concat = [col_dict[key] for key in sorted_keys]
-        concatenated = np.concatenate(arrays_to_concat, axis=0)
-        
-        # Calculate split positions
-        positions = [0]
-        for arr in arrays_to_concat:
-            positions.append(positions[-1] + len(arr))
-        
-        # Store the concatenated array
-        concatenated_data[dist_id] = concatenated
-        
-        # Create subgroup and store metadata
-        dist_group = group.create_group(str(dist_id))
-        dist_group.attrs['keys'] = sorted_keys
-        dist_group.attrs['positions'] = positions
-    
-    # Write all concatenated arrays in parallel using existing function
+    if not dist_data:
+        return
+
+    # Get sorted dist_ids for consistent ordering
+    sorted_dist_ids = sorted(dist_data.keys())
+
+    # Get all column names (assume all dists have the same columns)
+    first_dist = dist_data[sorted_dist_ids[0]]
+    col_names = sorted(first_dist.keys())
+
+    # For each column, concatenate all distributions and compute indptr
+    concatenated_cols = {}
+    indptrs = {}
+
+    for col_name in col_names:
+        arrays_to_concat = []
+        indptr = [0]
+
+        for dist_id in sorted_dist_ids:
+            arr = dist_data[dist_id][col_name]
+            arrays_to_concat.append(arr)
+            indptr.append(indptr[-1] + len(arr))
+
+        concatenated_cols[col_name] = np.concatenate(arrays_to_concat, axis=0)
+        indptrs[col_name] = indptr
+
+    # Store metadata
+    group.attrs["dist_ids"] = sorted_dist_ids
+    for col_name, indptr in indptrs.items():
+        group.attrs[f"indptr_{col_name}"] = indptr
+
+    # Write all concatenated columns in parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
-        
-        for dist_id, concatenated in concatenated_data.items():
-            dist_group = group[str(dist_id)]
+
+        for col_name, concatenated in concatenated_cols.items():
             future = executor.submit(
                 write_single_array,
-                dist_group,
-                "data",
+                group,
+                col_name,
                 concatenated,
                 chunk_size,
                 shard_size,
             )
-            futures[future] = dist_id
-        
+            futures[future] = col_name
+
         # Wait for all writes to complete
         for future in tqdm.tqdm(
-            concurrent.futures.as_completed(futures),
-            total=len(futures),
-            desc=f"Writing {group.name}"
+            concurrent.futures.as_completed(futures), total=len(futures), desc=f"Writing {group.name}"
         ):
             try:
                 future.result()
             except Exception as exc:
-                dist_id = futures[future]
-                print(f"Array write for dist {dist_id} generated an exception: {exc}")
+                col_name = futures[future]
+                print(f"Array write for {col_name} generated an exception: {exc}")
                 raise
+
 
 def write_sharded(
     group: zarr.Group,

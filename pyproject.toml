@@ -90,10 +90,10 @@ optional-dependencies.pp = [
 optional-dependencies.test = [
   "coverage[toml]>=7",
   "pytest",
+  "pytest-benchmark>=5",
   "pytest-cov>=6",
   "pytest-mock>=3.5",
   "pytest-xdist>=3",
-  "pytest-benchmark>=5",
   "scaleflow-tools[embedding]",
   "scaleflow-tools[external]",
   "scaleflow-tools[pp]",
@@ -166,7 +166,7 @@ testpaths = [ "tests" ]
 xfail_strict = true
 addopts = [
   "--import-mode=importlib", # allow using test files with same name
-  "--benchmark-skip",  # skip benchmarks in normal runs
+  "--benchmark-skip",        # skip benchmarks in normal runs
 ]
 markers = [
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
