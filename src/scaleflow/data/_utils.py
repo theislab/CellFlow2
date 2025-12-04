@@ -67,6 +67,86 @@ def write_dist_data_threaded(
                 raise
 
 
+def write_nested_dist_data_threaded(
+    group,
+    dist_data: dict[int, dict[str, np.ndarray]],
+    chunk_size: int,
+    shard_size: int,
+    max_workers: int = 24,
+) -> None:
+    """Write nested distribution data (dict of dicts) using threading for I/O parallelism.
+    
+    For each distribution, concatenates all arrays into one long array and stores:
+    - Sorted keys in .attrs
+    - Split positions in .attrs to reconstruct individual arrays
+    - Single concatenated array as zarr array
+    
+    Parameters
+    ----------
+    group
+        Zarr group to write to
+    dist_data
+        Nested distribution data: {dist_id: {col_name: array}}
+    chunk_size
+        Chunk size for arrays
+    shard_size
+        Shard size for arrays
+    max_workers
+        Number of threads for parallel writing
+    """
+    # Prepare concatenated arrays for each distribution
+    concatenated_data = {}
+    
+    for dist_id, col_dict in dist_data.items():
+        # Sort keys for consistent ordering
+        sorted_keys = sorted(col_dict.keys())
+        
+        # Concatenate arrays and track positions
+        arrays_to_concat = [col_dict[key] for key in sorted_keys]
+        concatenated = np.concatenate(arrays_to_concat, axis=0)
+        
+        # Calculate split positions
+        positions = [0]
+        for arr in arrays_to_concat:
+            positions.append(positions[-1] + len(arr))
+        
+        # Store the concatenated array
+        concatenated_data[dist_id] = concatenated
+        
+        # Create subgroup and store metadata
+        dist_group = group.create_group(str(dist_id))
+        dist_group.attrs['keys'] = sorted_keys
+        dist_group.attrs['positions'] = positions
+    
+    # Write all concatenated arrays in parallel using existing function
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        
+        for dist_id, concatenated in concatenated_data.items():
+            dist_group = group[str(dist_id)]
+            future = executor.submit(
+                write_single_array,
+                dist_group,
+                "data",
+                concatenated,
+                chunk_size,
+                shard_size,
+            )
+            futures[future] = dist_id
+        
+        # Wait for all writes to complete
+        for future in tqdm.tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(futures),
+            desc=f"Writing {group.name}"
+        ):
+            try:
+                future.result()
+            except Exception as exc:
+                dist_id = futures[future]
+                print(f"Array write for dist {dist_id} generated an exception: {exc}")
+                raise
+
 def write_sharded(
     group: zarr.Group,
     data: dict[str, Any],

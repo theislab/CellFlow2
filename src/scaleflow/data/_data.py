@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 import zarr
 
-from scaleflow.data._utils import write_dist_data_threaded, write_sharded
+import anndata as ad
+from scaleflow._types import ArrayLike
+from scaleflow.data._utils import write_sharded, write_dist_data_threaded, write_nested_dist_data_threaded
+
+import pandas as pd
 
 __all__ = [
     "GroupedDistribution",
@@ -61,24 +65,51 @@ class BaseDataMixin:
 
 @dataclass
 class GroupedDistributionData:
-    src_to_tgt_dist_map: dict[int, list[int]]  # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
-    src_data: dict[int, np.ndarray]  # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
-    tgt_data: dict[int, np.ndarray]  # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
-    conditions: dict[int, np.ndarray]  # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
+    src_to_tgt_dist_map: dict[int, list[int]] # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
+    src_data: dict[int, np.ndarray] # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
+    tgt_data: dict[int, np.ndarray] # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
+    conditions: dict[int, np.ndarray] # (n_tgt_dists) → (n_cond_features_1, n_cond_features_2)
+
 
     @classmethod
     def read_zarr(
         cls,
         group: zarr.Group,
     ) -> GroupedDistributionData:
-        """Read the grouped distribution data from a Zarr group."""
+        """
+        Read the grouped distribution data from a Zarr group.
+        """
+        # Read conditions from nested structure with keys and positions stored in attrs
+        conditions = {}
+        if "conditions" in group:
+            cond_group = group["conditions"]
+            # Iterate through each distribution group
+            for dist_id_str in cond_group.keys():
+                dist_id = int(dist_id_str)
+                dist_group = cond_group[dist_id_str]
+
+                # Get metadata from attrs
+                if 'keys' in dist_group.attrs and 'positions' in dist_group.attrs:
+                    sorted_keys = dist_group.attrs['keys']
+                    positions = dist_group.attrs['positions']
+
+                    # Read the concatenated array
+                    concatenated = np.array(dist_group["data"])
+
+                    # Split back into individual arrays
+                    conditions[dist_id] = {}
+                    for i, col_name in enumerate(sorted_keys):
+                        start = positions[i]
+                        end = positions[i + 1]
+                        conditions[dist_id][col_name] = concatenated[start:end]
+
         return cls(
             src_to_tgt_dist_map={
                 int(k): np.array(group["src_to_tgt_dist_map"][k]) for k in group["src_to_tgt_dist_map"].keys()
             },
             src_data={int(k): group["src_data"][k] for k in group["src_data"].keys()},
             tgt_data={int(k): group["tgt_data"][k] for k in group["tgt_data"].keys()},
-            conditions={int(k): np.array(group["conditions"][k]) for k in group["conditions"].keys()},
+            conditions=conditions,
         )
 
     def write_zarr_group(
@@ -98,13 +129,11 @@ class GroupedDistributionData:
             shard_size=shard_size,
             compressors=None,
         )
-        to_write = {
-            "src_data": self.src_data,
-            "tgt_data": self.tgt_data,
-            "conditions": self.conditions,
-        }
-        for key, value in to_write.items():
+
+        # Write src_data and tgt_data using simple writer
+        for key in ["src_data", "tgt_data"]:
             sub_group = data.create_group(key)
+            value = getattr(self, key)
             write_dist_data_threaded(
                 group=sub_group,
                 dist_data=value,
@@ -112,6 +141,17 @@ class GroupedDistributionData:
                 shard_size=shard_size,
                 max_workers=max_workers,
             )
+
+        # Write conditions using nested writer (concatenates arrays per distribution)
+        conditions_group = data.create_group("conditions")
+        write_nested_dist_data_threaded(
+            group=conditions_group,
+            dist_data=self.conditions,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            max_workers=max_workers,
+        )
+
         return None
 
 
@@ -127,6 +167,7 @@ class GroupedDistributionAnnotation:
     tgt_dist_keys: list[str]
     src_dist_keys: list[str]
     dist_flag_key: str
+    condition_structure: dict[str, tuple[int, int]] | None = None  # Maps covariate name to (start, end) indices in flat array
 
     @classmethod
     def read_zarr(
@@ -244,6 +285,7 @@ class GroupedDistribution:
             shard_size=shard_size,
             max_workers=max_workers,
         )
+        print("writing annotation")
         self.annotation.write_zarr_group(
             group=zgroup,
             chunk_size=chunk_size,
@@ -265,113 +307,3 @@ class GroupedDistribution:
             data=data,
         )
 
-    # def split_by_dist_df(self, dist_df: pd.DataFrame, column: str) -> dict[str, GroupedDistributionData]:
-    #     """Split the grouped distribution by the given distribution dataframe."""
-    #     if column not in dist_df.columns:
-    #         raise ValueError(f"Column {column} not found in dist_df.")
-    #     # assert categorical,boolean, or string
-    #     if (
-    #         not pd.api.types.is_categorical_dtype(dist_df[column])
-    #         and not pd.api.types.is_bool_dtype(dist_df[column])
-    #         and not pd.api.types.is_string_dtype(dist_df[column])
-    #     ):
-    #         raise ValueError(f"Column {column} must be categorical, boolean, or string.")
-
-    #     split_values = dist_df[column].unique()
-    #     # get the src_dist_idx and tgt_dist_idx for each value
-    #     split_data = {}
-    #     for value in split_values:
-    #         filtered_df = dist_df.loc[dist_df[column] == value]
-    #         # group by to map src_dist_idx and tgt_dist_idx
-    #         src_tgt_dist_map = (
-    #             filtered_df[["src_dist_idx", "tgt_dist_idx"]]
-    #             .groupby("src_dist_idx")["tgt_dist_idx"]
-    #             .apply(list)
-    #             .to_dict()
-    #         )
-    #         src_data = {int(k): self.data.src_data[k] for k in src_tgt_dist_map.keys()}
-    #         tgt_data = {int(k): self.data.tgt_data[k] for k in src_tgt_dist_map.keys()}
-    #         conditions = {int(k): self.data.conditions[k] for k in src_tgt_dist_map.keys()}
-    #         split_data[value] = GroupedDistributionData(
-    #             src_to_tgt_dist_map=src_tgt_dist_map,
-    #             src_data=src_data,
-    #             tgt_data=tgt_data,
-    #             conditions=conditions,
-    #         )
-    #     return split_data
-
-    # def filter_by_tgt_dist_indices(self, tgt_dist_indices: list[int]) -> GroupedDistribution:
-    #     """
-    #     Create a new GroupedDistribution containing only the specified target distribution indices.
-
-    #     Parameters
-    #     ----------
-    #     tgt_dist_indices : list[int]
-    #         List of target distribution indices to include
-
-    #     Returns
-    #     -------
-    #     GroupedDistribution
-    #         New GroupedDistribution with filtered data
-    #     """
-    #     tgt_dist_indices_set = set(tgt_dist_indices)
-
-    #     # Filter annotation data
-    #     filtered_df = self.annotation.src_tgt_dist_df[
-    #         self.annotation.src_tgt_dist_df["tgt_dist_idx"].isin(tgt_dist_indices_set)
-    #     ].copy()
-
-    #     # Get involved source distributions
-    #     involved_src_dists = set(filtered_df["src_dist_idx"].unique())
-
-    #     # Filter data structures
-    #     filtered_src_to_tgt = {
-    #         src_idx: [tgt_idx for tgt_idx in tgt_list if tgt_idx in tgt_dist_indices_set]
-    #         for src_idx, tgt_list in self.data.src_to_tgt_dist_map.items()
-    #         if src_idx in involved_src_dists
-    #     }
-    #     # Remove empty mappings
-    #     filtered_src_to_tgt = {k: v for k, v in filtered_src_to_tgt.items() if len(v) > 0}
-
-    #     filtered_src_data = {src_idx: self.data.src_data[src_idx] for src_idx in filtered_src_to_tgt.keys()}
-
-    #     filtered_tgt_data = {
-    #         tgt_idx: self.data.tgt_data[tgt_idx] for tgt_idx in tgt_dist_indices if tgt_idx in self.data.tgt_data
-    #     }
-
-    #     filtered_conditions = {
-    #         tgt_idx: self.data.conditions[tgt_idx] for tgt_idx in tgt_dist_indices if tgt_idx in self.data.conditions
-    #     }
-
-    #     filtered_tgt_labels = {
-    #         tgt_idx: self.annotation.tgt_dist_idx_to_labels[tgt_idx]
-    #         for tgt_idx in tgt_dist_indices
-    #         if tgt_idx in self.annotation.tgt_dist_idx_to_labels
-    #     }
-
-    #     filtered_src_labels = {
-    #         src_idx: self.annotation.src_dist_idx_to_labels[src_idx]
-    #         for src_idx in filtered_src_to_tgt.keys()
-    #         if src_idx in self.annotation.src_dist_idx_to_labels
-    #     }
-
-    #     # Note: old_obs_index remains the same as it maps to original data
-
-    #     return GroupedDistribution(
-    #         data=GroupedDistributionData(
-    #             src_to_tgt_dist_map=filtered_src_to_tgt,
-    #             src_data=filtered_src_data,
-    #             tgt_data=filtered_tgt_data,
-    #             conditions=filtered_conditions,
-    #         ),
-    #         annotation=GroupedDistributionAnnotation(
-    #             old_obs_index=self.annotation.old_obs_index,
-    #             src_dist_idx_to_labels=filtered_src_labels,
-    #             tgt_dist_idx_to_labels=filtered_tgt_labels,
-    #             src_tgt_dist_df=filtered_df,
-    #             default_values=self.annotation.default_values,
-    #             src_dist_keys=self.annotation.src_dist_keys,
-    #             tgt_dist_keys=self.annotation.tgt_dist_keys,
-    #             dist_flag_key=self.annotation.dist_flag_key,
-    #         ),
-    #     )
