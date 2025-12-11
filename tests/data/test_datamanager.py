@@ -520,7 +520,7 @@ class TestShuffleReconstructionWithSplit:
         # Store original order information
         adata = adata_test_basic()
         original_index = adata.obs.index.to_numpy().copy()
-        original_X_pca = adata.obsm["X_pca"].copy()
+        _original_X_pca = adata.obsm["X_pca"].copy()
 
         # Shuffle the adata
         np.random.seed(42)

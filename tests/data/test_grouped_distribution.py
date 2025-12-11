@@ -9,6 +9,7 @@ from scaleflow.data._data import (
     GroupedDistributionAnnotation,
     GroupedDistributionData,
 )
+from scaleflow.data._utils import write_nested_dist_data_threaded
 
 
 @pytest.fixture
@@ -127,10 +128,7 @@ def test_grouped_distribution_annotation_io(tmp_path, dummy_grouped_distribution
 
     # Check data_location is preserved
     assert read_annotation.data_location is not None
-    assert (
-        read_annotation.data_location._path
-        == dummy_grouped_distribution_annotation.data_location._path
-    )
+    assert read_annotation.data_location._path == dummy_grouped_distribution_annotation.data_location._path
 
 
 def test_grouped_distribution_io(tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation):
@@ -487,6 +485,80 @@ class TestConditionsWriteRead:
             indptr = cond_group.attrs[f"indptr_{col_name}"]
             assert indptr[0] == 0, "indptr should start with 0"
             assert indptr[-1] == expected_total, "indptr should end with total length"
+
+
+class TestWriteNestedDistDataThreaded:
+    """Direct tests for the threaded nested writer utility."""
+
+    def _read_back(self, group):
+        """Reconstruct nested structure from the on-disk CSR-like layout."""
+        dist_ids = list(group.attrs["dist_ids"])
+        # Column names correspond to stored arrays (skip attrs)
+        col_names = list(group.array_keys())
+
+        reconstructed = {}
+        for dist_idx, dist_id in enumerate(dist_ids):
+            reconstructed[dist_id] = {}
+            for col_name in col_names:
+                indptr = group.attrs[f"indptr_{col_name}"]
+                start, end = indptr[dist_idx], indptr[dist_idx + 1]
+                reconstructed[dist_id][col_name] = group[col_name][start:end]
+        return reconstructed
+
+    def test_basic_write_and_metadata(self, tmp_path):
+        dist_data = {
+            2: {
+                "a": np.array([[1, 2], [3, 4]]),  # 2 rows
+                "b": np.array([10.0, 11.0]),
+            },
+            1: {
+                "a": np.array([[5, 6]]),  # 1 row
+                "b": np.array([12.0]),
+            },
+        }
+
+        store_path = tmp_path / "nested_basic.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        write_nested_dist_data_threaded(
+            group=zgroup,
+            dist_data=dist_data,
+            chunk_size=10,
+            shard_size=100,
+            max_workers=2,
+        )
+
+        # Dist IDs stored sorted
+        assert list(zgroup.attrs["dist_ids"]) == [1, 2]
+
+        # Columns stored once, concatenated
+        assert set(zgroup.array_keys()) == {"a", "b"}
+
+        # Each column has an indptr
+        for col in ("a", "b"):
+            assert f"indptr_{col}" in zgroup.attrs
+
+        reconstructed = self._read_back(zgroup)
+        # Values should match original per dist_id/column
+        for dist_id in dist_data:
+            for col in dist_data[dist_id]:
+                np.testing.assert_array_equal(reconstructed[dist_id][col], dist_data[dist_id][col])
+
+    def test_empty_input_no_side_effects(self, tmp_path):
+        store_path = tmp_path / "nested_empty.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        write_nested_dist_data_threaded(
+            group=zgroup,
+            dist_data={},
+            chunk_size=10,
+            shard_size=100,
+            max_workers=2,
+        )
+
+        # No arrays or attrs created
+        assert list(zgroup.array_keys()) == []
+        assert list(zgroup.attrs.keys()) == []
 
 
 class TestInMemoryAndToMemory:
@@ -921,11 +993,13 @@ class TestAnnotationDataLocation:
             "old_obs_index": np.arange(20),
             "src_dist_idx_to_labels": {0: ["label1", "label2"], 1: ["label3"]},
             "tgt_dist_idx_to_labels": {0: ["tlabel1"], 1: ["tlabel2"], 2: ["tlabel3"]},
-            "src_tgt_dist_df": pd.DataFrame({
-                "src_dist_idx": [0, 0, 1],
-                "tgt_dist_idx": [0, 1, 2],
-                "other_col": ["a", "b", "c"],
-            }),
+            "src_tgt_dist_df": pd.DataFrame(
+                {
+                    "src_dist_idx": [0, 0, 1],
+                    "tgt_dist_idx": [0, 1, 2],
+                    "other_col": ["a", "b", "c"],
+                }
+            ),
             "default_values": {"param1": 1, "param2": "val"},
             "tgt_dist_keys": ["key1", "key2"],
             "src_dist_keys": ["skey1"],
@@ -952,10 +1026,7 @@ class TestAnnotationDataLocation:
         # Read back and verify
         read_gd = GroupedDistribution.read_zarr(str(store_path))
         assert read_gd.annotation.data_location is not None
-        assert (
-            read_gd.annotation.data_location._path
-            == sample_grouped_distribution.annotation.data_location._path
-        )
+        assert read_gd.annotation.data_location._path == sample_grouped_distribution.annotation.data_location._path
 
     def test_data_location_via_prepare_datasets(self, tmp_path, adata_test):
         """Test data_location roundtrip using prepare_datasets convenience function.

@@ -2,10 +2,8 @@ import os
 from typing import Any
 
 import anndata as ad
-
 import numpy as np
 import pandas as pd
-
 from scanpy.readwrite import _check_datafile_present_and_download
 
 from scaleflow._types import PathLike
@@ -142,6 +140,7 @@ def _load_dataset_from_url(
 
 
 def sample_adata():
+    """Create a sample AnnData object for testing."""
     drugs = ["control", "drug_A", "drug_B"]
     genes = ["control", "gene_A", "gene_B"]
     cell_lines = ["cell_line_A", "cell_line_B"]

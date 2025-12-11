@@ -94,7 +94,7 @@ class TestPrepareDatasets:
         assert isinstance(result, dict)
         assert set(result.keys()) == set(sample_datasets.keys())
 
-        for name, gd in result.items():
+        for _name, gd in result.items():
             assert isinstance(gd, GroupedDistribution)
             assert len(gd.data.src_data) > 0
             assert len(gd.data.tgt_data) > 0
@@ -127,7 +127,7 @@ class TestPrepareDatasets:
             verbose=True,
         )
         # Verbose mode should produce some output
-        captured = capsys.readouterr()
+        _captured = capsys.readouterr()
         # At minimum it shouldn't error; timing output goes to logger not stdout
 
 
@@ -152,10 +152,10 @@ class TestSplitDatasets:
         assert isinstance(result, dict)
         assert set(result.keys()) == set(sample_datasets.keys())
 
-        for name, splits in result.items():
+        for _name, splits in result.items():
             assert isinstance(splits, dict)
             assert set(splits.keys()) == {"train", "val", "test"}
-            for split_name, gd in splits.items():
+            for _split_name, gd in splits.items():
                 assert isinstance(gd, GroupedDistribution)
 
     def test_custom_ratios(self, sample_datasets, sample_data_manager):
@@ -173,7 +173,7 @@ class TestSplitDatasets:
             random_state=42,
         )
 
-        for name, splits in result.items():
+        for _name, splits in result.items():
             assert "train" in splits
             assert "val" in splits
             assert "test" in splits
@@ -270,7 +270,7 @@ class TestSplitDatasets:
             random_state=42,
         )
 
-        for name, splits in result.items():
+        for _name, splits in result.items():
             train_df = splits["train"].annotation.src_tgt_dist_df
             # drug_0 should be in training set if it exists in this dataset
             if "drug_0" in train_df["drug"].values:
@@ -294,10 +294,10 @@ class TestPrepareAndSplitDatasets:
         assert isinstance(result, dict)
         assert set(result.keys()) == set(sample_datasets.keys())
 
-        for name, splits in result.items():
+        for _name, splits in result.items():
             assert isinstance(splits, dict)
             assert set(splits.keys()) == {"train", "val", "test"}
-            for split_name, gd in splits.items():
+            for _split_name, gd in splits.items():
                 assert isinstance(gd, GroupedDistribution)
 
     def test_equivalent_to_separate_calls(self, sample_datasets, sample_data_manager):
@@ -341,7 +341,7 @@ class TestPrepareAndSplitDatasets:
         )
 
         assert len(result) == len(sample_datasets)
-        for name, splits in result.items():
+        for _name, splits in result.items():
             assert "train" in splits
             assert "val" in splits
             assert "test" in splits

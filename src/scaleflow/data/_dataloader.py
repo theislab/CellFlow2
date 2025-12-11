@@ -176,7 +176,7 @@ class CombinedSampler(SamplerABC):
         if self._initialized:
             raise ValueError("Sampler already initialized. Call init_sampler() only once.")
 
-        for name, sampler in self._samplers.items():
+        for _name, sampler in self._samplers.items():
             sampler.init_sampler()
 
         self._initialized = True

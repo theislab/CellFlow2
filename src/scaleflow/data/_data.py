@@ -98,7 +98,7 @@ class GroupedDistributionData:
 
             if dist_ids:
                 # Get column names (everything that's not metadata)
-                col_names = [k for k in cond_group.keys()]
+                col_names = list(cond_group.keys())
 
                 # Initialize conditions dict for each dist_id
                 for dist_id in dist_ids:

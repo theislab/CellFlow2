@@ -368,7 +368,7 @@ class TestGroupedDistributionSplitterForceTraining:
         df_with_force = splitter_with_force._split_df()
 
         # Training set should be different
-        train_no_force = set(df_no_force[df_no_force["split"] == "train"]["drug"].unique())
+        _train_no_force = set(df_no_force[df_no_force["split"] == "train"]["drug"].unique())
         train_with_force = set(df_with_force[df_with_force["split"] == "train"]["drug"].unique())
 
         # drug_0 must be in training when forced
@@ -1407,7 +1407,7 @@ class TestGroupedDistributionSplitterSplitData:
                 )
 
             # All targets in the map should exist in tgt_data
-            for src_idx, tgt_idxs in split_gd.data.src_to_tgt_dist_map.items():
+            for _src_idx, tgt_idxs in split_gd.data.src_to_tgt_dist_map.items():
                 for tgt_idx in tgt_idxs:
                     assert tgt_idx in split_gd.data.tgt_data, (
                         f"tgt_idx {tgt_idx} in map but not in tgt_data for {split_name}"
@@ -1517,7 +1517,7 @@ class TestRoundTripAdataToSplitAndBack:
 
         for split_name, split_gd in result.items():
             # For each target distribution, verify labels exist in adata
-            for tgt_idx, tgt_label in split_gd.annotation.tgt_dist_idx_to_labels.items():
+            for _tgt_idx, tgt_label in split_gd.annotation.tgt_dist_idx_to_labels.items():
                 drug_val, gene_val = tgt_label
                 # Find matching rows in adata
                 matching = adata_test.obs[(adata_test.obs["drug"] == drug_val) & (adata_test.obs["gene"] == gene_val)]
