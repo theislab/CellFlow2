@@ -9,7 +9,7 @@ from scaleflow.data._data import (
     GroupedDistributionAnnotation,
     GroupedDistributionData,
 )
-from scaleflow.data._utils import write_nested_dist_data_threaded
+from scaleflow.data._utils import write_nested_dist_data
 
 
 @pytest.fixture
@@ -487,8 +487,279 @@ class TestConditionsWriteRead:
             assert indptr[-1] == expected_total, "indptr should end with total length"
 
 
-class TestWriteNestedDistDataThreaded:
-    """Direct tests for the threaded nested writer utility."""
+class TestConditionsStringEdgeCases:
+    """Tests for condition KEY encoding edge cases.
+
+    These test what happens when condition column names (keys) have weird string values,
+    or when dist_id keys are strings instead of ints.
+    """
+
+    def test_conditions_with_unicode_column_keys(self, tmp_path):
+        """Test conditions where the column key contains Unicode characters."""
+        conditions = {
+            0: {
+                "α-blocker": np.array([1.0, 2.0, 3.0]),
+                "β-agonist": np.array([4.0, 5.0, 6.0]),
+            },
+            1: {
+                "α-blocker": np.array([7.0]),
+                "β-agonist": np.array([8.0]),
+            },
+        }
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1]},
+            src_data={0: np.random.rand(10, 5)},
+            tgt_data={0: np.random.rand(5, 5), 1: np.random.rand(5, 5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_unicode_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for dist_id in conditions:
+            np.testing.assert_array_equal(
+                read_data.conditions[dist_id]["α-blocker"],
+                conditions[dist_id]["α-blocker"],
+            )
+            np.testing.assert_array_equal(
+                read_data.conditions[dist_id]["β-agonist"],
+                conditions[dist_id]["β-agonist"],
+            )
+
+    @pytest.mark.xfail(reason="Slashes in column keys cause zarr path issues", strict=True)
+    def test_conditions_with_special_char_column_keys(self, tmp_path):
+        """Test conditions where the column key contains special characters."""
+        conditions = {
+            0: {
+                "drug+combo/v1": np.array([1.0, 2.0]),
+                "gene:subtype=1": np.array([3.0, 4.0]),
+                "name,with,commas": np.array([5.0, 6.0]),
+            },
+        }
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_data={0: np.random.rand(10, 5)},
+            tgt_data={0: np.random.rand(5, 5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_special_char_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for key in conditions[0]:
+            np.testing.assert_array_equal(
+                read_data.conditions[0][key],
+                conditions[0][key],
+            )
+
+    def test_conditions_with_string_dist_id_keys(self, tmp_path):
+        """Test conditions where dist_id keys are strings instead of ints (e.g. '0' instead of 0)."""
+        conditions = {
+            "0": {"drug_name": np.array([1.0, 2.0])},
+            "1": {"drug_name": np.array([3.0, 4.0])},
+        }
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={"0": ["0", "1"]},
+            src_data={"0": np.random.rand(10, 5)},
+            tgt_data={"0": np.random.rand(5, 5), "1": np.random.rand(5, 5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_string_dist_ids.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        # After read, check that conditions are accessible
+        # dist_ids may be converted to ints or stay as strings
+        assert 0 in read_data.conditions or "0" in read_data.conditions
+
+    def test_conditions_with_cjk_column_keys(self, tmp_path):
+        """Test conditions where the column key contains CJK characters."""
+        conditions = {
+            0: {
+                "日本語": np.array([1.0, 2.0]),
+                "中文": np.array([3.0, 4.0]),
+                "한국어": np.array([5.0, 6.0]),
+            },
+        }
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_data={0: np.random.rand(10, 5)},
+            tgt_data={0: np.random.rand(5, 5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_cjk_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for key in conditions[0]:
+            np.testing.assert_array_equal(
+                read_data.conditions[0][key],
+                conditions[0][key],
+            )
+
+    @pytest.mark.xfail(reason="Empty string column keys cause zarr issues", strict=True)
+    def test_conditions_with_empty_string_column_key(self, tmp_path):
+        """Test conditions where the column key is an empty string."""
+        conditions = {
+            0: {
+                "": np.array([1.0, 2.0]),  # Empty string as key
+                "normal": np.array([3.0, 4.0]),
+            },
+        }
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_data={0: np.random.rand(10, 5)},
+            tgt_data={0: np.random.rand(5, 5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_empty_key.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        np.testing.assert_array_equal(
+            read_data.conditions[0][""],
+            conditions[0][""],
+        )
+
+    def test_conditions_with_numeric_string_column_keys(self, tmp_path):
+        """Test conditions where the column key looks like a number (e.g. '123')."""
+        conditions = {
+            0: {
+                "123": np.array([1.0, 2.0]),
+                "456.78": np.array([3.0, 4.0]),
+                "-999": np.array([5.0, 6.0]),
+            },
+        }
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_data={0: np.random.rand(10, 5)},
+            tgt_data={0: np.random.rand(5, 5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_numeric_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for key in conditions[0]:
+            np.testing.assert_array_equal(
+                read_data.conditions[0][key],
+                conditions[0][key],
+            )
+
+    @pytest.mark.xfail(reason="Empty strings and slashes in column keys cause zarr issues", strict=True)
+    def test_conditions_with_mixed_weird_keys(self, tmp_path):
+        """Test conditions with a mix of different weird column keys."""
+        conditions = {
+            0: {
+                "α-blocker+combo/v1": np.array([1.0]),
+                "日本語:gene": np.array([2.0]),
+                "": np.array([3.0]),
+                "123": np.array([4.0]),
+            },
+            1: {
+                "α-blocker+combo/v1": np.array([5.0, 6.0]),
+                "日本語:gene": np.array([7.0, 8.0]),
+                "": np.array([9.0, 10.0]),
+                "123": np.array([11.0, 12.0]),
+            },
+        }
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1]},
+            src_data={0: np.random.rand(10, 5)},
+            tgt_data={0: np.random.rand(5, 5), 1: np.random.rand(5, 5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_mixed_weird_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for dist_id in conditions:
+            for key in conditions[dist_id]:
+                np.testing.assert_array_equal(
+                    read_data.conditions[dist_id][key],
+                    conditions[dist_id][key],
+                )
+
+    def test_full_roundtrip_with_weird_keys(self, tmp_path):
+        """Test full GroupedDistribution roundtrip with weird condition keys."""
+        src_tgt_dist_df = pd.DataFrame({
+            "src_dist_idx": [0, 0, 1],
+            "tgt_dist_idx": [0, 1, 2],
+            "drug": ["a", "b", "c"],
+            "gene": ["x", "y", "z"],
+        })
+
+        conditions = {
+            0: {"α-blocker": np.array([1.0]), "日本語": np.array([2.0])},
+            1: {"α-blocker": np.array([3.0]), "日本語": np.array([4.0])},
+            2: {"α-blocker": np.array([5.0]), "日本語": np.array([6.0])},
+        }
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1], 1: [2]},
+            src_data={0: np.random.rand(10, 5), 1: np.random.rand(8, 5)},
+            tgt_data={0: np.random.rand(5, 5), 1: np.random.rand(5, 5), 2: np.random.rand(8, 5)},
+            conditions=conditions,
+        )
+
+        annotation = GroupedDistributionAnnotation(
+            old_obs_index=np.arange(20),
+            src_dist_idx_to_labels={0: ["cell_line_0"], 1: ["cell_line_1"]},
+            tgt_dist_idx_to_labels={0: ["tlabel1"], 1: ["tlabel2"], 2: ["tlabel3"]},
+            src_tgt_dist_df=src_tgt_dist_df,
+            default_values={"drug": "control", "gene": "control"},
+            tgt_dist_keys=["drug", "gene"],
+            src_dist_keys=["cell_line"],
+            dist_flag_key="control",
+        )
+
+        gd = GroupedDistribution(data=data, annotation=annotation)
+
+        store_path = tmp_path / "test_full_roundtrip_weird_keys.zarr"
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
+
+        read_gd = GroupedDistribution.read_zarr(str(store_path))
+
+        # Verify conditions survived roundtrip
+        for dist_id in conditions:
+            for key in conditions[dist_id]:
+                np.testing.assert_array_equal(
+                    read_gd.data.conditions[dist_id][key],
+                    conditions[dist_id][key],
+                )
+
+
+
+class TestWriteNestedDistData:
+    """Direct tests for the nested writer utility."""
 
     def _read_back(self, group):
         """Reconstruct nested structure from the on-disk CSR-like layout."""
@@ -520,12 +791,11 @@ class TestWriteNestedDistDataThreaded:
         store_path = tmp_path / "nested_basic.zarr"
         zgroup = zarr.open_group(str(store_path), mode="w")
 
-        write_nested_dist_data_threaded(
+        write_nested_dist_data(
             group=zgroup,
             dist_data=dist_data,
             chunk_size=10,
             shard_size=100,
-            max_workers=2,
         )
 
         # Dist IDs stored sorted
@@ -548,17 +818,119 @@ class TestWriteNestedDistDataThreaded:
         store_path = tmp_path / "nested_empty.zarr"
         zgroup = zarr.open_group(str(store_path), mode="w")
 
-        write_nested_dist_data_threaded(
+        write_nested_dist_data(
             group=zgroup,
             dist_data={},
             chunk_size=10,
             shard_size=100,
-            max_workers=2,
         )
 
         # No arrays or attrs created
         assert list(zgroup.array_keys()) == []
         assert list(zgroup.attrs.keys()) == []
+
+    def test_many_distributions_sequential_write(self, tmp_path):
+        """Test writing many distributions sequentially."""
+        n_dists = 500
+        n_rows_per_dist = 100
+
+        # Create large dataset with many distributions and multiple columns
+        dist_data = {}
+        for i in range(n_dists):
+            dist_data[i] = {
+                "col_a": np.random.rand(n_rows_per_dist),
+                "col_b": np.random.rand(n_rows_per_dist),
+                "col_c": np.random.rand(n_rows_per_dist),
+            }
+
+        store_path = tmp_path / "nested_many_dists.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        # Use settings similar to production (high workers, large shards)
+        chunk_size = 1024
+        shard_size = chunk_size * 4
+
+        write_nested_dist_data(
+            group=zgroup,
+            dist_data=dist_data,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+        )
+
+        # Verify data integrity by reading back
+        reconstructed = self._read_back(zgroup)
+
+        for dist_id in dist_data:
+            for col in dist_data[dist_id]:
+                np.testing.assert_array_almost_equal(
+                    reconstructed[dist_id][col],
+                    dist_data[dist_id][col],
+                )
+
+    def test_large_shards_with_large_data(self, tmp_path):
+        """Test with large shards and large data."""
+        n_dists = 200
+        n_rows_per_dist = 500  # Large data per distribution
+
+        dist_data = {}
+        for i in range(n_dists):
+            dist_data[i] = {
+                "embedding": np.random.rand(n_rows_per_dist, 50),  # 2D array
+            }
+
+        store_path = tmp_path / "nested_large_shards.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        # Settings that might trigger the bug
+        chunk_size = 131072
+        shard_size = chunk_size * 8
+
+        write_nested_dist_data(
+            group=zgroup,
+            dist_data=dist_data,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+        )
+
+        # Verify by reading back
+        reconstructed = self._read_back(zgroup)
+
+        for dist_id in dist_data:
+            np.testing.assert_array_almost_equal(
+                reconstructed[dist_id]["embedding"],
+                dist_data[dist_id]["embedding"],
+            )
+
+    @pytest.mark.parametrize("n_iterations", [10])
+    def test_repeated_writes_stress_test(self, tmp_path, n_iterations):
+        """Stress test with repeated writes."""
+        for iteration in range(n_iterations):
+            n_dists = 100
+            n_rows_per_dist = 200
+
+            dist_data = {}
+            for i in range(n_dists):
+                dist_data[i] = {
+                    "col_a": np.random.rand(n_rows_per_dist),
+                    "col_b": np.random.rand(n_rows_per_dist),
+                }
+
+            store_path = tmp_path / f"nested_stress_{iteration}.zarr"
+            zgroup = zarr.open_group(str(store_path), mode="w")
+
+            chunk_size = 4096
+            shard_size = chunk_size * 4
+
+            write_nested_dist_data(
+                group=zgroup,
+                dist_data=dist_data,
+                chunk_size=chunk_size,
+                shard_size=shard_size,
+            )
+
+            # Quick verify
+            reconstructed = self._read_back(zgroup)
+            assert len(reconstructed) == n_dists
 
 
 class TestInMemoryAndToMemory:

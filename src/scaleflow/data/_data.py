@@ -10,7 +10,7 @@ import pandas as pd
 import zarr
 
 from scaleflow.data._anndata_location import AnnDataLocation
-from scaleflow.data._utils import write_dist_data_threaded, write_nested_dist_data_threaded, write_sharded
+from scaleflow.data._utils import write_dist_data_threaded, write_nested_dist_data, write_sharded
 
 __all__ = [
     "GroupedDistribution",
@@ -199,13 +199,13 @@ class GroupedDistributionData:
             )
 
         # Write conditions using nested writer (concatenates arrays per distribution)
+        # NOTE: Written sequentially to avoid CRC32 race conditions on network filesystems
         conditions_group = data.create_group("conditions")
-        write_nested_dist_data_threaded(
+        write_nested_dist_data(
             group=conditions_group,
             dist_data=self.conditions,
             chunk_size=chunk_size,
             shard_size=shard_size,
-            max_workers=max_workers,
         )
 
         return None

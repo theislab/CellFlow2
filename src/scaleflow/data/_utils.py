@@ -67,14 +67,13 @@ def write_dist_data_threaded(
                 raise
 
 
-def write_nested_dist_data_threaded(
+def write_nested_dist_data(
     group,
     dist_data: dict[int, dict[str, np.ndarray]],
     chunk_size: int,
     shard_size: int,
-    max_workers: int = 24,
 ) -> None:
-    """Write nested distribution data (dict of dicts) using threading for I/O parallelism.
+    """Write nested distribution data (dict of dicts).
 
     Uses a CSR-like format: each column is stored as one contiguous array across
     all distributions, with metadata storing the index pointers (indptr) for each dist_id.
@@ -97,8 +96,6 @@ def write_nested_dist_data_threaded(
         Chunk size for arrays
     shard_size
         Shard size for arrays
-    max_workers
-        Number of threads for parallel writing
     """
     if not dist_data:
         return
@@ -131,31 +128,11 @@ def write_nested_dist_data_threaded(
     for col_name, indptr in indptrs.items():
         group.attrs[f"indptr_{col_name}"] = indptr
 
-    # Write all concatenated columns in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-
-        for col_name, concatenated in concatenated_cols.items():
-            future = executor.submit(
-                write_single_array,
-                group,
-                col_name,
-                concatenated,
-                chunk_size,
-                shard_size,
-            )
-            futures[future] = col_name
-
-        # Wait for all writes to complete
-        for future in tqdm.tqdm(
-            concurrent.futures.as_completed(futures), total=len(futures), desc=f"Writing {group.name}"
-        ):
-            try:
-                future.result()
-            except Exception as exc:
-                col_name = futures[future]
-                print(f"Array write for {col_name} generated an exception: {exc}")
-                raise
+    # Write columns sequentially to avoid race conditions on network filesystems
+    for col_name, concatenated in tqdm.tqdm(
+        concatenated_cols.items(), total=len(concatenated_cols), desc=f"Writing {group.name}"
+    ):
+        write_single_array(group, col_name, concatenated, chunk_size, shard_size)
 
 
 def write_sharded(
