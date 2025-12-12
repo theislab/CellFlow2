@@ -82,17 +82,46 @@ class AnnDataLocation:
 
     @staticmethod
     def _serialize_key(key):
-        """Convert a key to a JSON-serializable format."""
+        """Convert a key to a JSON-serializable format.
+
+        Handles:
+        - slice objects: `[0:10]` -> {"__slice__": [0, 10, None]}
+        - tuples with slices: `[:, :50]` -> {"__tuple__": [{"__slice__": ...}, ...]}
+        """
         if isinstance(key, slice):
             return {"__slice__": [key.start, key.stop, key.step]}
+        if isinstance(key, tuple):
+            # Check if any element is a slice or needs serialization
+            serialized = []
+            for item in key:
+                if isinstance(item, slice):
+                    serialized.append({"__slice__": [item.start, item.stop, item.step]})
+                else:
+                    serialized.append(item)
+            return {"__tuple__": serialized}
         return key
 
     @staticmethod
     def _deserialize_key(key):
-        """Convert a serialized key back to its original form."""
-        if isinstance(key, dict) and "__slice__" in key:
-            start, stop, step = key["__slice__"]
-            return slice(start, stop, step)
+        """Convert a serialized key back to its original form.
+
+        Reconstructs:
+        - slice objects from {"__slice__": [...]}
+        - tuples from {"__tuple__": [...]}
+        """
+        if isinstance(key, dict):
+            if "__slice__" in key:
+                start, stop, step = key["__slice__"]
+                return slice(start, stop, step)
+            if "__tuple__" in key:
+                items = []
+                for item in key["__tuple__"]:
+                    if isinstance(item, dict) and "__slice__" in item:
+                        start, stop, step = item["__slice__"]
+                        items.append(slice(start, stop, step))
+                    else:
+                        items.append(item)
+                return tuple(items)
         return key
 
     def __getitem__(self, key):

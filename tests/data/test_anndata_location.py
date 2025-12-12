@@ -64,6 +64,36 @@ class TestAnnDataLocationSerialization:
         restored = AnnDataLocation.from_json(json_str)
         assert restored.to_json() == json_str
 
+    def test_multidim_slice_serialization(self):
+        """Test that multi-dimensional slicing [:, :50] is serialized correctly."""
+        loc = AnnDataLocation().obsm["X_pca"][:, :50]
+        json_str = loc.to_json()
+        parsed = json.loads(json_str)
+        expected = [
+            ["getattr", "obsm"],
+            ["getitem", "X_pca"],
+            ["getitem", {"__tuple__": [{"__slice__": [None, None, None]}, {"__slice__": [None, 50, None]}]}],
+        ]
+        assert parsed == expected
+
+    def test_multidim_slice_roundtrip(self):
+        """Test that multi-dimensional slices survive JSON roundtrip."""
+        original = AnnDataLocation().obsm["X_pca"][:, :50]
+        json_str = original.to_json()
+        restored = AnnDataLocation.from_json(json_str)
+        assert restored.to_json() == json_str
+
+    def test_mixed_tuple_serialization(self):
+        """Test tuple with mixed int and slice values."""
+        loc = AnnDataLocation().X[0, :50]
+        json_str = loc.to_json()
+        parsed = json.loads(json_str)
+        expected = [
+            ["getattr", "X"],
+            ["getitem", {"__tuple__": [0, {"__slice__": [None, 50, None]}]}],
+        ]
+        assert parsed == expected
+
 
 class TestAnnDataLocationExecution:
     """Tests for executing AnnDataLocation on AnnData objects."""
