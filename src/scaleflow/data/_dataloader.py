@@ -14,6 +14,7 @@ from scaleflow.data._data import (
 __all__ = [
     "CombinedSampler",
     "InMemorySampler",
+    "PredictionSampler",
     "ReservoirSampler",
     "SamplerABC",
     "ValidationSampler",
@@ -230,14 +231,12 @@ class CombinedSampler(SamplerABC):
 
 
 class ValidationSampler:
-    """Sampler for validation that returns ALL data organized by condition key.
+    """Sampler for validation that returns data organized by condition key.
 
-    DANGER: This is vibe-coded
-
-    Unlike training samplers that run infinitely, this returns all conditions
-    once for finite validation. The sample() method returns data structured as:
+    Unlike training samplers that run infinitely, this returns conditions
+    for finite validation. The sample() method returns data structured as:
     {"source": dict, "condition": dict, "target": dict}
-    where each dict maps condition_key → data.
+    where each dict maps condition_key (tuple) → data.
 
     This matches the old CellFlow's ValidationSampler behavior and enables
     efficient per-condition prediction using jax.tree.map.
@@ -246,16 +245,20 @@ class ValidationSampler:
     ----------
     data
         The validation data (GroupedDistribution).
-    n_conditions
-        Optional max number of conditions to return. If None, return all.
+    n_conditions_on_log_iteration
+        Max number of conditions to return during log iteration.
+        If None, return all.
+    n_conditions_on_train_end
+        Max number of conditions to return at end of training.
+        If None, return all.
     seed
-        Random seed for sampling conditions when n_conditions < total.
+        Random seed for sampling conditions.
 
     Examples
     --------
-    >>> val_sampler = ValidationSampler(val_gd, n_conditions=10)
+    >>> val_sampler = ValidationSampler(val_gd, n_conditions_on_log_iteration=10)
     >>> val_sampler.init_sampler()
-    >>> batch = val_sampler.sample()
+    >>> batch = val_sampler.sample(mode="on_log_iteration")
     >>> batch["source"]  # dict mapping condition_key -> source cells
     >>> batch["condition"]  # dict mapping condition_key -> condition embeddings
     >>> batch["target"]  # dict mapping condition_key -> target cells
@@ -264,11 +267,18 @@ class ValidationSampler:
     def __init__(
         self,
         data: GroupedDistribution,
-        n_conditions: int | None = None,
+        n_conditions_on_log_iteration: int | None = None,
+        n_conditions_on_train_end: int | None = None,
         seed: int = 0,
     ) -> None:
         self._data = data
-        self._n_conditions = n_conditions
+        n_total = len(data.data.conditions)
+        self._n_conditions_on_log_iteration = (
+            n_conditions_on_log_iteration if n_conditions_on_log_iteration is not None else n_total
+        )
+        self._n_conditions_on_train_end = (
+            n_conditions_on_train_end if n_conditions_on_train_end is not None else n_total
+        )
         self._rng = np.random.default_rng(seed)
         self._initialized = False
 
@@ -293,35 +303,65 @@ class ValidationSampler:
     def initialized(self) -> bool:
         return self._initialized
 
-    def sample(self) -> dict[str, dict[str, Any]]:
+    def _get_key(self, tgt_idx: int) -> tuple[str, ...]:
+        """Get the condition key for a target distribution index.
+
+        Returns a tuple of labels from tgt_dist_idx_to_labels annotation.
+        """
+        labels = self._data.annotation.tgt_dist_idx_to_labels.get(tgt_idx)
+        if labels is not None:
+            # Convert to tuple of strings
+            if isinstance(labels, (list, np.ndarray)):
+                return tuple(str(lbl) for lbl in labels)
+            return (str(labels),)
+        # Fallback to string index if no labels
+        return (str(tgt_idx),)
+
+    def sample(
+        self, mode: str = "on_log_iteration"
+    ) -> dict[str, dict[tuple[str, ...], Any]]:
         """Sample validation data organized by condition key.
+
+        Parameters
+        ----------
+        mode
+            Sampling mode. Either ``"on_log_iteration"`` or ``"on_train_end"``.
 
         Returns
         -------
         Dictionary with keys "source", "condition", "target", each mapping
-        condition_key (str) -> data arrays.
+        condition_key (tuple) -> data arrays.
         """
         if not self._initialized:
             raise ValueError("Sampler not initialized. Call init_sampler() first.")
 
+        # Determine number of conditions based on mode
+        if mode == "on_log_iteration":
+            n_conditions = self._n_conditions_on_log_iteration
+        elif mode == "on_train_end":
+            n_conditions = self._n_conditions_on_train_end
+        else:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'on_log_iteration' or 'on_train_end'.")
+
         # Get all target distribution indices (conditions)
         all_tgt_indices = list(self._data.data.conditions.keys())
+        n_total = len(all_tgt_indices)
 
-        # Optionally sample a subset of conditions
-        if self._n_conditions is not None and self._n_conditions < len(all_tgt_indices):
+        # Sample a subset of conditions if needed
+        if n_conditions < n_total:
             selected_indices = self._rng.choice(
-                all_tgt_indices, size=self._n_conditions, replace=False
+                all_tgt_indices, size=n_conditions, replace=False
             ).tolist()
         else:
             selected_indices = all_tgt_indices
 
-        source_dict: dict[str, Any] = {}
-        condition_dict: dict[str, dict[str, Any]] = {}
-        target_dict: dict[str, Any] = {}
+        source_dict: dict[tuple[str, ...], Any] = {}
+        condition_dict: dict[tuple[str, ...], dict[str, Any]] = {}
+        target_dict: dict[tuple[str, ...], Any] = {}
 
         for tgt_idx in selected_indices:
-            # Get condition key (use distribution index as string key)
-            cond_key = str(tgt_idx)
+            # Get condition key as tuple
+            cond_key = self._get_key(tgt_idx)
 
             # Get source distribution index for this target
             src_idx = self._tgt_to_src.get(tgt_idx)
@@ -343,6 +383,132 @@ class ValidationSampler:
     def n_conditions(self) -> int:
         """Number of conditions (target distributions)."""
         return len(self._data.data.conditions)
+
+    @property
+    def n_conditions_on_log_iteration(self) -> int:
+        """Number of conditions sampled during log iteration."""
+        return self._n_conditions_on_log_iteration
+
+    @property
+    def n_conditions_on_train_end(self) -> int:
+        """Number of conditions sampled at end of training."""
+        return self._n_conditions_on_train_end
+
+    @property
+    def data(self) -> GroupedDistribution:
+        """The validation data."""
+        return self._data
+
+
+class PredictionSampler:
+    """Sampler for prediction that returns all conditions with source data.
+
+    Unlike ValidationSampler, this returns all conditions without targets,
+    suitable for making predictions on new/unseen perturbations.
+
+    The sample() method returns data structured as:
+    {"source": dict, "condition": dict}
+    where each dict maps condition_key (tuple) → data.
+
+    Parameters
+    ----------
+    data
+        The prediction data (GroupedDistribution).
+
+    Examples
+    --------
+    >>> pred_sampler = PredictionSampler(pred_gd)
+    >>> pred_sampler.init_sampler()
+    >>> batch = pred_sampler.sample()
+    >>> batch["source"]  # dict mapping condition_key -> source cells
+    >>> batch["condition"]  # dict mapping condition_key -> condition embeddings
+    """
+
+    def __init__(
+        self,
+        data: GroupedDistribution,
+    ) -> None:
+        self._data = data
+        self._initialized = False
+
+        # Build reverse mapping: tgt_dist_idx -> src_dist_idx
+        self._tgt_to_src: dict[int, int] = {}
+        for src_idx, tgt_idxs in data.data.src_to_tgt_dist_map.items():
+            for tgt_idx in tgt_idxs:
+                self._tgt_to_src[tgt_idx] = src_idx
+
+    def init_sampler(self) -> None:
+        """Initialize the sampler by loading data into memory if needed."""
+        if self._initialized:
+            raise ValueError("Sampler already initialized. Call init_sampler() only once.")
+
+        # Load data into memory if it's lazy (zarr arrays)
+        if not self._data.data.is_in_memory:
+            self._data.data.to_memory()
+
+        self._initialized = True
+
+    @property
+    def initialized(self) -> bool:
+        return self._initialized
+
+    def _get_key(self, tgt_idx: int) -> tuple[str, ...]:
+        """Get the condition key for a target distribution index.
+
+        Returns a tuple of labels from tgt_dist_idx_to_labels annotation.
+        """
+        labels = self._data.annotation.tgt_dist_idx_to_labels.get(tgt_idx)
+        if labels is not None:
+            # Convert to tuple of strings
+            if isinstance(labels, (list, np.ndarray)):
+                return tuple(str(lbl) for lbl in labels)
+            return (str(labels),)
+        # Fallback to string index if no labels
+        return (str(tgt_idx),)
+
+    def sample(self) -> dict[str, dict[tuple[str, ...], Any]]:
+        """Sample prediction data organized by condition key.
+
+        Returns
+        -------
+        Dictionary with keys "source" and "condition", each mapping
+        condition_key (tuple) -> data arrays.
+        """
+        if not self._initialized:
+            raise ValueError("Sampler not initialized. Call init_sampler() first.")
+
+        # Get all target distribution indices (conditions)
+        all_tgt_indices = list(self._data.data.conditions.keys())
+
+        source_dict: dict[tuple[str, ...], Any] = {}
+        condition_dict: dict[tuple[str, ...], dict[str, Any]] = {}
+
+        for tgt_idx in all_tgt_indices:
+            # Get condition key as tuple
+            cond_key = self._get_key(tgt_idx)
+
+            # Get source distribution index for this target
+            src_idx = self._tgt_to_src.get(tgt_idx)
+            if src_idx is None:
+                continue
+
+            # Get source cells
+            source_dict[cond_key] = self._data.data.src_data[src_idx]
+
+            # Get condition embeddings
+            condition_dict[cond_key] = self._data.data.conditions[tgt_idx]
+
+        return {"source": source_dict, "condition": condition_dict}
+
+    @property
+    def n_conditions(self) -> int:
+        """Number of conditions (target distributions)."""
+        return len(self._data.data.conditions)
+
+    @property
+    def data(self) -> GroupedDistribution:
+        """The prediction data."""
+        return self._data
 
 
 class ReservoirSampler(SamplerABC):
