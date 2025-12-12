@@ -126,13 +126,16 @@ class DataManager:
                     tgt_label = tgt_dist_labels[tgt_dist_idx]
                     cond_dict = {}
 
-                    # Add source distribution conditions
+                    # In this implementaion max_combination_length is always set to 1 
+                    # Add source distribution conditions (with set dimension for max_combination_length)
                     for col, label in zip(self.src_dist_keys, src_label, strict=True):
-                        cond_dict[col] = DataManager._col_to_repr(col_to_repr, col, label)
+                        emb = DataManager._col_to_repr(col_to_repr, col, label)
+                        cond_dict[col] = emb[None, :]  # Shape: (1, emb_dim)
 
-                    # Add target distribution conditions
+                    # Add target distribution conditions (with set dimension for max_combination_length)
                     for col, label in zip(self.tgt_dist_keys, tgt_label, strict=True):
-                        cond_dict[col] = DataManager._col_to_repr(col_to_repr, col, label)
+                        emb = DataManager._col_to_repr(col_to_repr, col, label)
+                        cond_dict[col] = emb[None, :]  # Shape: (1, emb_dim)
 
                     conditions[tgt_dist_idx] = cond_dict
 
