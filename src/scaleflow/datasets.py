@@ -139,7 +139,7 @@ def _load_dataset_from_url(
     return data
 
 
-def sample_adata():
+def sample_adata(n_pca: int = 10) -> ad.AnnData:
     """Create a sample AnnData object for testing."""
     drugs = ["control", "drug_A", "drug_B"]
     genes = ["control", "gene_A", "gene_B"]
@@ -186,7 +186,6 @@ def sample_adata():
 
     n_obs = len(rows)
     n_vars = 20
-    n_pca = 10
 
     obs = pd.DataFrame(rows)
 

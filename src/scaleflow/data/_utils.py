@@ -23,11 +23,14 @@ def _get_size(shape: tuple[int, ...], chunk_size: int, shard_size: int) -> tuple
 def write_single_array(group, key: str, arr: np.ndarray, chunk_size: int, shard_size: int) -> str:
     """Write a single array - designed for threading"""
     chunk_size_used, shard_size_used = _get_size(arr.shape, chunk_size, shard_size)
+    # Handle N-dimensional arrays: chunk/shard over first dim, preserve rest
+    chunks = (chunk_size_used,) + arr.shape[1:] if arr.ndim > 1 else (chunk_size_used,)
+    shards = (shard_size_used,) + arr.shape[1:] if arr.ndim > 1 else (shard_size_used,)
     group.create_array(
         name=key,
         data=arr,
-        chunks=(chunk_size_used, arr.shape[1]) if len(arr.shape) > 1 else (chunk_size_used,),
-        shards=(shard_size_used, arr.shape[1]) if len(arr.shape) > 1 else (shard_size_used,),
+        chunks=chunks,
+        shards=shards,
         compressors=None,
     )
     return key

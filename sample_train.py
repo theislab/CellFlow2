@@ -1,14 +1,14 @@
 import numpy as np
 
 from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution, prepare_datasets, split_datasets
-from scaleflow.data._dataloader import CombinedSampler, InMemorySampler, ReservoirSampler
+from scaleflow.data._dataloader import CombinedSampler, InMemorySampler, ReservoirSampler, ValidationSampler
 from scaleflow.datasets import sample_adata
 from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
 
 # Create sample data
 print("Creating sample data...")
-adata1, adata2, adata3 = sample_adata(), sample_adata(), sample_adata()
+adata1, adata2, adata3 = sample_adata(n_pca=60), sample_adata(n_pca=60), sample_adata(n_pca=60)
 
 # Setup data manager
 adl = AnnDataLocation()
@@ -41,28 +41,40 @@ train_splits = {k:v["train"] for k,v in data.items()}
 val_splits = {k:v["val"] for k,v in data.items()}
 ds1, ds2, ds3 = train_splits["gd1"], train_splits["gd2"], train_splits["gd3"]
 
-# Create samplers
+# Create training samplers
 print("Creating samplers...")
 sampler = CombinedSampler(
     samplers={
         "gd1": ReservoirSampler(
-            gd1, np.random.default_rng(42), batch_size=1024, pool_fraction=0.5, replacement_prob=0.1
+            gd1, np.random.default_rng(42), batch_size=8, pool_fraction=0.5, replacement_prob=0.1
         ),
-        "gd2": InMemorySampler(gd2, np.random.default_rng(43), batch_size=1024),
-        "gd3": InMemorySampler(gd3, np.random.default_rng(44), batch_size=1024),
+        "gd2": InMemorySampler(gd2, np.random.default_rng(43), batch_size=8),
+        "gd3": InMemorySampler(gd3, np.random.default_rng(44), batch_size=8),
     },
     rng=np.random.default_rng(42),
 )
-val_sampler = CombinedSampler(
-    samplers={
-        "gd1": ReservoirSampler(
-            val_splits["gd1"], np.random.default_rng(42), batch_size=1024, pool_fraction=0.5, replacement_prob=0.1
-        ),
-        "gd2": InMemorySampler(val_splits["gd2"], np.random.default_rng(43), batch_size=1024),
-        "gd3": InMemorySampler(val_splits["gd3"], np.random.default_rng(44), batch_size=1024),
-    },
-    rng=np.random.default_rng(42),
-)
+
+# Create validation sampler - returns all conditions at once (finite, not infinite)
+
+val_samplers = {
+    "gd1": ValidationSampler(
+        val_splits["gd1"],  # Use one split for validation
+        n_conditions=5,  # Limit to 5 conditions for faster testing
+        seed=42,
+    ),
+    "gd2": ValidationSampler(
+        val_splits["gd2"],  # Use one split for validation
+        n_conditions=5,  # Limit to 5 conditions for faster testing
+        seed=42,
+    ),
+    "gd3": ValidationSampler(
+        val_splits["gd3"],  # Use one split for validation
+        n_conditions=5,  # Limit to 5 conditions for faster testing
+        seed=42,
+    ),
+}
+
+
 
 # Initialize sampler
 print("Initializing sampler...")
@@ -86,7 +98,7 @@ sf.prepare_model(
 # Train
 print("Training...")
 sf.train(
-    val_dataloader=val_sampler,
+    val_dataloader=val_samplers,
     train_dataloader=sampler,
     num_iterations=10,
 )

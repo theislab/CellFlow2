@@ -16,16 +16,22 @@ __all__ = [
     "InMemorySampler",
     "ReservoirSampler",
     "SamplerABC",
+    "ValidationSampler",
 ]
 
 
 class SamplerABC(ABC):
     @abstractmethod
-    def sample(self) -> dict[str, Any]:
+    def sample(self, *args, **kwargs) -> dict[str, Any]:
         pass
 
     @abstractmethod
-    def init_sampler(self) -> None:
+    def init_sampler(self, *args, **kwargs) -> None:
+        pass
+
+    @property
+    @abstractmethod
+    def initialized(self) -> bool:
         pass
 
 
@@ -74,6 +80,11 @@ class InMemorySampler(SamplerABC):
         self._cached_tgts = {int(k): v for k, v in self._data.data.tgt_data.items()}
 
         self._initialized = True
+        return None
+
+    @property
+    def initialized(self) -> bool:
+        return self._initialized
 
     def sample(self) -> dict[str, Any]:
         """Sample a batch for gene expression (flow matching) task.
@@ -181,6 +192,10 @@ class CombinedSampler(SamplerABC):
 
         self._initialized = True
 
+    @property
+    def initialized(self) -> bool:
+        return self._initialized
+
     def sample(self) -> dict[str, Any]:
         """Sample from one of the underlying samplers based on weights.
 
@@ -212,6 +227,122 @@ class CombinedSampler(SamplerABC):
     def weights(self) -> dict[str, float]:
         """Return dictionary of dataset weights."""
         return {name: float(w) for name, w in zip(self._dataset_names, self._weights, strict=False)}
+
+
+class ValidationSampler:
+    """Sampler for validation that returns ALL data organized by condition key.
+
+    DANGER: This is vibe-coded
+
+    Unlike training samplers that run infinitely, this returns all conditions
+    once for finite validation. The sample() method returns data structured as:
+    {"source": dict, "condition": dict, "target": dict}
+    where each dict maps condition_key → data.
+
+    This matches the old CellFlow's ValidationSampler behavior and enables
+    efficient per-condition prediction using jax.tree.map.
+
+    Parameters
+    ----------
+    data
+        The validation data (GroupedDistribution).
+    n_conditions
+        Optional max number of conditions to return. If None, return all.
+    seed
+        Random seed for sampling conditions when n_conditions < total.
+
+    Examples
+    --------
+    >>> val_sampler = ValidationSampler(val_gd, n_conditions=10)
+    >>> val_sampler.init_sampler()
+    >>> batch = val_sampler.sample()
+    >>> batch["source"]  # dict mapping condition_key -> source cells
+    >>> batch["condition"]  # dict mapping condition_key -> condition embeddings
+    >>> batch["target"]  # dict mapping condition_key -> target cells
+    """
+
+    def __init__(
+        self,
+        data: GroupedDistribution,
+        n_conditions: int | None = None,
+        seed: int = 0,
+    ) -> None:
+        self._data = data
+        self._n_conditions = n_conditions
+        self._rng = np.random.default_rng(seed)
+        self._initialized = False
+
+        # Build reverse mapping: tgt_dist_idx -> src_dist_idx
+        self._tgt_to_src: dict[int, int] = {}
+        for src_idx, tgt_idxs in data.data.src_to_tgt_dist_map.items():
+            for tgt_idx in tgt_idxs:
+                self._tgt_to_src[tgt_idx] = src_idx
+
+    def init_sampler(self) -> None:
+        """Initialize the sampler by loading data into memory if needed."""
+        if self._initialized:
+            raise ValueError("Sampler already initialized. Call init_sampler() only once.")
+
+        # Load data into memory if it's lazy (zarr arrays)
+        if not self._data.data.is_in_memory:
+            self._data.data.to_memory()
+
+        self._initialized = True
+
+    @property
+    def initialized(self) -> bool:
+        return self._initialized
+
+    def sample(self) -> dict[str, dict[str, Any]]:
+        """Sample validation data organized by condition key.
+
+        Returns
+        -------
+        Dictionary with keys "source", "condition", "target", each mapping
+        condition_key (str) -> data arrays.
+        """
+        if not self._initialized:
+            raise ValueError("Sampler not initialized. Call init_sampler() first.")
+
+        # Get all target distribution indices (conditions)
+        all_tgt_indices = list(self._data.data.conditions.keys())
+
+        # Optionally sample a subset of conditions
+        if self._n_conditions is not None and self._n_conditions < len(all_tgt_indices):
+            selected_indices = self._rng.choice(
+                all_tgt_indices, size=self._n_conditions, replace=False
+            ).tolist()
+        else:
+            selected_indices = all_tgt_indices
+
+        source_dict: dict[str, Any] = {}
+        condition_dict: dict[str, dict[str, Any]] = {}
+        target_dict: dict[str, Any] = {}
+
+        for tgt_idx in selected_indices:
+            # Get condition key (use distribution index as string key)
+            cond_key = str(tgt_idx)
+
+            # Get source distribution index for this target
+            src_idx = self._tgt_to_src.get(tgt_idx)
+            if src_idx is None:
+                continue
+
+            # Get source cells
+            source_dict[cond_key] = self._data.data.src_data[src_idx]
+
+            # Get target cells
+            target_dict[cond_key] = self._data.data.tgt_data[tgt_idx]
+
+            # Get condition embeddings
+            condition_dict[cond_key] = self._data.data.conditions[tgt_idx]
+
+        return {"source": source_dict, "condition": condition_dict, "target": target_dict}
+
+    @property
+    def n_conditions(self) -> int:
+        """Number of conditions (target distributions)."""
+        return len(self._data.data.conditions)
 
 
 class ReservoirSampler(SamplerABC):
@@ -281,6 +412,10 @@ class ReservoirSampler(SamplerABC):
         self._init_cache_pool_elements()
         self._initialized = True
         return None
+
+    @property
+    def initialized(self) -> bool:
+        return self._initialized
 
     def _init_src_idx_pool(self) -> None:
         src_indices = np.array(list(self._data.data.src_data.keys()))

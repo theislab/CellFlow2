@@ -80,9 +80,25 @@ class AnnDataLocation:
         new_path = self._path + [("getattr", name)]
         return AnnDataLocation(new_path)
 
+    @staticmethod
+    def _serialize_key(key):
+        """Convert a key to a JSON-serializable format."""
+        if isinstance(key, slice):
+            return {"__slice__": [key.start, key.stop, key.step]}
+        return key
+
+    @staticmethod
+    def _deserialize_key(key):
+        """Convert a serialized key back to its original form."""
+        if isinstance(key, dict) and "__slice__" in key:
+            start, stop, step = key["__slice__"]
+            return slice(start, stop, step)
+        return key
+
     def __getitem__(self, key):
-        """Handles item access, like ['my_key']."""
-        new_path = self._path + [("getitem", key)]
+        """Handles item access, like ['my_key'] or slices like [0:10]."""
+        serializable_key = self._serialize_key(key)
+        new_path = self._path + [("getitem", serializable_key)]
         return AnnDataLocation(new_path)
 
     def __call__(self, adata: "AnnData"):
@@ -93,7 +109,8 @@ class AnnDataLocation:
                 if op_type == "getattr":
                     target = getattr(target, op_arg)
                 elif op_type == "getitem":
-                    target = target[op_arg]
+                    key = self._deserialize_key(op_arg)
+                    target = target[key]
             return target
         except (AttributeError, KeyError) as e:
             raise type(e)(f"Failed to resolve location {self!r} on the AnnData object. Reason: {e}") from e

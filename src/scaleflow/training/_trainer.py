@@ -59,8 +59,13 @@ class CellFlowTrainer:
         dict[str, dict[str, ArrayLike]],
         dict[str, dict[str, ArrayLike]],
     ]:
-        """Compute predictions for validation data."""
-        # TODO: Sample fixed number of conditions to validate on
+        """Compute predictions for validation data.
+        
+        Handles ValidationSampler format: {"source": dict, "condition": dict, "target": dict}
+        where each dict maps condition_key -> data.
+        """
+        from functools import partial
+        import jax
 
         valid_source_data: dict[str, dict[str, ArrayLike]] = {}
         valid_pred_data: dict[str, dict[str, ArrayLike]] = {}
@@ -71,17 +76,38 @@ class CellFlowTrainer:
         val_pbar = tqdm(val_data.items(), desc="Validation", leave=True, total=len(val_data))
         for val_key, vdl in val_pbar:
             val_pbar.set_description(f"Validation ({val_key}) - sampling")
-            batch = vdl.sample(np.random.default_rng(0))
+            # Initialize sampler if not already initialized
+            if hasattr(vdl, '_initialized') and not vdl._initialized:
+                vdl.init_sampler()
+            batch = vdl.sample()  # Samplers use internal rng
 
             val_pbar.set_description(f"Validation ({val_key}) - extracting data")
-            src = batch["src_cell_data"]
-            condition = batch.get("condition", None)
-            true_tgt = batch["tgt_cell_data"]
-            valid_source_data[val_key] = src
+            
+            # Handle ValidationSampler format: {"source": dict, "condition": dict, "target": dict}
+            if "source" in batch and "condition" in batch:
+                src = batch["source"]  # dict mapping cond_key -> source cells
+                condition = batch["condition"]  # dict mapping cond_key -> conditions
+                true_tgt = batch.get("target", {})  # dict mapping cond_key -> target cells
+                valid_source_data[val_key] = src
+                valid_true_data[val_key] = true_tgt
 
-            val_pbar.set_description(f"Validation ({val_key}) - predicting")
-            valid_pred_data[val_key] = self.solver.predict(src, condition=condition, **self.predict_kwargs)
-            valid_true_data[val_key] = true_tgt
+                val_pbar.set_description(f"Validation ({val_key}) - predicting ({len(src)} conditions)")
+                # Use jax.tree.map for efficient per-condition prediction
+                valid_pred_data[val_key] = jax.tree.map(
+                    partial(self.solver.predict, **self.predict_kwargs),
+                    src,
+                    condition,
+                )
+            else:
+                # Handle old format (single batch): {"src_cell_data", "tgt_cell_data", "condition"}
+                src = batch["src_cell_data"]
+                condition = batch.get("condition", None)
+                true_tgt = batch["tgt_cell_data"]
+                valid_source_data[val_key] = src
+                valid_true_data[val_key] = true_tgt
+
+                val_pbar.set_description(f"Validation ({val_key}) - predicting")
+                valid_pred_data[val_key] = self.solver.predict(src, condition=condition, **self.predict_kwargs)
 
             val_pbar.set_description(f"Validation ({val_key}) - done")
 
