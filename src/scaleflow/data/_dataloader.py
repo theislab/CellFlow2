@@ -102,13 +102,10 @@ class InMemorySampler(SamplerABC):
         tgt_idxs = self._rng.choice(tgt_arr.shape[0], size=self.batch_size, replace=True)
         target_batch = tgt_arr[tgt_idxs]
 
-        # Get condition and broadcast to batch size: (set_size, emb_dim) -> (batch_size, set_size, emb_dim)
+        # Get condition
         cond_dict = self._data.data.conditions[target_dist_idx]
-        batch_conditions = {
-            k: np.broadcast_to(v, (self.batch_size, *v.shape)) for k, v in cond_dict.items()
-        }
 
-        return {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": batch_conditions}
+        return {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": cond_dict}
 
 
 class CombinedSampler(SamplerABC):
@@ -303,13 +300,9 @@ class ReservoirSampler(SamplerABC):
         target_batch = self._sample_target_cells(target_dist_idx)
 
         # Conditions are stored as nested dicts: {col_name: array}
-        # Broadcast to batch size: (set_size, emb_dim) -> (batch_size, set_size, emb_dim)
         cond_dict = self._data.data.conditions[target_dist_idx]
-        batch_conditions = {
-            k: np.broadcast_to(v, (self.batch_size, *v.shape)) for k, v in cond_dict.items()
-        }
 
-        res = {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": batch_conditions}
+        res = {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": cond_dict}
         return res
 
     def _load_targets_parallel(self, tgt_indices):
