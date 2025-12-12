@@ -26,13 +26,15 @@ from scaleflow.training._callbacks import BaseCallback
 from scaleflow.training._trainer import CellFlowTrainer
 from scaleflow.utils import match_linear
 
-from scaleflow.data import SamplerABC
-
-__all__ = ["ScaleFlow"]
+__all__ = ["CellFlow"]
 
 
-class ScaleFlow:
-    """CellFlow but with multiple datasets.
+class CellFlow:
+    """CellFlow model for perturbation prediction using Flow Matching and Optimal Transport.
+
+    CellFlow builds upon neural optimal transport estimators extending :cite:`tong:23`,
+    :cite:`pooladian:23`, :cite:`eyring:24`, :cite:`klein:23` which are all based on
+    Flow Matching :cite:`lipman:22`.
 
     Parameters
     ----------
@@ -42,7 +44,8 @@ class ScaleFlow:
             Solver to use for training. Either ``'otfm'``, ``'genot'`` or ``'eqm'``.
     """
 
-    def __init__(self, solver: Literal["otfm", "genot", "eqm"] = "otfm"):
+    def __init__(self, adata: ad.AnnData, solver: Literal["otfm", "genot", "eqm"] = "otfm"):
+        self._adata = adata
         if solver == "otfm":
             self._solver_class = _otfm.OTFlowMatching
             self._vf_class = _velocity_field.ConditionalVelocityField
@@ -68,7 +71,6 @@ class ScaleFlow:
 
     def prepare_data(
         self,
-        adata: ad.AnnData,
         sample_rep: str,
         control_key: str,
         perturbation_covariates: dict[str, Sequence[str]],
@@ -257,8 +259,6 @@ class ScaleFlow:
 
     def prepare_model(
         self,
-        sample_batch: dict[str, Any],
-        max_combination_length: int = 1,
         condition_mode: Literal["deterministic", "stochastic"] = "deterministic",
         regularization: float = 0.0,
         pooling: Literal["mean", "attention_token", "attention_seed"] = "attention_token",
@@ -447,12 +447,11 @@ class ScaleFlow:
         - :attr:`scaleflow.model.CellFlow.trainer` - an instance of the
           :class:`scaleflow.training.CellFlowTrainer`.
         """
+        if self.train_data is None:
+            raise ValueError("Dataloader not initialized. Please call `prepare_data` first.")
 
         # Store the seed for use in train method
         self._seed = seed
-
-        sample_conditions = sample_batch["condition"]
-        self._data_dim = sample_batch["src_cell_data"].shape[-1]
 
         if condition_mode == "stochastic":
             if regularization == 0.0:
@@ -479,7 +478,7 @@ class ScaleFlow:
         if self._solver_class == _eqm.EquilibriumMatching:
             self.vf = self._vf_class(
                 output_dim=self._data_dim,
-                max_combination_length=max_combination_length,
+                max_combination_length=getattr(self.train_data, "max_combination_length", 1),
                 condition_mode=condition_mode,
                 regularization=regularization,
                 condition_embedding_dim=condition_embedding_dim,
@@ -508,7 +507,7 @@ class ScaleFlow:
         else:
             self.vf = self._vf_class(
                 output_dim=self._data_dim,
-                max_combination_length=max_combination_length,
+                max_combination_length=getattr(self.train_data, "max_combination_length", 1),
                 condition_mode=condition_mode,
                 regularization=regularization,
                 condition_embedding_dim=condition_embedding_dim,
@@ -562,6 +561,8 @@ class ScaleFlow:
 
         # Get sample conditions from first target distribution
         # Conditions are stored as nested dicts: {col_name: array}
+        first_tgt_idx = next(iter(self.train_data.data.conditions.keys()))
+        sample_conditions = self.train_data.data.conditions[first_tgt_idx]
 
         if self._solver_class == _otfm.OTFlowMatching:
             self._solver = self._solver_class(
@@ -616,8 +617,6 @@ class ScaleFlow:
         validation_batch_size: int | None = None,
         callbacks: Sequence[BaseCallback] = [],
         monitor_metrics: Sequence[str] = [],
-        train_dataloader: SamplerABC | None = None,
-        val_dataloader: SamplerABC | None = None,
         out_of_core_dataloading: bool = False,
         num_workers: int = 8,
         prefetch_factor: int = 4,
@@ -659,22 +658,37 @@ class ScaleFlow:
         - :attr:`scaleflow.model.CellFlow.dataloader` - the training dataloader.
         - :attr:`scaleflow.model.CellFlow.solver` - the trained solver.
         """
+        if self.train_data is None:
+            raise ValueError("Data not initialized. Please call `prepare_data` first.")
 
         if self.trainer is None:
             raise ValueError("Model not initialized. Please call `prepare_model` first.")
 
+        if out_of_core_dataloading:
+            pass  # TODO
+            # self._dataloader = JaxOutOfCoreTrainSampler(
+            #     data=self.train_data,
+            #     batch_size=batch_size,
+            #     seed=self._seed,
+            #     num_workers=num_workers,
+            #     prefetch_factor=prefetch_factor,
+            # )
+        else:
+            pass
+            # self._dataloader = TrainSampler(data=self.train_data, batch_size=batch_size)
 
-        # validation_dataloaders = {}
-        # for k, v in self._validation_data.items():
-        #     if k != "predict_kwargs":
-        #         val_sampler = InMemorySampler()
-        #         validation_dataloaders[k] = val_sampler
+        validation_dataloaders = {}
+        for k, v in self._validation_data.items():
+            if k != "predict_kwargs":
+                val_sampler = ReservoirSampler(v, batch_size=validation_batch_size or batch_size)
+                val_sampler.init_sampler(np.random.default_rng(0))
+                validation_dataloaders[k] = val_sampler
 
         self._solver = self.trainer.train(
-            dataloader=train_dataloader,
+            dataloader=self._dataloader,
             num_iterations=num_iterations,
             valid_freq=valid_freq,
-            valid_loaders=val_dataloader,
+            valid_loaders=validation_dataloaders,
             callbacks=callbacks,
             monitor_metrics=monitor_metrics,
         )
@@ -776,7 +790,6 @@ class ScaleFlow:
 
     def get_condition_embedding(
         self,
-        adata: ad.AnnData,
         covariate_data: pd.DataFrame,
         rep_dict: dict[str, str] | None = None,
         condition_id_key: str | None = None,
@@ -848,8 +861,8 @@ class ScaleFlow:
             df_var.index.set_names(list(self._dm.perturb_covar_keys), inplace=True)
 
         if key_added is not None:
-            _utils.set_plotting_vars(adata, key=key_added, value=df_mean)
-            _utils.set_plotting_vars(adata, key=key_added, value=df_var)
+            _utils.set_plotting_vars(self.adata, key=key_added, value=df_mean)
+            _utils.set_plotting_vars(self.adata, key=key_added, value=df_var)
 
         return df_mean, df_var
 

@@ -139,12 +139,11 @@ class CellFlowTrainer:
 
         pbar = tqdm(range(num_iterations))
         sampler = dataloader
-        sampler.init_sampler(rng_np)
         for it in pbar:
             rng_jax, rng_step_fn = jax.random.split(rng_jax, 2)
 
             # Sample batch (dataloader controls which task)
-            batch = sampler.sample(rng_np)
+            batch = sampler.sample()
             loss = self.solver.step_fn(rng_step_fn, batch)
 
             # Track losses

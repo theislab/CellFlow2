@@ -1,3 +1,4 @@
-from scaleflow.model._scaleflow import CellFlow
+from scaleflow.model._scaleflow import ScaleFlow
+from scaleflow.model._cellflow import CellFlow
 
-__all__ = ["CellFlow"]
+__all__ = ["ScaleFlow", "CellFlow"]
