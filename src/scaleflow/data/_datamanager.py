@@ -42,19 +42,27 @@ class DataManager:
                     "Representation locations must be a subset of the source and target distribution keys."
                 )
 
-    def prepare_data(
+    def _prepare_annotation(
         self,
         adata: "anndata.AnnData",
         verbose: bool = False,
-    ) -> GroupedDistribution:
+    ) -> tuple[pd.DataFrame, GroupedDistributionAnnotation, dict[int, list[int]], dict[int, tuple], dict[int, tuple]]:
         """
-        Distribution flag key must be a boolean column.
+        Prepare annotation data from the AnnData object.
 
-        The src and tgt distribution keys are recommended to be categorical columns otherwise sorting will be slow.
-        Resets the index of obs. saves new to old index
+        Returns
+        -------
+        obs
+            Processed observation DataFrame with distribution indices.
+        annotation
+            GroupedDistributionAnnotation object containing metadata.
+        src_to_tgt_dist_map
+            Mapping from source distribution indices to target distribution indices.
+        src_dist_labels
+            Mapping from source distribution indices to their labels.
+        tgt_dist_labels
+            Mapping from target distribution indices to their labels.
         """
-        DataManager._verify_rep_keys_exists(self.rep_keys, adata)
-
         src_tgt_dist_keys = [*self.src_dist_keys, *self.tgt_dist_keys]
 
         cols = [self.dist_flag_key, *src_tgt_dist_keys]
@@ -115,6 +123,51 @@ class DataManager:
             zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None), strict=True)
         )
 
+        annotation = GroupedDistributionAnnotation(
+            src_tgt_dist_df=src_tgt_dist_df,
+            old_obs_index=old_index_mapping,
+            tgt_dist_keys=self.tgt_dist_keys,
+            src_dist_keys=self.src_dist_keys,
+            dist_flag_key=self.dist_flag_key,
+            src_dist_idx_to_labels=src_dist_labels,
+            tgt_dist_idx_to_labels=tgt_dist_labels,
+            default_values=default_values,
+            data_location=self.data_location,
+        )
+
+        return obs, annotation, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels
+
+    def _prepare_data(
+        self,
+        adata: "anndata.AnnData",
+        obs: pd.DataFrame,
+        src_to_tgt_dist_map: dict[int, list[int]],
+        src_dist_labels: dict[int, tuple],
+        tgt_dist_labels: dict[int, tuple],
+        verbose: bool = False,
+    ) -> GroupedDistributionData:
+        """
+        Prepare the actual data arrays and conditions from the AnnData object.
+
+        Parameters
+        ----------
+        adata
+            The AnnData object.
+        obs
+            Processed observation DataFrame with distribution indices.
+        src_to_tgt_dist_map
+            Mapping from source distribution indices to target distribution indices.
+        src_dist_labels
+            Mapping from source distribution indices to their labels.
+        tgt_dist_labels
+            Mapping from target distribution indices to their labels.
+        verbose
+            Whether to print timing information.
+
+        Returns
+        -------
+        GroupedDistributionData containing src_data, tgt_data, conditions, and the mapping.
+        """
         # prepare conditions as nested dicts: {tgt_dist_idx: {col_name: array}}
         col_to_repr = {key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()}
 
@@ -126,7 +179,7 @@ class DataManager:
                     tgt_label = tgt_dist_labels[tgt_dist_idx]
                     cond_dict = {}
 
-                    # In this implementaion max_combination_length is always set to 1 
+                    # In this implementaion max_combination_length is always set to 1
                     # Add source distribution conditions (with set dimension for max_combination_length)
                     for col, label in zip(self.src_dist_keys, src_label, strict=True):
                         emb = DataManager._col_to_repr(col_to_repr, col, label)
@@ -150,25 +203,46 @@ class DataManager:
             tgt_data = {int(k): arr[v.to_numpy()] for k, v in tgt_dist_map.items()}
             src_data = {int(k): arr[v.to_numpy()] for k, v in src_dist_map.items()}
 
-        return GroupedDistribution(
-            data=GroupedDistributionData(
-                src_to_tgt_dist_map=src_to_tgt_dist_map,
-                src_data=src_data,
-                tgt_data=tgt_data,
-                conditions=conditions,
-            ),
-            annotation=GroupedDistributionAnnotation(
-                src_tgt_dist_df=src_tgt_dist_df,
-                old_obs_index=old_index_mapping,
-                tgt_dist_keys=self.tgt_dist_keys,
-                src_dist_keys=self.src_dist_keys,
-                dist_flag_key=self.dist_flag_key,
-                src_dist_idx_to_labels=src_dist_labels,
-                tgt_dist_idx_to_labels=tgt_dist_labels,
-                default_values=default_values,
-                data_location=self.data_location,
-            ),
+        return GroupedDistributionData(
+            src_to_tgt_dist_map=src_to_tgt_dist_map,
+            src_data=src_data,
+            tgt_data=tgt_data,
+            conditions=conditions,
         )
+
+    def prepare_data(
+        self,
+        adata: "anndata.AnnData",
+        verbose: bool = False,
+    ) -> GroupedDistribution:
+        """
+        Prepare grouped distribution data from an AnnData object.
+
+        Distribution flag key must be a boolean column.
+        The src and tgt distribution keys are recommended to be categorical columns otherwise sorting will be slow.
+        Resets the index of obs. saves new to old index.
+
+        Parameters
+        ----------
+        adata
+            The AnnData object containing the data.
+        verbose
+            Whether to print timing information.
+
+        Returns
+        -------
+        GroupedDistribution containing data and annotation.
+        """
+        DataManager._verify_rep_keys_exists(self.rep_keys, adata)
+
+        obs, annotation, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels = self._prepare_annotation(
+            adata, verbose=verbose
+        )
+        data = self._prepare_data(
+            adata, obs, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels, verbose=verbose
+        )
+
+        return GroupedDistribution(data=data, annotation=annotation)
 
     @staticmethod
     def _verify_dist_keys(dist_keys: list[str]) -> None:
