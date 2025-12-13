@@ -11,6 +11,7 @@ import zarr
 
 from scaleflow.data._anndata_location import AnnDataLocation
 from scaleflow.data._utils import write_dist_data_threaded, write_nested_dist_data, write_sharded
+from scaleflow.data.io import CSRLabelMapping
 
 __all__ = [
     "GroupedDistribution",
@@ -198,8 +199,6 @@ class GroupedDistributionData:
                 max_workers=max_workers,
             )
 
-        # Write conditions using nested writer (concatenates arrays per distribution)
-        # NOTE: Written sequentially to avoid CRC32 race conditions on network filesystems
         conditions_group = data.create_group("conditions")
         write_nested_dist_data(
             group=conditions_group,
@@ -231,18 +230,24 @@ class GroupedDistributionAnnotation:
         group: zarr.Group,
     ) -> GroupedDistributionAnnotation:
         """Read the grouped distribution annotation from a Zarr group."""
-        elem = ad.io.read_elem(group)
+        # Check if this is the new format (has src_dist_idx_to_labels and tgt_dist_idx_to_labels groups)
+        assert "src_dist_idx_to_labels" in group and "tgt_dist_idx_to_labels" in group
+        # New CSRLabelMapping format - read and convert to dict
+        src_mapping = CSRLabelMapping.read_zarr(group["src_dist_idx_to_labels"])
+        tgt_mapping = CSRLabelMapping.read_zarr(group["tgt_dist_idx_to_labels"])
+
+        # Read other elements from the annotation group
+        elem = ad.io.read_elem(group["metadata"])
 
         # Handle data_location - may not exist in older zarr files
         data_location = None
         if "data_location" in elem and elem["data_location"] is not None:
-            # Convert from stored format (JSON string) back to AnnDataLocation
             data_location = AnnDataLocation.from_json(elem["data_location"])
 
         return cls(
             old_obs_index=elem["old_obs_index"],
-            src_dist_idx_to_labels={int(k): v for k, v in elem["src_dist_idx_to_labels"].items()},
-            tgt_dist_idx_to_labels={int(k): v for k, v in elem["tgt_dist_idx_to_labels"].items()},
+            src_dist_idx_to_labels=src_mapping.to_dict(),
+            tgt_dist_idx_to_labels=tgt_mapping.to_dict(),
             src_tgt_dist_df=elem["src_tgt_dist_df"],
             default_values=elem["default_values"],
             tgt_dist_keys=np.array(elem["tgt_dist_keys"]).tolist(),
@@ -258,10 +263,19 @@ class GroupedDistributionAnnotation:
         shard_size: int,
     ) -> None:
         """Write the grouped distribution annotation to a Zarr group."""
+        annotation_group = group.create_group("annotation")
+
+        # Convert dicts to CSRLabelMapping for efficient storage
+        src_mapping = CSRLabelMapping.from_dict(self.src_dist_idx_to_labels)
+        tgt_mapping = CSRLabelMapping.from_dict(self.tgt_dist_idx_to_labels)
+
+        # Write CSRLabelMapping objects
+        src_mapping.write_zarr(annotation_group, "src_dist_idx_to_labels")
+        tgt_mapping.write_zarr(annotation_group, "tgt_dist_idx_to_labels")
+
+        # Write other metadata using write_sharded
         to_write = {
             "old_obs_index": self.old_obs_index,
-            "src_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.src_dist_idx_to_labels.items()},
-            "tgt_dist_idx_to_labels": {str(k): np.array(v) for k, v in self.tgt_dist_idx_to_labels.items()},
             "src_tgt_dist_df": self.src_tgt_dist_df,
             "default_values": self.default_values,
             "tgt_dist_keys": self.tgt_dist_keys,
@@ -270,61 +284,14 @@ class GroupedDistributionAnnotation:
             "data_location": self.data_location.to_json() if self.data_location is not None else None,
         }
         write_sharded(
-            group=group,
-            name="annotation",
+            group=annotation_group,
+            name="metadata",
             data=to_write,
             chunk_size=chunk_size,
             shard_size=shard_size,
             compressors=None,
         )
         return None
-
-    # def filter_by_tgt_dist_indices(self, tgt_dist_indices: list[int]) -> GroupedDistributionAnnotation:
-    #     """
-    #     Create a new GroupedDistributionAnnotation containing only the specified target distribution indices.
-
-    #     Parameters
-    #     ----------
-    #     tgt_dist_indices : list[int]
-    #         List of target distribution indices to include
-
-    #     Returns
-    #     -------
-    #     GroupedDistributionAnnotation
-    #         New annotation with filtered data
-    #     """
-    #     tgt_dist_indices_set = set(tgt_dist_indices)
-
-    #     # Filter dataframe
-    #     filtered_df = self.src_tgt_dist_df[self.src_tgt_dist_df["tgt_dist_idx"].isin(tgt_dist_indices_set)].copy()
-
-    #     # Get involved source distributions
-    #     involved_src_dists = set(filtered_df["src_dist_idx"].unique())
-
-    #     # Filter labels
-    #     filtered_tgt_labels = {
-    #         tgt_idx: self.tgt_dist_idx_to_labels[tgt_idx]
-    #         for tgt_idx in tgt_dist_indices
-    #         if tgt_idx in self.tgt_dist_idx_to_labels
-    #     }
-
-    #     filtered_src_labels = {
-    #         src_idx: self.src_dist_idx_to_labels[src_idx]
-    #         for src_idx in involved_src_dists
-    #         if src_idx in self.src_dist_idx_to_labels
-    #     }
-
-    #     return GroupedDistributionAnnotation(
-    #         old_obs_index=self.old_obs_index,  # Keep original mapping
-    #         src_dist_idx_to_labels=filtered_src_labels,
-    #         tgt_dist_idx_to_labels=filtered_tgt_labels,
-    #         src_tgt_dist_df=filtered_df,
-    #         default_values=self.default_values,
-    #         src_dist_keys=self.src_dist_keys,
-    #         tgt_dist_keys=self.tgt_dist_keys,
-    #         dist_flag_key=self.dist_flag_key,
-    #     )
-
 
 @dataclass
 class GroupedDistribution:
