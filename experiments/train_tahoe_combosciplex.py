@@ -91,9 +91,9 @@ def train(cfg: DictConfig) -> None:
     sample_batch = sampler.sample()
     print(f"Condition shapes: {[(k, v.shape) for k, v in sample_batch['condition'].items()]}")
 
-    print("Creating model with Equilibrium Matching solver...")
     solver_key = cfg.solver.solver_key
     sf = ScaleFlow(solver=solver_key)
+    print(f"Creating model with {solver_key} solver...")
 
     # Learning rate schedule: warmup + cosine decay
     NUM_ITERATIONS = cfg.training.num_iterations
@@ -110,10 +110,10 @@ def train(cfg: DictConfig) -> None:
         end_value=END_LR,
     )
 
-    print("Preparing model with AdaLN-Zero architecture...")
     decoder_dims = tuple(map(int, ast.literal_eval(cfg.model.decoder_dims)))  # e.g., (2048, 2048, 2048)
     conditioning_key = cfg.model.conditioning_key
     conditioning_kwargs = OmegaConf.to_container(cfg.model.conditioning_kwargs, resolve=True)
+    print(f"Preparing model with {conditioning_key} architecture...")
     sf.prepare_model(
         sample_batch=sample_batch,
         max_combination_length=2,
