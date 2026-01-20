@@ -17,7 +17,7 @@ export HYDRA_FULL_ERROR=1
 python /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/train_tahoe_combosciplex.py \
     --multirun \
     solver=eqm,genot,otfm \
-    training.num_iterations=100000 \
+    training.num_iterations=1000000 \
     +launcher=gpu_normal
 
 

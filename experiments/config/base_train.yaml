@@ -15,8 +15,11 @@ training:
 
 model:
   decoder_dims: "(2048, 2048, 2048)"
-  conditioning_key: adaln_zero
+  conditioning_key: concatenation # "concatenation", "film", "resnet", "adaln_zero"
   conditioning_kwargs:
     num_heads: 8
     mlp_ratio: 4
-  
+  probability_path_kwargs: {constant_noise: 0.1}
+
+match_fn:
+  epsilon: 5

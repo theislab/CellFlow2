@@ -6,16 +6,19 @@ import numpy as np
 import optax
 import scanpy as sc
 import ast
-
+from functools import partial
 from scaleflow.data import AnnDataLocation, DataManager, split_datasets
 from scaleflow.data._dataloader import CombinedSampler, InMemorySampler, ValidationSampler
 from scaleflow.model import ScaleFlow
 from scaleflow.training import LearningRateMonitor, Metrics, WandbLogger
-
+from scaleflow.utils import match_linear
 
 import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+
+import os
+os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'  
 
 # TODO: integrate hydra config for datasets
 @hydra.main(config_path="/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/config", config_name="base_train", version_base=None)
@@ -114,15 +117,20 @@ def train(cfg: DictConfig) -> None:
     conditioning_key = cfg.model.conditioning_key
     conditioning_kwargs = OmegaConf.to_container(cfg.model.conditioning_kwargs, resolve=True)
     print(f"Preparing model with {conditioning_key} architecture...")
+    match_fn = partial(
+        match_linear,
+        epsilon=cfg.match_fn.epsilon, 
+    )
     sf.prepare_model(
         sample_batch=sample_batch,
         max_combination_length=2,
         conditioning=conditioning_key,
         decoder_dims=decoder_dims,  # Must match hidden_dims[-1] for adaln_zero
         conditioning_kwargs=conditioning_kwargs,
-        optimizer=optax.MultiSteps(optax.adam(learning_rate=lr_schedule), 20),
+        match_fn=match_fn,
+        probability_path=cfg.model.probability_path_kwargs,
+        optimizer=optax.MultiSteps(optax.adam(learning_rate=1e-4), 20),
     )
-
     print("Training...")
     sf.train(
         val_dataloader=val_samplers,
@@ -140,6 +148,9 @@ def train(cfg: DictConfig) -> None:
                     "conditioning": conditioning_key,
                     "num_iterations": NUM_ITERATIONS,
                     "batch_size": BATCH_SIZE,
+                    "decoder_dims": decoder_dims,
+                    "noise_level": cfg.model.probability_path_kwargs,
+                    "match_fn_epsilon": cfg.match_fn.epsilon,
                     "adaln_blocks": len(decoder_dims),
                     "peak_lr": PEAK_LR,
                     "end_lr": END_LR,
