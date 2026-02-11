@@ -1,8 +1,12 @@
 # @package _global_
 defaults:
-  - solver: eqm
+  - solver: otfm
+  - conditioning: concatenation # "concatenation", "film", "resnet", "adaln_zero"
   - _self_
 
+
+
+  
 cell_embedding:
   key: X_state
 
@@ -12,14 +16,14 @@ training:
   peak_lr: 1e-3
   end_lr: 1e-5
   batch_size: 256
+  valid_freq: 2000
 
 model:
-  decoder_dims: "(2048, 2048, 2048)"
-  conditioning_key: concatenation # "concatenation", "film", "resnet", "adaln_zero"
-  conditioning_kwargs:
-    num_heads: 8
-    mlp_ratio: 4
+  decoder_dims: [1024]
+  hidden_dims:  [1024]
+  conditioning_key: ${conditioning.conditioning_key}
+  conditioning_kwargs: ${conditioning.conditioning_kwargs}
   probability_path_kwargs: {constant_noise: 0.1}
 
 match_fn:
-  epsilon: 5
+  epsilon: 10

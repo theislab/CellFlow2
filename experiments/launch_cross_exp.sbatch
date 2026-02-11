@@ -16,7 +16,7 @@ conda deactivate
 conda activate pancellflow
 export HYDRA_FULL_ERROR=1
 
-python /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/train_tahoe_combosciplex.py \
+python /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/train_crossdatasets.py \
     solver=otfm \
     conditioning=concatenation \
     match_fn.epsilon=10 \

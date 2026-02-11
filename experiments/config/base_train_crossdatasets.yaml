@@ -1,0 +1,56 @@
+# @package _global_
+defaults:
+  - solver: otfm
+  - conditioning: concatenation # "concatenation", "film", "resnet", "adaln_zero"
+  - _self_
+
+
+datasets:
+  - name: combosciplex
+    path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/combosciplex_se.h5ad
+    seed: 43
+  - name: tahoe
+    path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_a549_w_se.h5ad
+    seed: 44
+  - name: zhao21
+    path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/zhao21.h5ad
+    seed: 45
+  # - name: sciplex3
+  #   path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex3.h5ad
+  #   seed: 46
+  - name: aissa21
+    path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/aissa21.h5ad
+    seed: 47
+  # - name: chang22 # not including for now. almost no valid drug perturbation present -> no smiles provided for gene-inhibitor-drug
+  #   path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/chang22.h5ad
+  #   seed: 48
+  - name: mcfarland2020
+    path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/mcfarland2020.h5ad
+    seed: 49
+  - name: sciplex2
+    path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex2.h5ad
+    seed: 50
+  # - name: sciplex4
+  #   path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex4.h5ad
+    # seed: 51
+  
+cell_embedding:
+  key: X_state
+
+training:
+  num_iterations: 100000
+  warmup_iterations: 2000
+  peak_lr: 1e-3
+  end_lr: 1e-5
+  batch_size: 256
+  valid_freq: 2000
+
+model:
+  decoder_dims: [1024]
+  hidden_dims:  [1024]
+  conditioning_key: ${conditioning.conditioning_key}
+  conditioning_kwargs: ${conditioning.conditioning_kwargs}
+  probability_path_kwargs: {constant_noise: 0.1}
+
+match_fn:
+  epsilon: 10

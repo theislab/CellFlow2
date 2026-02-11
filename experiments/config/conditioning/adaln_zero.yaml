@@ -1,0 +1,4 @@
+conditioning_key: adaln_zero # "concatenation", "film", "resnet", "adaln_zero"
+conditioning_kwargs:
+  num_heads: 8
+  mlp_ratio: 4

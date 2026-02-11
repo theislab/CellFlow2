@@ -16,9 +16,16 @@ export HYDRA_FULL_ERROR=1
 
 python /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/train_tahoe_combosciplex.py \
     --multirun \
-    solver=eqm,genot,otfm \
-    training.num_iterations=1000000 \
+    solver=otfm,eqm \
+    conditioning=concatenation \
+    match_fn.epsilon=10 \
+    model.probability_path_kwargs.constant_noise=0.1 \
+    training.num_iterations=2000000 \
+    'model.decoder_dims="(1024)","(2048)","(2048, 2048, 2048, 2048)"' \
+    'model.hidden_dims="(1024)","(2048)","(2048, 2048, 2048, 2048)"' \
+    training.valid_freq=500 \
     +launcher=gpu_normal
+
 
 
 

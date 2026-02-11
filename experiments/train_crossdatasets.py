@@ -20,19 +20,24 @@ from omegaconf import DictConfig, OmegaConf
 import os
 os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'  
 
+def mark_control(adata):
+    # control = both drugs are control
+    adata.obs["control"] = (adata.obs["drug_0"] == "control") & (adata.obs["drug_1"] == "control")
+    return adata
+
 # TODO: integrate hydra config for datasets
-@hydra.main(config_path="/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/config", config_name="base_train", version_base=None)
+@hydra.main(config_path="/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/config", config_name="base_train_crossdatasets", version_base=None)
 def train(cfg: DictConfig) -> None:
-    adata1 = sc.read_h5ad('/lustre/groups/ml01/projects/big_perturbation/dataset_w_embeddings/combosciplex_with_embeddings.h5ad')
-    adata2 = sc.read_h5ad('/lustre/groups/ml01/projects/big_perturbation/dataset_w_embeddings/tahoe_with_embeddings.h5ad')
-    adata1.obs["control"] = (
-        (adata1.obs["drug_0"] == "control") &
-        (adata1.obs["drug_1"] == "control")
-    )
-    adata2.obs["control"] = (
-        (adata2.obs["drug_0"] == "control") &
-        (adata2.obs["drug_1"] == "control")
-    )
+
+    adatas = {}
+    for dcfg in cfg.datasets:
+        name = str(dcfg.name)
+        path = str(dcfg.path)
+        print(f"Reading {name}: {path}")
+        adata = sc.read_h5ad(path)
+        adata = mark_control(adata)
+        adatas[name] = adata
+
 
     adl = AnnDataLocation()
     data_manager = DataManager(
@@ -48,52 +53,56 @@ def train(cfg: DictConfig) -> None:
     )
 
     print("Preparing data...")
-    gd1 = data_manager.prepare_data(adata1)
-    gd2 = data_manager.prepare_data(adata2)
+    gds = {}
+    for name, adata in adatas.items():
+        gds[name] = data_manager.prepare_data(adata)
 
     print("Splitting datasets...")
     data = split_datasets(
-        {"gd1": gd1, "gd2": gd2},
+        gds,
         split_by=["drug_0", "drug_1"],
         split_key="split",
-        ratios=[0.4, 0.3, 0.3],
-        random_state=42,
-        holdout_combinations=False,
+        ratios=list(cfg.data.split_ratios) if "data" in cfg and "split_ratios" in cfg.data else [0.4, 0.3, 0.3],
+        random_state=int(cfg.data.random_state) if "data" in cfg and "random_state" in cfg.data else 42,
+        holdout_combinations=bool(cfg.data.holdout_combinations) if "data" in cfg and "holdout_combinations" in cfg.data else False,
     )
     train_splits = {k: v["train"] for k, v in data.items()}
-    val_splits = {k: v["val"] for k, v in data.items()}
+    val_splits   = {k: v["val"]   for k, v in data.items()}
+
 
     print("Creating samplers...")
+    batch_size = int(cfg.training.batch_size)
+
+    samplers = {}
+    weights  = {}
+    for dcfg in cfg.datasets:
+        name = str(dcfg.name)
+        seed = int(dcfg.seed) if "seed" in dcfg else 42
+        w    = float(dcfg.weight) if "weight" in dcfg else 1.0
+
+        samplers[name] = InMemorySampler(train_splits[name], np.random.default_rng(seed), batch_size=batch_size)
+        weights[name]  = w
+
     sampler = CombinedSampler(
-        samplers={
-            "gd1": InMemorySampler(gd1, np.random.default_rng(43), batch_size=512),
-            "gd2": InMemorySampler(gd2, np.random.default_rng(44), batch_size=512),
-        },
-        rng=np.random.default_rng(42),
-        weights={"gd1": 0.5, "gd2": 0.5}
+        samplers=samplers,
+        rng=np.random.default_rng(int(cfg.data.random_state) if "data" in cfg and "random_state" in cfg.data else 42),
+        # weights=weights, # Uncomment to use dataset weights in sampling. By default, datasets are sampled uniformly.
     )
 
     val_samplers = {
-        "gd1": ValidationSampler(
-            val_splits["gd1"],
-            n_conditions_on_log_iteration=20,
+        name: ValidationSampler(
+            val_splits[name],
+            n_conditions_on_log_iteration=int(cfg.training.n_conditions_on_log_iteration) if "n_conditions_on_log_iteration" in cfg.training else 20,
             n_conditions_on_train_end=None,
-            seed=42,
-        ),
-        "gd2": ValidationSampler(
-            val_splits["gd2"],
-            n_conditions_on_log_iteration=20,
-            n_conditions_on_train_end=None,
-            seed=42,
-        ),
+            seed=int(cfg.data.random_state) if "data" in cfg and "random_state" in cfg.data else 42,
+        )
+        for name in gds.keys()
     }
 
-    print("Initializing sampler...")
     sampler.init_sampler()
-
-    print("Sampling batch...")
     sample_batch = sampler.sample()
     print(f"Condition shapes: {[(k, v.shape) for k, v in sample_batch['condition'].items()]}")
+
 
     solver_key = cfg.solver.solver_key
     sf = ScaleFlow(solver=solver_key)
@@ -141,7 +150,10 @@ def train(cfg: DictConfig) -> None:
         probability_path=cfg.model.probability_path_kwargs,
         optimizer=optax.MultiSteps(optax.adam(learning_rate=1e-4), 20),
     )
+
+
     print("Training...")
+    dataset_names = [str(dcfg.name) for dcfg in cfg.datasets]
     sf.train(
         val_dataloader=val_samplers,
         train_dataloader=sampler,
@@ -151,7 +163,7 @@ def train(cfg: DictConfig) -> None:
             Metrics(["e_distance", "r_squared"]),
             LearningRateMonitor(schedule=lr_schedule),
             WandbLogger(
-                project="tahoe-combosciplex",
+                project="crossdatasets-unipert-256",
                 out_dir="./wandb_logs",
                 config={
                     "solver": solver_key,
@@ -166,7 +178,7 @@ def train(cfg: DictConfig) -> None:
                     "peak_lr": PEAK_LR,
                     "end_lr": END_LR,
                     "warmup_steps": WARMUP_STEPS,
-                    "datasets": ["combosciplex", "tahoe"],
+                    "datasets": dataset_names,
                 },
                 entity="pancellflow",
             ),
