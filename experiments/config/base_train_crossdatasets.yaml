@@ -24,9 +24,9 @@ datasets:
   # - name: chang22 # not including for now. almost no valid drug perturbation present -> no smiles provided for gene-inhibitor-drug
   #   path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/chang22.h5ad
   #   seed: 48
-  - name: mcfarland2020
-    path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/mcfarland2020.h5ad
-    seed: 49
+  # - name: mcfarland2020 # not including, somehow bugging.
+  #   path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/mcfarland2020.h5ad
+  #   seed: 49
   - name: sciplex2
     path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex2.h5ad
     seed: 50
