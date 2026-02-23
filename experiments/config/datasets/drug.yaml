@@ -1,0 +1,15 @@
+combosciplex:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/combosciplex_se.h5ad
+  seed: 43
+tahoe:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_a549_w_se.h5ad
+  seed: 44
+zhao21:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/zhao21.h5ad
+  seed: 45
+aissa21:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/aissa21.h5ad
+  seed: 47
+sciplex2:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex2.h5ad
+  seed: 50

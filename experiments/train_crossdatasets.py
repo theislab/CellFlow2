@@ -29,10 +29,19 @@ def mark_control(adata):
 @hydra.main(config_path="/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/config", config_name="base_train_crossdatasets", version_base=None)
 def train(cfg: DictConfig) -> None:
 
+    datasets_to_use = []
+    for name in cfg.selected_datasets:
+        info = cfg.datasets[name]
+        datasets_to_use.append({
+            "name": name,
+            "path": info.path,
+            "seed": info.seed,
+        })
+
     adatas = {}
-    for dcfg in cfg.datasets:
-        name = str(dcfg.name)
-        path = str(dcfg.path)
+    for dcfg in datasets_to_use:
+        name = str(dcfg["name"])         
+        path = str(dcfg["path"])
         print(f"Reading {name}: {path}")
         adata = sc.read_h5ad(path)
         adata = mark_control(adata)
@@ -75,10 +84,10 @@ def train(cfg: DictConfig) -> None:
 
     samplers = {}
     weights  = {}
-    for dcfg in cfg.datasets:
-        name = str(dcfg.name)
-        seed = int(dcfg.seed) if "seed" in dcfg else 42
-        w    = float(dcfg.weight) if "weight" in dcfg else 1.0
+    for dcfg in datasets_to_use:
+        name = str(dcfg["name"])
+        seed = int(dcfg["seed"]) if "seed" in dcfg.keys() else 42
+        w    = float(dcfg["weight"]) if "weight" in dcfg.keys() else 1.0
 
         samplers[name] = InMemorySampler(train_splits[name], np.random.default_rng(seed), batch_size=batch_size)
         weights[name]  = w
@@ -153,7 +162,7 @@ def train(cfg: DictConfig) -> None:
 
 
     print("Training...")
-    dataset_names = [str(dcfg.name) for dcfg in cfg.datasets]
+    dataset_names = [str(dcfg["name"]) for dcfg in datasets_to_use]
     sf.train(
         val_dataloader=val_samplers,
         train_dataloader=sampler,

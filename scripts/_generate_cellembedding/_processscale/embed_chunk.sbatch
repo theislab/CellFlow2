@@ -7,16 +7,16 @@
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=300G
 #SBATCH --partition=gpu_p
-#SBATCH --qos=gpu_priority
+#SBATCH --qos=gpu_normal
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="a100_80gb|h100_80gb"
-#SBATCH --time=12:00:00
-#SBATCH --array=0-1%5
-N_CHUNKS=2
+#SBATCH --time=24:00:00
+#SBATCH --array=0-199%10
+N_CHUNKS=200
 
 
-IN_H5AD="/lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/tahoe_a549.h5ad"
-EMB_DIR="/lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/tahoe_a549/test/chunks_emb"
+IN_H5AD="/lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/tahoe.h5ad"
+EMB_DIR="/lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/tahoe/test"
 mkdir -p "$EMB_DIR"
 
 CHECKPOINT="/lustre/groups/ml01/workspace/xiaotong.fu/data/reconstruction/sup/SE-600M/se600m_epoch16.ckpt"

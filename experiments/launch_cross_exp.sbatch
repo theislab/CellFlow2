@@ -18,6 +18,7 @@ export HYDRA_FULL_ERROR=1
 
 python /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/train_crossdatasets.py \
     solver=otfm \
+    selected_datasets=[combosciplex,sciplex2,tahoe] \
     conditioning=concatenation \
     match_fn.epsilon=10 \
     model.probability_path_kwargs.constant_noise=0.1 \
