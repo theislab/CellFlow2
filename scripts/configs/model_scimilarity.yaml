@@ -1,0 +1,8 @@
+# scimilarity
+# Genes are set automatically from adata.var_names (HGNC symbols expected)
+model: scimilarity
+
+checkpoint: /lustre/groups/ml01/workspace/xiaotong.fu/data/reconstruction/sup/scimilarity/model_v1.1
+
+obsm_key: X_scimilarity
+encode_batch_size: 64

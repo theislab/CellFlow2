@@ -2,6 +2,7 @@
 import argparse
 from pathlib import Path
 import numpy as np
+import scipy.sparse as sp
 import anndata as ad
 
 import os
@@ -56,9 +57,13 @@ def main():
     rep = emb_model.get_latent_representation(processing_adata)
     rep = np.asarray(rep, dtype=np.float32)
 
-    # adata.obsm[args.obsm_key] = rep
     print(f"{prefix}Writing: {out_path}")
-    ad.AnnData(obsm={args.obsm_key: rep}).write_h5ad(out_path, compression="gzip")
+    adata_out = ad.AnnData(
+        X=sp.csr_matrix((rep.shape[0], 1)),
+        obsm={args.obsm_key: rep},
+    )
+    adata_out.var_names = ["_placeholder"]
+    adata_out.write_h5ad(out_path, compression="gzip")
     print(f"{prefix}Done.")
 
 if __name__ == "__main__":

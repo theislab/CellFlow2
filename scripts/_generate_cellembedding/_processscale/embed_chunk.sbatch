@@ -4,14 +4,14 @@
 #SBATCH -e %x_%A_err.err
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=20
-#SBATCH --mem=300G
+#SBATCH --cpus-per-task=10
+#SBATCH --mem=400G
 #SBATCH --partition=gpu_p
-#SBATCH --qos=gpu_normal
+#SBATCH --qos=gpu_priority
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="a100_80gb|h100_80gb"
-#SBATCH --time=24:00:00
-#SBATCH --array=0-199%10
+#SBATCH --time=12:00:00
+#SBATCH --array=3
 N_CHUNKS=200
 
 

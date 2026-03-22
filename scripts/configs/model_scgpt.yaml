@@ -1,0 +1,8 @@
+# scGPT
+# Genes are set automatically from adata.var_names (HGNC symbols expected)
+model: scgpt
+
+checkpoint: /lustre/groups/ml01/workspace/xiaotong.fu/data/reconstruction/sup/scgpt
+
+obsm_key: X_scgpt
+encode_batch_size: 64

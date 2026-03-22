@@ -10,25 +10,26 @@
 #SBATCH --mem 200G
 #SBATCH --time 24:00:00
 #SBATCH --nice=0
-#SBATCH --array=0-1
+#SBATCH --array=0,1
 #SBATCH --constraint=h100_80gb
 
-export TMPDIR=/lustre/groups/ml01/workspace/alejandro.tejada/tmp
-mkdir -p $TMPDIR
-
-source /home/icb/alejandro.tejada/.bashrc
-micromamba activate scaleflow
+source $HOME/.bashrc
+conda deactivate
+conda activate pancellflow
+export HYDRA_FULL_ERROR=1
 
 RANDOM_EMB_FLAGS=("" "--random-embeddings")
 RUN_NAMES=("real_embeddings_film_otfm_unipert" "random_embeddings_film_otfm_unipert")
 
 FLAG=${RANDOM_EMB_FLAGS[$SLURM_ARRAY_TASK_ID]}
 RUN=${RUN_NAMES[$SLURM_ARRAY_TASK_ID]}
-OUTDIR=/lustre/groups/ml01/workspace/alejandro.tejada/train_and_predict/${RUN}
+OUTDIR=/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/outputs/train_and_predict/${RUN}
 
-python -u /home/icb/alejandro.tejada/CellFlow2/experiments/train_and_predict.py \
+python -u /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/train_and_predict.py \
     --condition-fraction 0.5 \
     --cell-fraction 0.5 \
     --experiment-type condition_subsampling \
     --output-dir ${OUTDIR} \
+    --save-all-checkpoints \
+    --checkpoint-steps "1,4,8,16,32" \
     ${FLAG}

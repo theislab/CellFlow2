@@ -1,0 +1,9 @@
+# scConcept (Corpus-30M)
+# NOTE: scConcept expects Ensembl IDs (var_names or var["ensembl_id"]).
+#       Make sure your h5ad has Ensembl gene IDs before running.
+model: scconcept
+
+checkpoint: /lustre/groups/ml01/workspace/xiaotong.fu/data/reconstruction/sup/scconcept/Corpus-30M
+
+obsm_key: X_scconcept
+encode_batch_size: 64

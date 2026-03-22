@@ -165,3 +165,7 @@ scripts/logs
 *.err
 *.out
 data/*
+
+# sanity check
+analysis/
+bin/

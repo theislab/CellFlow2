@@ -1,0 +1,8 @@
+# State Embedding (SE-600M)
+model: se
+
+checkpoint:    /lustre/groups/ml01/workspace/xiaotong.fu/data/reconstruction/sup/SE-600M/se600m_epoch16.ckpt
+protein_embeds: /lustre/groups/ml01/workspace/xiaotong.fu/data/reconstruction/sup/SE-600M/protein_embeddings.pt
+
+obsm_key: X_se
+encode_batch_size: 256

@@ -8,9 +8,6 @@ Options:
     --cell-fraction F: Target total cells as fraction of original dataset
     --condition-fraction F: Keep F of conditions (randomly selected)
     --output-dir DIR: Directory to store model checkpoint and predictions
-    --save-all-checkpoints: Save params at every validation step to output_dir/checkpoints/
-    --checkpoint-steps: Comma-separated validation step indices (e.g. 3,5,7) for running
-        predictions and writing mmd_along_training.csv (MMD and control MMD per condition).
 
 The two subsampling options combine: first select conditions, then resample cells to
 reach the target count (upsampling with replacement if needed).
@@ -32,10 +29,10 @@ import scanpy as sc
 
 from scaleflow.data import AnnDataLocation, DataManager, split_datasets
 from scaleflow.data._dataloader import InMemorySampler, ValidationSampler
-from scaleflow.metrics._metrics import compute_scalar_mmd
 from scaleflow.model import ScaleFlow
-from scaleflow.training import LoggingCallback, Metrics, WandbLogger
-from lightning.pytorch.callbacks.early_stopping import EarlyStopping
+from scaleflow.training import EarlyStopping, LoggingCallback, Metrics, WandbLogger
+
+
 # ---------------------------------------------------------------------------
 # ModelCheckpoint callback
 # ---------------------------------------------------------------------------
@@ -82,105 +79,6 @@ class ModelCheckpoint(LoggingCallback):
                 cloudpickle.dump(self.solver.vf_state_inference.params, f)
             if self.verbose:
                 print(f"ModelCheckpoint: saved best params ({self.monitor}={current:.6f})")
-        return dict_to_log
-
-    def on_train_end(self, dict_to_log: dict[str, Any]) -> dict[str, Any]:
-        return dict_to_log
-
-
-class SaveAllCheckpoints(LoggingCallback):
-    """Save solver params at every validation step to a checkpoints directory.
-
-    Validation step index (1-based) is computed as (iteration - 1) // valid_freq.
-    """
-
-    def __init__(self, solver, save_dir: str, valid_freq: int, verbose: bool = False):
-        self.solver = solver
-        self.save_dir = save_dir
-        self.valid_freq = valid_freq
-        self.verbose = verbose
-        self._step_iterations: list[tuple[int, int]] = []  # (step, iteration)
-
-    def on_train_begin(self) -> None:
-        self._step_iterations = []
-        os.makedirs(self.save_dir, exist_ok=True)
-
-    def on_log_iteration(self, dict_to_log: dict[str, Any], iteration: int = None, **_: Any) -> dict[str, Any]:
-        if iteration is None:
-            return dict_to_log
-        step = (iteration - 1) // self.valid_freq
-        if step < 1:
-            return dict_to_log
-        os.makedirs(self.save_dir, exist_ok=True)
-        save_path = os.path.join(self.save_dir, f"checkpoint_{step:04d}.pkl")
-        with open(save_path, "wb") as f:
-            cloudpickle.dump(self.solver.vf_state_inference.params, f)
-        self._step_iterations.append((step, iteration))
-        if self.verbose:
-            print(f"SaveAllCheckpoints: saved step {step} (iteration {iteration}) to {save_path}")
-        return dict_to_log
-
-    def on_train_end(self, dict_to_log: dict[str, Any]) -> dict[str, Any]:
-        return dict_to_log
-
-
-class ValidationLossCallback(LoggingCallback):
-    """Compute flow matching / EqM loss on held-out validation batches.
-
-    Samples batches from a training-format sampler wrapping validation data,
-    evaluates the loss using inference params (no gradient update), and logs
-    the mean loss as ``val_loss``.
-
-    Parameters
-    ----------
-    solver
-        The solver instance (OTFM or EqM).
-    val_sampler
-        An InMemorySampler wrapping held-out validation data.
-    n_batches
-        Number of batches to average over at each validation step.
-    seed
-        JAX random seed for sampling.
-    """
-
-    def __init__(self, solver, val_sampler, n_batches=10, seed=42):
-        self.solver = solver
-        self.val_sampler = val_sampler
-        self.n_batches = n_batches
-        self._rng = jax.random.PRNGKey(seed)
-
-    def on_train_begin(self) -> None:
-        if not self.val_sampler.initialized:
-            self.val_sampler.init_sampler()
-
-    def on_log_iteration(self, dict_to_log: dict[str, Any], iteration: int = None, **_: Any) -> dict[str, Any]:
-        losses = []
-        for _ in range(self.n_batches):
-            self._rng, rng_step = jax.random.split(self._rng)
-            batch = self.val_sampler.sample()
-            src, tgt = batch["src_cell_data"], batch["tgt_cell_data"]
-            condition = batch.get("condition")
-            rng_resample, rng_time, rng_step_fn, rng_noise = jax.random.split(rng_step, 4)
-            n = src.shape[0]
-            encoder_noise = jax.random.normal(rng_noise, (n, self.solver.vf.condition_embedding_dim))
-
-            if self.solver.match_fn is not None:
-                from ott.solvers import utils as ott_utils
-                tmat = self.solver.match_fn(src, tgt)
-                src_ixs, tgt_ixs = ott_utils.sample_joint(rng_resample, tmat)
-                src, tgt = src[src_ixs], tgt[tgt_ixs]
-
-            if hasattr(self.solver, "time_sampler"):
-                t_or_g = self.solver.time_sampler(rng_time, n)
-            else:
-                t_or_g = self.solver.gamma_sampler(rng_time, n).squeeze()
-
-            _, loss = self.solver.vf_step_fn(
-                rng_step_fn, self.solver.vf_state_inference,
-                t_or_g, src, tgt, condition, encoder_noise,
-            )
-            losses.append(float(loss))
-        dict_to_log["val_loss"] = float(np.mean(losses))
         return dict_to_log
 
     def on_train_end(self, dict_to_log: dict[str, Any]) -> dict[str, Any]:
@@ -272,10 +170,6 @@ parser.add_argument("--solver", type=str, default="otfm")
 parser.add_argument("--obsm-key", type=str, default="X_state")
 parser.add_argument("--output-dir", type=str, default="./outputs/predictions",
                     help="Directory to store model checkpoint and predictions")
-parser.add_argument("--save-all-checkpoints", action="store_true",
-                    help="Save params at every validation step to output_dir/checkpoints/")
-parser.add_argument("--checkpoint-steps", type=str, default="3,5,7,9,11",
-                    help="Comma-separated validation step indices (1-based) for running predictions (e.g. 3,5,7)")
 args = parser.parse_args()
 
 os.makedirs(args.output_dir, exist_ok=True)
@@ -382,12 +276,6 @@ sampler = InMemorySampler(train_split, np.random.default_rng(args.seed), batch_s
 val_sampler_name = "tahoe_val_holdout" if adata_holdout is not None else "tahoe_val"
 val_gd = gd_holdout if adata_holdout is not None else val_split
 val_samplers = {
-    "tahoe_train": ValidationSampler(
-        train_split,
-        n_conditions_on_log_iteration=30,
-        n_conditions_on_train_end=None,
-        seed=args.seed + 1,
-    ),
     val_sampler_name: ValidationSampler(
         val_gd,
         n_conditions_on_log_iteration=None,
@@ -395,8 +283,6 @@ val_samplers = {
         seed=args.seed,
     ),
 }
-
-val_loss_sampler = InMemorySampler(val_gd, np.random.default_rng(args.seed + 2), batch_size=512)
 
 print("Initializing sampler...")
 sampler.init_sampler()
@@ -409,7 +295,7 @@ solver = args.solver
 print(f"Creating model with {solver} solver...")
 sf = ScaleFlow(solver=solver)
 
-NUM_ITERATIONS = 300000
+NUM_ITERATIONS = 500000
 WARMUP_STEPS = 2000
 PEAK_LR = 1e-3
 END_LR = 1e-5
@@ -470,18 +356,11 @@ print("=" * 30 + "\n")
 
 print("Training...")
 
-VALID_FREQ = 5000
 monitor_metric = f"{val_sampler_name}_mmd_mean"
 print(f"Early stopping enabled: monitoring '{monitor_metric}' with patience=10")
 
 callbacks = [
     Metrics(["e_distance", "r_squared", "mmd"]),
-    ValidationLossCallback(
-        solver=sf._solver,
-        val_sampler=val_loss_sampler,
-        n_batches=10,
-        seed=args.seed,
-    ),
     WandbLogger(
         project="perturbation-scaling",
         out_dir="./wandb_logs",
@@ -535,19 +414,14 @@ callbacks = [
         verbose=True,
     ),
 ]
-if args.save_all_checkpoints:
-    ckpt_dir = os.path.join(args.output_dir, "checkpoints")
-    callbacks.append(
-        SaveAllCheckpoints(sf._solver, ckpt_dir, valid_freq=VALID_FREQ, verbose=True)
-    )
 
 sf.train(
     val_dataloader=val_samplers,
     train_dataloader=sampler,
     num_iterations=NUM_ITERATIONS,
-    valid_freq=VALID_FREQ,
+    valid_freq=5000,
     callbacks=callbacks,
-    monitor_metrics=["loss", "val_loss"],
+    monitor_metrics=["loss"],
 )
 
 # ---------------------------------------------------------------------------
@@ -641,52 +515,3 @@ adata_pred.uns["obsm_key"] = args.obsm_key
 print(f"Saving predictions to {predictions_path}...")
 adata_pred.write_h5ad(predictions_path)
 print(f"Done! AnnData with {adata_pred.n_obs} cells across {len(src_dict)} conditions saved to {predictions_path}")
-
-# ---------------------------------------------------------------------------
-# Predictions at selected checkpoints and MMD / control MMD along training
-# ---------------------------------------------------------------------------
-if args.save_all_checkpoints:
-    ckpt_dir = os.path.join(args.output_dir, "checkpoints")
-    try:
-        step_list = [int(s.strip()) for s in args.checkpoint_steps.split(",") if s.strip()]
-    except ValueError:
-        step_list = [3, 5, 7, 9, 11]
-    mmd_rows: list[dict[str, Any]] = []
-    for step in step_list:
-        ckpt_file = os.path.join(ckpt_dir, f"checkpoint_{step:04d}.pkl")
-        if not os.path.isfile(ckpt_file):
-            print(f"Checkpoint {ckpt_file} not found, skipping step {step}")
-            continue
-        print(f"Loading checkpoint step {step} from {ckpt_file}...")
-        with open(ckpt_file, "rb") as f:
-            step_params = cloudpickle.load(f)
-        sf._solver.vf_state = sf._solver.vf_state.replace(params=step_params)
-        sf._solver.vf_state_inference = sf._solver.vf_state_inference.replace(params=step_params)
-        for key in src_dict:
-            drug, cell_line = key.split("|", 1)
-            pred = np.array(sf._solver.predict(src_dict[key], condition_dict[key]))
-            tgt = np.array(target_dict[key])
-            src_arr = np.array(src_dict[key])
-            mmd_pred_tgt = float(compute_scalar_mmd(pred, tgt))
-            mmd_pred_control = float(compute_scalar_mmd(pred, src_arr))
-            in_train = drug in train_drugs
-            mmd_rows.append({
-                "checkpoint_step": step,
-                "drug_0": drug,
-                "cell_line": cell_line,
-                "condition_key": key,
-                "mmd_pred_tgt": mmd_pred_tgt,
-                "mmd_pred_control": mmd_pred_control,
-                "in_train": in_train,
-            })
-    if mmd_rows:
-        mmd_df = pd.DataFrame(mmd_rows)
-        mmd_path = os.path.join(args.output_dir, "mmd_along_training.csv")
-        mmd_df.to_csv(mmd_path, index=False)
-        print(f"Saved MMD along training to {mmd_path} ({len(mmd_df)} rows)")
-    # Restore best params for any later use
-    print("Restoring best params...")
-    with open(ckpt_path, "rb") as f:
-        best_params = cloudpickle.load(f)
-    sf._solver.vf_state = sf._solver.vf_state.replace(params=best_params)
-    sf._solver.vf_state_inference = sf._solver.vf_state_inference.replace(params=best_params)
