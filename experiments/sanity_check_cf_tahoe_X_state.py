@@ -215,6 +215,10 @@ def main():
                         help="Constant noise sigma on the flow path")
     parser.add_argument("--lr", type=float, default=5e-5,
                         help="Adam learning rate")
+    parser.add_argument("--hidden-dim", type=int, default=2048,
+                        help="Width of each hidden layer in the velocity field trunk (3 layers)")
+    parser.add_argument("--decoder-dim", type=int, default=4096,
+                        help="Width of each decoder layer in the velocity field (3 layers)")
     args = parser.parse_args()
 
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -395,10 +399,10 @@ def main():
         time_freqs=1024,
         time_encoder_dims=[1024, 1024, 1024],
         time_encoder_dropout=0.0,
-        hidden_dims=[2048, 2048, 2048],
+        hidden_dims=[args.hidden_dim] * 3,
         hidden_dropout=0.0,
         conditioning="concatenation",
-        decoder_dims=[4096, 4096, 4096],
+        decoder_dims=[args.decoder_dim] * 3,
         vf_act_fn=nn.silu,
         vf_kwargs=None,
         probability_path={"constant_noise": args.noise},
@@ -439,8 +443,8 @@ def main():
                 "condition_encoding": "onehot",
                 "num_iterations": args.num_iterations,
                 "batch_size": args.batch_size,
-                "hidden_dims": [2048, 2048, 2048],
-                "decoder_dims": [4096, 4096, 4096],
+                "hidden_dims": [args.hidden_dim] * 3,
+                "decoder_dims": [args.decoder_dim] * 3,
                 "cond_output_dropout": 0.9,
                 "seed": args.seed,
                 "total_params": total_params,

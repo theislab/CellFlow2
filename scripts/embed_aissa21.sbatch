@@ -8,13 +8,13 @@
 #SBATCH -e %x_%A_err.err
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=10
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=300G
 #SBATCH --partition=gpu_p
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="a100_80gb|h100_80gb"
 #SBATCH --qos=gpu_normal
-#SBATCH --time=8:00:00
+#SBATCH --time=3:00:00
 
 DATA_DIR="/lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert"
 SCRIPTS_DIR="/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/scripts"
@@ -24,8 +24,8 @@ INPUT_FILES=(
   # "${DATA_DIR}/tahoe_a549_w_se.h5ad"
   # "${DATA_DIR}/tahoe_hop62.h5ad"
   # "${DATA_DIR}/tahoe_aspc_1.h5ad"
-  "${DATA_DIR}/tahoe_panc_1.h5ad"
-  # "${DATA_DIR}/tahoe_sw48.h5ad"
+  # "${DATA_DIR}/tahoe_panc_1.h5ad"
+  "${DATA_DIR}/tahoe_sw48.h5ad"
   # "${DATA_DIR}/tahoe_h4.h5ad"
   # "${DATA_DIR}/tahoe_snu_1.h5ad"
   # "${DATA_DIR}/chang22.h5ad"
@@ -46,27 +46,27 @@ for IN_H5AD in "${INPUT_FILES[@]}"; do
   echo "######################################################################"
 
 
-  # # ── 1. scConcept ──
-  # echo "========== [${BASENAME}] scConcept =========="
-  # conda deactivate
-  # conda activate scconcept_env
+  # ── 1. scConcept ──
+  echo "========== [${BASENAME}] scConcept =========="
+  conda deactivate
+  conda activate scconcept_env
 
-  # python -u "${EMBED_PY}" \
-  #   --in     "${IN_H5AD}" \
-  #   --out    "${OUT_H5AD}" \
-  #   --config "${SCRIPTS_DIR}/configs/model_scconcept.yaml"
-  # echo "scConcept done (exit $?)"
+  python -u "${EMBED_PY}" \
+    --in     "${IN_H5AD}" \
+    --out    "${OUT_H5AD}" \
+    --config "${SCRIPTS_DIR}/configs/model_scconcept.yaml"
+  echo "scConcept done (exit $?)"
 
-  # # ── 2. scGPT ──
-  # echo "========== [${BASENAME}] scGPT =========="
-  # conda deactivate
-  # conda activate scgpt
+  # ── 2. scGPT ──
+  echo "========== [${BASENAME}] scGPT =========="
+  conda deactivate
+  conda activate scgpt
 
-  # python -u "${EMBED_PY}" \
-  #   --in     "${OUT_H5AD}" \
-  #   --out    "${OUT_H5AD}" \
-  #   --config "${SCRIPTS_DIR}/configs/model_scgpt.yaml"
-  # echo "scGPT done (exit $?)"
+  python -u "${EMBED_PY}" \
+    --in     "${OUT_H5AD}" \
+    --out    "${OUT_H5AD}" \
+    --config "${SCRIPTS_DIR}/configs/model_scgpt.yaml"
+  echo "scGPT done (exit $?)"
 
   # ── 3. scimilarity ──
   echo "========== [${BASENAME}] scimilarity =========="

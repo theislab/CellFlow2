@@ -11,20 +11,11 @@ control_aliases:
   - nan
 
 datasets:
-  # - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_hop62.h5ad
-  #   drug_col: drug
-
-  # - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_aspc_1.h5ad
-  #   drug_col: drug
-
-  - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_panc_1.h5ad
+  - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_sw48_w_emb.h5ad
     drug_col: drug
 
-  - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_sw48.h5ad
+  - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_h4_w_emb.h5ad
     drug_col: drug
 
-  - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_h4.h5ad
-    drug_col: drug
-
-  - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_snu_1.h5ad
+  - path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_snu_1_w_emb.h5ad
     drug_col: drug

@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH -c 1
 #SBATCH --mem 200G
-#SBATCH --time 12:00:00
+#SBATCH --time 24:00:00
 #SBATCH --nice=0
 #SBATCH --constraint=h100_80gb
 
@@ -19,8 +19,7 @@ conda activate pancellflow
 SCRIPT=/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/sanity_check_cf_tahoe_X_state.py
 BASE=/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/outputs/sanity_check_cf/tahoe/X_state
 
-# Number of extra drugs to add beyond the top-10 validation drugs
-N_EXTRA=80
+# Full grid: 3 capacity levels x 2 drug sets (+80 strong / +80 weak) = 6 runs
 
 COMMON_ARGS=(
     --top-n-drugs 10
@@ -33,17 +32,33 @@ COMMON_ARGS=(
     --seed 42
 )
 
-echo "=== top10 + ${N_EXTRA} strong extras ==="
+echo "=== capacity 2x + 80 strong: hidden=4096 decoder=8192 ==="
 python -u "${SCRIPT}" \
-    --output-dir "${BASE}/top10_strong${N_EXTRA}" \
+    --output-dir "${BASE}/top10_capacity2x_strong80" \
     "${COMMON_ARGS[@]}" \
-    --extra-n-drugs ${N_EXTRA} --extra-drug-type strong
+    --hidden-dim 4096 --decoder-dim 8192 \
+    --extra-n-drugs 80 --extra-drug-type strong
 
-echo "=== top10 + ${N_EXTRA} weak extras ==="
+echo "=== capacity 2x + 80 weak: hidden=4096 decoder=8192 ==="
 python -u "${SCRIPT}" \
-    --output-dir "${BASE}/top10_weak${N_EXTRA}" \
+    --output-dir "${BASE}/top10_capacity2x_weak80" \
     "${COMMON_ARGS[@]}" \
-    --extra-n-drugs ${N_EXTRA} --extra-drug-type weak
+    --hidden-dim 4096 --decoder-dim 8192 \
+    --extra-n-drugs 80 --extra-drug-type weak
+
+echo "=== capacity 4x + 80 strong: hidden=8192 decoder=16384 ==="
+python -u "${SCRIPT}" \
+    --output-dir "${BASE}/top10_capacity4x_strong80" \
+    "${COMMON_ARGS[@]}" \
+    --hidden-dim 8192 --decoder-dim 16384 \
+    --extra-n-drugs 80 --extra-drug-type strong
+
+echo "=== capacity 4x + 80 weak: hidden=8192 decoder=16384 ==="
+python -u "${SCRIPT}" \
+    --output-dir "${BASE}/top10_capacity4x_weak80" \
+    "${COMMON_ARGS[@]}" \
+    --hidden-dim 8192 --decoder-dim 16384 \
+    --extra-n-drugs 80 --extra-drug-type weak
 
 echo "Done."
 
