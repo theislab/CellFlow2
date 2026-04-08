@@ -10,6 +10,7 @@ selected_datasets: [combosciplex]
 
 cell_embedding:
   key: X_state
+  cell_line_rep_key: cell_line_ccle_embeddings
 
 training:
   num_iterations: 100000

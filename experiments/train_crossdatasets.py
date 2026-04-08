@@ -54,7 +54,7 @@ def train(cfg: DictConfig) -> None:
         src_dist_keys=["cell_line"],
         tgt_dist_keys=["drug_0", "drug_1"],
         rep_keys={
-            "cell_line": "cell_line_embeddings",
+            "cell_line": cfg.cell_embedding.cell_line_rep_key,
             "drug_0": "drug_0_embeddings",
             "drug_1": "drug_1_embeddings",
         },
@@ -119,7 +119,7 @@ def train(cfg: DictConfig) -> None:
 
     # Learning rate schedule: warmup + cosine decay
     NUM_ITERATIONS = cfg.training.num_iterations
-    WARMUP_STEPS = cfg.training.warmup_iterations
+    WARMUP_STEPS = min(cfg.training.warmup_iterations, NUM_ITERATIONS - 1)
     PEAK_LR = cfg.training.peak_lr
     END_LR = cfg.training.end_lr
     BATCH_SIZE = cfg.training.batch_size
