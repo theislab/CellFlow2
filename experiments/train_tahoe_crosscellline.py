@@ -248,7 +248,7 @@ def main():
         src_dist_keys=["cell_line"],
         tgt_dist_keys=["drug_0"],
         rep_keys={
-            "cell_line": "cell_line_embeddings",
+            "cell_line": "cell_line_ccle_embeddings",
             "drug_0": "drug_0_embeddings",
         },
         data_location=adl.obsm["X_state"],
