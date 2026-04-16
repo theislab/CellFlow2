@@ -10,22 +10,21 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=300G
-#SBATCH --partition=gpu_p
-#SBATCH --gres=gpu:1
-#SBATCH --constraint="a100_80gb|h100_80gb"
-#SBATCH --qos=gpu_normal
-#SBATCH --time=3:00:00
+#SBATCH --partition=cpu_p
+#SBATCH --qos=cpu_normal
+#SBATCH --time=8:00:00
 
 DATA_DIR="/lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert"
 SCRIPTS_DIR="/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/scripts"
 EMBED_PY="${SCRIPTS_DIR}/embed_adata.py"
 
 INPUT_FILES=(
+  "${DATA_DIR}/combosciplex_se.h5ad"
   # "${DATA_DIR}/tahoe_a549_w_se.h5ad"
   # "${DATA_DIR}/tahoe_hop62.h5ad"
   # "${DATA_DIR}/tahoe_aspc_1.h5ad"
   # "${DATA_DIR}/tahoe_panc_1.h5ad"
-  "${DATA_DIR}/tahoe_sw48.h5ad"
+  # "${DATA_DIR}/tahoe_sw48.h5ad"
   # "${DATA_DIR}/tahoe_h4.h5ad"
   # "${DATA_DIR}/tahoe_snu_1.h5ad"
   # "${DATA_DIR}/chang22.h5ad"

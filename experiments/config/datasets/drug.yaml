@@ -37,3 +37,9 @@ sciplex3:
 sciplex4:
   path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex4_w_emb.h5ad
   seed: 52
+# chang22:
+#   path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/chang22_w_emb.h5ad
+#   seed: 53
+# mcfarland2020:
+#   path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/mcfarland2020_w_emb.h5ad
+#   seed: 54

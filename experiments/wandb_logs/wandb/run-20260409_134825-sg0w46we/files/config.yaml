@@ -1,0 +1,137 @@
+_wandb:
+    value:
+        cli_version: 0.24.0
+        e:
+            0kzsf1rndxhe9olm5cx0zf7s0bc7igdo:
+                args:
+                    - solver=otfm
+                    - selected_datasets=[mcfarland2020]
+                    - +datasets.mcfarland2020.path=/lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/mcfarland2020_w_emb.h5ad
+                    - +datasets.mcfarland2020.seed=54
+                    - conditioning=concatenation
+                    - cell_embedding.cell_line_rep_key=cell_line_ccle_embeddings
+                    - match_fn.epsilon=10
+                    - model.probability_path_kwargs.constant_noise=0.1
+                    - training.num_iterations=2
+                    - training.valid_freq=2
+                    - training.n_conditions_on_log_iteration=null
+                    - model.decoder_dims=[1024]
+                    - model.hidden_dims=[1024]
+                    - training.batch_size=256
+                cpu_count: 16
+                cpu_count_logical: 32
+                disk:
+                    /:
+                        total: "107307073536"
+                        used: "11345072128"
+                email: fxiaotong743@gmail.com
+                executable: /home/icb/xiaotong.fu/miniconda3/envs/pancellflow/bin/python
+                git:
+                    commit: 0045306406ba0eb398ed49e1e63f7928687954c9
+                    remote: https://github.com/theislab/CellFlow2
+                host: cpusrv77.scidom.de
+                memory:
+                    total: "809627766784"
+                os: Linux-5.14.0-570.25.1.el9_6.x86_64-x86_64-with-glibc2.34
+                program: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments/train_crossdatasets.py
+                python: CPython 3.12.12
+                root: ./wandb_logs
+                slurm:
+                    cluster_name: algoritam
+                    conf: /etc/slurm/slurm.conf
+                    cpus_on_node: "2"
+                    gtids: "0"
+                    job_account: icb
+                    job_cpus_per_node: "2"
+                    job_end_time: "1775742187"
+                    job_gid: "20000"
+                    job_id: "35038488"
+                    job_name: test_ccle_cross
+                    job_nodelist: cpusrv77
+                    job_num_nodes: "1"
+                    job_partition: cpu_p
+                    job_qos: cpu_normal
+                    job_start_time: "1775734987"
+                    job_uid: "1000372"
+                    job_user: xiaotong.fu
+                    jobid: "35038488"
+                    localid: "0"
+                    mem_per_node: "204800"
+                    nnodes: "1"
+                    nodeid: "0"
+                    nodelist: cpusrv77
+                    oom_kill_step: "0"
+                    prio_process: "0"
+                    procid: "0"
+                    submit_dir: /ictstr01/groups/ml01/workspace/xiaotong.fu/pancellflow/CellFlow2/experiments
+                    submit_host: hpc-build01.scidom.de
+                    task_pid: "1650797"
+                    tasks_per_node: "2"
+                    topology_addr: cpusrv77
+                    topology_addr_pattern: node
+                startedAt: "2026-04-09T11:48:25.030407Z"
+                writerId: 0kzsf1rndxhe9olm5cx0zf7s0bc7igdo
+        m: []
+        python_version: 3.12.12
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 12
+                - 41
+                - 45
+                - 49
+                - 50
+                - 53
+                - 54
+                - 105
+            "2":
+                - 1
+                - 5
+                - 11
+                - 12
+                - 41
+                - 45
+                - 49
+                - 50
+                - 53
+                - 54
+                - 105
+            "3":
+                - 16
+            "4": 3.12.12
+            "5": 0.24.0
+            "6": 4.57.3
+            "12": 0.24.0
+            "13": linux-x86_64
+adaln_blocks:
+    value: 1
+batch_size:
+    value: 256
+conditioning:
+    value: concatenation
+datasets:
+    value:
+        - mcfarland2020
+decoder_dims:
+    value:
+        - 1024
+end_lr:
+    value: 1e-05
+hidden_dims:
+    value:
+        - 1024
+match_fn_epsilon:
+    value: 10
+noise_level:
+    value:
+        constant_noise: 0.1
+num_iterations:
+    value: 2
+peak_lr:
+    value: 0.001
+solver:
+    value: otfm
+warmup_steps:
+    value: 1

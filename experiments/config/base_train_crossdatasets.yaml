@@ -19,6 +19,7 @@ training:
   end_lr: 1e-5
   batch_size: 256
   valid_freq: 2000
+  n_conditions_on_log_iteration: null
 
 model:
   decoder_dims: [1024]

@@ -1,0 +1,11 @@
+- solver=otfm
+- selected_datasets=[sciplex2,sciplex3,sciplex4]
+- conditioning=concatenation
+- cell_embedding.cell_line_rep_key=cell_line_ccle_embeddings
+- match_fn.epsilon=10
+- model.probability_path_kwargs.constant_noise=0.1
+- training.num_iterations=10
+- training.valid_freq=5
+- model.decoder_dims=[1024]
+- model.hidden_dims=[1024]
+- training.batch_size=256

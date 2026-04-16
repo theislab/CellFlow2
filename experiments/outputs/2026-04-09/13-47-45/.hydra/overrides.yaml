@@ -1,0 +1,14 @@
+- solver=otfm
+- selected_datasets=[mcfarland2020]
+- +datasets.mcfarland2020.path=/lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/mcfarland2020_w_emb.h5ad
+- +datasets.mcfarland2020.seed=54
+- conditioning=concatenation
+- cell_embedding.cell_line_rep_key=cell_line_ccle_embeddings
+- match_fn.epsilon=10
+- model.probability_path_kwargs.constant_noise=0.1
+- training.num_iterations=2
+- training.valid_freq=2
+- training.n_conditions_on_log_iteration=null
+- model.decoder_dims=[1024]
+- model.hidden_dims=[1024]
+- training.batch_size=256

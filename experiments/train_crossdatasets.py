@@ -101,7 +101,7 @@ def train(cfg: DictConfig) -> None:
     val_samplers = {
         name: ValidationSampler(
             val_splits[name],
-            n_conditions_on_log_iteration=int(cfg.training.n_conditions_on_log_iteration) if "n_conditions_on_log_iteration" in cfg.training else 20,
+            n_conditions_on_log_iteration=int(cfg.training.n_conditions_on_log_iteration) if ("n_conditions_on_log_iteration" in cfg.training and cfg.training.n_conditions_on_log_iteration is not None) else None,
             n_conditions_on_train_end=None,
             seed=int(cfg.data.random_state) if "data" in cfg and "random_state" in cfg.data else 42,
         )
