@@ -32,10 +32,8 @@ import time
 start_time = time.time()
 print("loading data")
 
-OUTPUT_PATH = Path("/data/tahoe_prophet.zarr")
-# This should point at the filtered h5ad produced by prepare_tahoe_prophet.ipynb
-# (contains adata.uns["prophet_emb"] and only cells whose drug has an embedding)
-DATA_PATH   = Path("/data/100m_prophet_filtered.h5ad")
+OUTPUT_PATH = Path("/storage/pancellflow/tahoe_updated.zarr")
+DATA_PATH   = Path("/storage/pancellflow/100m_prophet_filtered.h5ad")
 
 with h5py.File(DATA_PATH, "r") as f:
     adata = ad.AnnData(

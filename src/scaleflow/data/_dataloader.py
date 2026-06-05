@@ -359,6 +359,7 @@ class ValidationSampler:
         condition_dict: dict[tuple[str, ...], dict[str, Any]] = {}
         target_dict: dict[tuple[str, ...], Any] = {}
 
+        key_collision_count = {}
         for tgt_idx in selected_indices:
             # Get condition key as tuple
             cond_key = self._get_key(tgt_idx)
@@ -368,6 +369,10 @@ class ValidationSampler:
             if src_idx is None:
                 continue
 
+            # Track collisions
+            if cond_key in source_dict:
+                key_collision_count[cond_key] = key_collision_count.get(cond_key, 1) + 1
+
             # Get source cells
             source_dict[cond_key] = self._data.data.src_data[src_idx]
 
@@ -376,6 +381,11 @@ class ValidationSampler:
 
             # Get condition embeddings
             condition_dict[cond_key] = self._data.data.conditions[tgt_idx]
+
+        print(f"  [val diag] selected: {len(selected_indices)}  "
+              f"unique cond_keys: {len(source_dict)}  "
+              f"collisions: {sum(key_collision_count.values())}  "
+              f"example colliding keys: {list(key_collision_count.keys())[:3]}")
 
         return {"source": source_dict, "condition": condition_dict, "target": target_dict}
 
@@ -559,7 +569,7 @@ class ReservoirSampler(SamplerABC):
         self._replacement_prob = replacement_prob
         self._pool_size = math.ceil(pool_fraction * self.n_source_dists)
 
-        self._pool_usage_count = np.zeros(self.n_source_dists, dtype=int)
+        self._pool_usage_count = {idx: 0 for idx in data.data.src_data.keys()}
         self._initialized = False
         self._src_idx_pool = None
 

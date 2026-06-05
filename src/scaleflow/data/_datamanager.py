@@ -157,7 +157,8 @@ class DataManager:
             zip(src_dist_labels.index, src_dist_labels.itertuples(index=False, name=None), strict=True)
         )
 
-        # prepare tgt_dist_labels
+        # prepare tgt_dist_labels — drug-only, used by _prepare_data for
+        # embedding lookups (must match tgt_dist_keys exactly).
         tgt_dist_labels = (
             obs.loc[~obs[self.dist_flag_key]][[*self.tgt_dist_keys, "tgt_dist_idx"]]
             .drop_duplicates()
@@ -167,6 +168,20 @@ class DataManager:
             zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None), strict=True)
         )
 
+        # prepare tgt_dist_labels_for_annotation — includes src_dist_keys so
+        # that each (cell_line, drug) pair gets a unique label in the zarr.
+        # This fixes ValidationSampler collapsing 252 conditions → 36 by
+        # ensuring _get_key() returns unique (cell_line, drug) cond_keys.
+        tgt_dist_labels_annotation = (
+            obs.loc[~obs[self.dist_flag_key]][[*src_tgt_dist_keys, "tgt_dist_idx"]]
+            .drop_duplicates()
+            .set_index("tgt_dist_idx")
+        )
+        tgt_dist_labels_annotation = dict(
+            zip(tgt_dist_labels_annotation.index,
+                tgt_dist_labels_annotation.itertuples(index=False, name=None), strict=True)
+        )
+
         annotation = GroupedDistributionAnnotation(
             src_tgt_dist_df=src_tgt_dist_df,
             old_obs_index=old_index_mapping,
@@ -174,7 +189,7 @@ class DataManager:
             src_dist_keys=self.src_dist_keys,
             dist_flag_key=self.dist_flag_key,
             src_dist_idx_to_labels=src_dist_labels,
-            tgt_dist_idx_to_labels=tgt_dist_labels,
+            tgt_dist_idx_to_labels=tgt_dist_labels_annotation,
             default_values=default_values,
             data_location=self.data_location,
         )
