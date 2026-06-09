@@ -45,16 +45,6 @@ os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
 import cloudpickle
 import diffrax
 import jax
-import matplotlib
-for _backend in ("Agg", "svg", "pdf"):
-    try:
-        matplotlib.use(_backend)
-        import matplotlib.pyplot as plt
-        break
-    except (ModuleNotFoundError, ImportError):
-        continue
-else:
-    plt = None  # plotting unavailable
 import numpy as np
 from tqdm import tqdm
 
@@ -72,8 +62,8 @@ from scaleflow.metrics._metrics import (
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
-ZARR_PATH        = Path("/storage/pancellflow/tahoe_updated.zarr")
-OUTPUT_DIR       = Path("/storage/pancellflow/outputs/updated_dmanager")
+ZARR_PATH        = Path("/storage/pancellflow/tahoe.zarr")
+OUTPUT_DIR       = Path("/storage/pancellflow/outputs/test_working")
 
 SEED             = 42
 SPLIT_RATIOS     = [0.7, 0.2, 0.1]   # train / val / test
@@ -83,8 +73,8 @@ POOL_FRACTION    = 0.7
 REPLACEMENT_PROB = 0.5
 
 NUM_ITERATIONS   = 200_000
-VALID_FREQ       = 1_000
-N_VAL_CONDITIONS = None
+VALID_FREQ       = 20_000
+N_VAL_CONDITIONS = 20
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -137,6 +127,92 @@ class ConditionFilterValidationSampler:
             batch = dict(batch)
             batch["condition"] = {
                 ck: {k: v for k, v in cond.items() if k not in self._drop_keys}
+                for ck, cond in batch["condition"].items()
+            }
+        return batch
+
+    def init_sampler(self):
+        self._sampler.init_sampler()
+
+    @property
+    def initialized(self):
+        return self._sampler.initialized
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Random-embedding wrappers
+# Replaces specified condition keys with random vectors of the same shape.
+# Training sampler: new random vector each step (stochastic ablation).
+# Validation sampler: fixed random vector per (cond_key, emb_key) so metrics
+#   are comparable across val steps.
+# ─────────────────────────────────────────────────────────────────────────────
+class ConditionRandomizeSampler:
+    """Wraps any sampler and replaces specified condition keys with random vectors."""
+
+    def __init__(self, sampler, randomize_keys: list[str], seed: int = 0):
+        self._sampler        = sampler
+        self._randomize_keys = set(randomize_keys)
+        self._rng            = np.random.default_rng(seed)
+
+    def __getattr__(self, name):
+        return getattr(self._sampler, name)
+
+    def sample(self, *args, **kwargs) -> dict[str, Any]:
+        batch = self._sampler.sample(*args, **kwargs)
+        if "condition" in batch and isinstance(batch["condition"], dict):
+            batch = dict(batch)
+            new_cond = {}
+            for k, v in batch["condition"].items():
+                if k in self._randomize_keys:
+                    arr = self._rng.standard_normal(v.shape).astype(v.dtype)
+                    print(f"  [random] replaced '{k}'  original norm={np.linalg.norm(v):.4f}  random norm={np.linalg.norm(arr):.4f}")
+                    new_cond[k] = arr
+                else:
+                    new_cond[k] = v
+            batch["condition"] = new_cond
+        return batch
+
+    def init_sampler(self):
+        self._sampler.init_sampler()
+
+    @property
+    def initialized(self):
+        return self._sampler.initialized
+
+
+class ConditionRandomizeValidationSampler:
+    """Wraps ValidationSampler and replaces specified condition keys with
+    fixed-per-condition random vectors (same drug → same random vector
+    across all val steps)."""
+
+    def __init__(self, sampler: ValidationSampler, randomize_keys: list[str], seed: int = 0):
+        self._sampler        = sampler
+        self._randomize_keys = set(randomize_keys)
+        self._seed           = seed
+        self._cache: dict    = {}   # (cond_key, emb_key, shape) → array
+
+    def __getattr__(self, name):
+        return getattr(self._sampler, name)
+
+    def _get_random(self, cond_key: str, emb_key: str, shape: tuple, dtype) -> np.ndarray:
+        cache_key = (cond_key, emb_key, shape)
+        if cache_key not in self._cache:
+            # Deterministic per (condition, emb_key) — reproducible across runs
+            int_seed = abs(hash(cond_key + emb_key + str(self._seed))) % (2 ** 31)
+            rng = np.random.default_rng(int_seed)
+            self._cache[cache_key] = rng.standard_normal(shape).astype(dtype)
+        return self._cache[cache_key]
+
+    def sample(self, *args, **kwargs) -> dict[str, Any]:
+        batch = self._sampler.sample(*args, **kwargs)
+        if "condition" in batch:
+            batch = dict(batch)
+            batch["condition"] = {
+                ck: {
+                    k: self._get_random(str(ck), k, v.shape, v.dtype)
+                    if k in self._randomize_keys else v
+                    for k, v in cond.items()
+                }
                 for ck, cond in batch["condition"].items()
             }
         return batch
@@ -217,62 +293,6 @@ def save_logs(name: str, logs: dict) -> None:
     print(f"  logs saved  → {path}")
 
 
-def plot_training_curves(name: str, logs: dict) -> None:
-    if plt is None:
-        print("Plotting skipped: no matplotlib backend available.")
-        return
-    # ── which keys exist in the logs ─────────────────────────────────────────
-    train_keys = [k for k in ["loss"] if k in logs and logs[k]]
-    val_keys   = [k for k in [
-        "val_r_squared_mean",
-        "val_e_distance_mean",
-        "val_mmd_mean",
-    ] if k in logs and logs[k]]
-
-    all_keys = train_keys + val_keys
-    if not all_keys:
-        print("  no metrics to plot")
-        return
-
-    # ── layout: loss on left, each val metric gets its own subplot ───────────
-    n_cols = len(all_keys)
-    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 4))
-    if n_cols == 1:
-        axes = [axes]
-
-    for ax, key in zip(axes, all_keys):
-        vals = logs[key]
-        xs   = np.arange(len(vals))
-
-        # pretty label
-        label_map = {
-            "loss":                 "Train loss",
-            "val_r_squared_mean":   "Val R²  (mean)",
-            "val_e_distance_mean":  "Val E-distance (mean)",
-            "val_mmd_mean":         "Val MMD (mean)",
-        }
-        label = label_map.get(key, key)
-
-        # x-axis tick spacing:
-        #   train loss  → logged every step  → show step index
-        #   val metrics → logged every VALID_FREQ steps → show actual iteration
-        if key in val_keys:
-            xs = xs * VALID_FREQ
-            ax.set_xlabel("training iteration")
-        else:
-            ax.set_xlabel("step")
-
-        color = "#2196F3" if key in train_keys else "#E91E63"
-        ax.plot(xs, vals, color=color, linewidth=1.2)
-        ax.set_title(label, fontsize=10)
-        ax.grid(True, alpha=0.3)
-
-    fig.suptitle(name, fontsize=12)
-    fig.tight_layout()
-    path = OUTPUT_DIR / f"{name}_training_curves.png"
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"  plot saved  → {path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -396,7 +416,9 @@ def make_split(zarr_path: Path):
     return train_gd, val_gd, test_gd
 
 
-def make_samplers(train_gd, val_gd, test_gd, drop_keys: list[str]):
+def make_samplers(train_gd, val_gd, test_gd,
+                  drop_keys: list[str],
+                  randomize_keys: list[str]):
     rng = np.random.default_rng(SEED)
 
     raw_train = CombinedSampler(
@@ -417,16 +439,22 @@ def make_samplers(train_gd, val_gd, test_gd, drop_keys: list[str]):
         train_sampler = ConditionFilterSampler(raw_train, drop_keys)
         val_sampler   = ConditionFilterValidationSampler(raw_val,  drop_keys)
         test_sampler  = ConditionFilterValidationSampler(raw_test, drop_keys)
+    elif randomize_keys:
+        train_sampler = ConditionRandomizeSampler(raw_train, randomize_keys, seed=SEED)
+        val_sampler   = ConditionRandomizeValidationSampler(raw_val,  randomize_keys, seed=SEED)
+        test_sampler  = ConditionRandomizeValidationSampler(raw_test, randomize_keys, seed=SEED)
     else:
         train_sampler, val_sampler, test_sampler = raw_train, raw_val, raw_test
 
     train_sampler.init_sampler()
     val_sampler.init_sampler()
     test_sampler.init_sampler()
-    print(f"  val conditions dict  : {len(val_gd.data.conditions)}")
-    print(f"  val tgt_data dict    : {len(val_gd.data.tgt_data)}")
-    print(f"  val src_to_tgt map   : {sum(len(v) for v in val_gd.data.src_to_tgt_dist_map.values())}")
-    print(f"  val _tgt_to_src      : {len(raw_val._tgt_to_src)}")
+
+    print(f"  [diag] val conditions dict  : {len(val_gd.data.conditions)}")
+    print(f"  [diag] val tgt_data dict    : {len(val_gd.data.tgt_data)}")
+    print(f"  [diag] val src_to_tgt map   : {sum(len(v) for v in val_gd.data.src_to_tgt_dist_map.values())}")
+    print(f"  [diag] val _tgt_to_src      : {len(raw_val._tgt_to_src)}")
+
     return train_sampler, val_sampler, test_sampler
 
 
@@ -460,13 +488,19 @@ def evaluate_test(solver, test_sampler) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Train
 # ─────────────────────────────────────────────────────────────────────────────
-def train_model(name: str, use_prophet: bool) -> dict:
+def train_model(name: str, mode: str) -> dict:
+    """
+    mode: "default"  — no prophet key (dropped)
+          "prophet"  — real prophet embeddings
+          "random"   — prophet key present but values replaced with random vectors
+    """
     print(f"\n{'='*64}")
-    print(f"  {name}  |  prophet={'yes' if use_prophet else 'no'}")
+    print(f"  {name}  |  mode={mode}")
     print(f"{'='*64}")
 
-    drop_keys   = [] if use_prophet else ["prophet"]
-    ckpt_path   = str(OUTPUT_DIR / f"{name}_best.pkl")
+    drop_keys      = ["prophet"] if mode == "default" else []
+    randomize_keys = ["prophet"] if mode == "random"  else []
+    ckpt_path      = str(OUTPUT_DIR / f"{name}_best.pkl")
 
     t0 = time.perf_counter()
     print("Loading & splitting data …")
@@ -475,7 +509,7 @@ def train_model(name: str, use_prophet: bool) -> dict:
 
     print("Building samplers …")
     train_sampler, val_sampler, test_sampler = make_samplers(
-        train_gd, val_gd, test_gd, drop_keys
+        train_gd, val_gd, test_gd, drop_keys, randomize_keys
     )
 
     sample_batch = train_sampler.sample()
@@ -507,7 +541,9 @@ def train_model(name: str, use_prophet: bool) -> dict:
     print(f"")
     print(f"  ── Condition encoder ──────────────────────────────────")
     print(f"  Condition keys        : {list(cond_input_dims.keys())}")
-    print(f"  Prophet embedding     : {'YES ✓' if 'prophet' in cond_input_dims else 'NO  ✗'}")
+    prophet_status = ("YES ✓" if mode == "prophet" else
+                      "RANDOM ✓" if mode == "random" else "NO  ✗")
+    print(f"  Prophet embedding     : {prophet_status}")
     for k, d in cond_input_dims.items():
         print(f"  Input dim [{k:<10}]: {d}")
     print(f"  condition_mode        : {vf.condition_mode}")
@@ -547,7 +583,6 @@ def train_model(name: str, use_prophet: bool) -> dict:
     print(f"  training done in {elapsed:.1f} min")
 
     save_logs(name, sf.trainer.training_logs)
-    plot_training_curves(name, sf.trainer.training_logs)
 
     if os.path.exists(ckpt_path):
         print(f"Loading best checkpoint from {ckpt_path} …")
@@ -575,16 +610,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model",
-        choices=["default", "prophet"],
+        choices=["default", "prophet", "random"],
         required=True,
-        help="'default' = no prophet embedding  |  'prophet' = with prophet embedding",
+        help=(
+            "'default' = no prophet embedding  |  "
+            "'prophet' = real prophet embeddings  |  "
+            "'random'  = random embeddings same size as prophet"
+        ),
     )
     args = parser.parse_args()
 
-    use_prophet = args.model == "prophet"
-    name        = "model_prophet" if use_prophet else "model_default"
-
-    result = train_model(name, use_prophet=use_prophet)
+    name_map = {
+        "default": "model_default",
+        "prophet": "model_prophet",
+        "random":  "model_random",
+    }
+    name   = name_map[args.model]
+    result = train_model(name, mode=args.model)
 
     print(f"\n{'='*64}")
     print(f"  Final test metrics — {name}")
