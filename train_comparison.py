@@ -310,6 +310,16 @@ class ValMetricsLogger(ComputationCallback):
                          valid_pred_data, solver, **kwargs) -> dict:
         self._step += self._valid_freq
         self._compute_and_save(valid_true_data, valid_pred_data)
+
+        # Log train_loss (mean over the last valid_freq steps) to wandb if available
+        if self._wandb_run is not None:
+            additional = kwargs.get("additional_metrics", {})
+            if "train_loss" in additional:
+                self._wandb_run.log(
+                    {"train_loss": additional["train_loss"]},
+                    step=self._step,
+                )
+
         return {}
 
     def on_train_end(self, valid_source_data, valid_true_data,
