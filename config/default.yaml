@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CellFlow2 — default training config
+# Override individual keys via CLI: --model prophet --split.by cell_line
+# ─────────────────────────────────────────────────────────────────────────────
+
+zarr_path:  /storage/pancellflow/tahoe.zarr
+output_dir: /storage/pancellflow/outputs
+
+seed: 42
+
+split:
+  by: drug              # "drug" or "cell_line"
+  ratios: [0.7, 0.2, 0.1]
+
+training:
+  batch_size:       1024
+  pool_fraction:    0.7
+  replacement_prob: 0.5
+  num_iterations:   200000
+  valid_freq:       20000
+  n_val_conditions: 20   # null = all conditions
+
+model: default           # "default" | "prophet" | "random"
+
+wandb:
+  enabled: false
+  project: pancellflow
+  entity:  null          # set to your wandb username/org
+  run_name: null         # null = auto-generated

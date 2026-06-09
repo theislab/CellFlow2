@@ -270,6 +270,7 @@ class ValidationSampler:
         n_conditions_on_log_iteration: int | None = None,
         n_conditions_on_train_end: int | None = None,
         seed: int = 0,
+        condition_transform=None,
     ) -> None:
         self._data = data
         n_total = len(data.data.conditions)
@@ -280,6 +281,7 @@ class ValidationSampler:
             n_conditions_on_train_end if n_conditions_on_train_end is not None else n_total
         )
         self._rng = np.random.default_rng(seed)
+        self._condition_transform = condition_transform
         self._initialized = False
 
         # Build reverse mapping: tgt_dist_idx -> src_dist_idx
@@ -380,7 +382,10 @@ class ValidationSampler:
             target_dict[cond_key] = self._data.data.tgt_data[tgt_idx]
 
             # Get condition embeddings
-            condition_dict[cond_key] = self._data.data.conditions[tgt_idx]
+            cond = self._data.data.conditions[tgt_idx]
+            if self._condition_transform is not None:
+                cond = self._condition_transform(cond, cond_key=str(cond_key))
+            condition_dict[cond_key] = cond
 
         print(f"  [val diag] selected: {len(selected_indices)}  "
               f"unique cond_keys: {len(source_dict)}  "
@@ -553,6 +558,7 @@ class ReservoirSampler(SamplerABC):
         batch_size: int = 1024,
         pool_fraction: float = 0.5,
         replacement_prob: float = 0.1,
+        condition_transform=None,
     ) -> None:
         # Validate pool_fraction
         if pool_fraction is None or pool_fraction >= 1.0:
@@ -570,6 +576,7 @@ class ReservoirSampler(SamplerABC):
         self._pool_size = math.ceil(pool_fraction * self.n_source_dists)
 
         self._pool_usage_count = {idx: 0 for idx in data.data.src_data.keys()}
+        self._condition_transform = condition_transform
         self._initialized = False
         self._src_idx_pool = None
 
@@ -612,6 +619,8 @@ class ReservoirSampler(SamplerABC):
 
         # Conditions are stored as nested dicts: {col_name: array}
         cond_dict = self._data.data.conditions[target_dist_idx]
+        if self._condition_transform is not None:
+            cond_dict = self._condition_transform(cond_dict)
 
         res = {"src_cell_data": source_batch, "tgt_cell_data": target_batch, "condition": cond_dict}
         return res

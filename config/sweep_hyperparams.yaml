@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# WandB sweep — hyperparameter search (Bayesian optimisation)
+# Usage:
+#   wandb sweep config/sweep_hyperparams.yaml    → prints sweep_id
+#   wandb agent <entity>/<project>/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: train_comparison.py
+method:  bayes
+
+metric:
+  goal: maximize
+  name: val_r_squared
+
+parameters:
+  model:
+    values: [default, prophet, random]
+
+  training.batch_size:
+    values: [512, 1024, 2048]
+
+  training.pool_fraction:
+    distribution: uniform
+    min: 0.5
+    max: 0.9
+
+  training.replacement_prob:
+    distribution: uniform
+    min: 0.1
+    max: 0.7
+
+  split.by:
+    values: [drug, cell_line]

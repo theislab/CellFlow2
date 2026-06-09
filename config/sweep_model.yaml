@@ -1,0 +1,17 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# WandB sweep — compare default vs random vs prophet
+# Usage:
+#   wandb sweep config/sweep_model.yaml          → prints sweep_id
+#   wandb agent <entity>/<project>/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: train_comparison.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_r_squared
+
+parameters:
+  model:
+    values: [default, random, prophet]

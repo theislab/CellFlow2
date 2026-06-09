@@ -5,27 +5,22 @@ Trains a CellFlow2 model on Tahoe data.
 
 Usage
 ─────
-  # Train with prophet embeddings (model_1):
+  # Use default config:
+  python train_comparison.py
+
+  # Override specific keys:
   python train_comparison.py --model prophet
+  python train_comparison.py --model random --split.by cell_line
 
-  # Train without prophet embeddings (model_default):
-  python train_comparison.py --model default
+  # Custom config file:
+  python train_comparison.py --config config/default.yaml --model prophet
 
-Both variants read from the same zarr. When --model default is chosen,
-the "prophet" key is stripped from every condition dict at sample time,
-so the ConditionEncoder never sees it.
+  # Enable wandb logging:
+  python train_comparison.py --wandb
 
-Prerequisites
-─────────────
-  A zarr built by scripts/process_tahoe_prophet.py, e.g.
-  /storage/pancellflow/tahoe_prophet.zarr
-
-Output (written to OUTPUT_DIR)
-──────────────────────────────
-  {name}_best.pkl               best checkpoint (by val R²)
-  {name}_results.pkl            test-set metrics
-  {name}_training_logs.json     per-step loss + val metrics
-  {name}_training_curves.png    loss / val-metric plots
+  # Run as wandb sweep agent (agent passes params automatically):
+  wandb sweep config/sweep_model.yaml
+  wandb agent <sweep_id>
 """
 
 import argparse
@@ -35,15 +30,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 # ── JAX persistent compilation cache ─────────────────────────────────────────
-# Must be set before any JAX code runs. On first run the ODE solver (~10-30 min
-# JIT compile) is saved; subsequent runs load it from disk instantly.
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/storage/jax_cache")
 os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
 # ─────────────────────────────────────────────────────────────────────────────
 
 import cloudpickle
-import diffrax
 import jax
 import numpy as np
 from tqdm import tqdm
@@ -59,170 +53,112 @@ from scaleflow.metrics._metrics import (
     compute_scalar_mmd,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────────────────────────────────────
-ZARR_PATH        = Path("/storage/pancellflow/tahoe.zarr")
-OUTPUT_DIR       = Path("/storage/pancellflow/outputs/test_working")
-
-SEED             = 42
-SPLIT_RATIOS     = [0.7, 0.2, 0.1]   # train / val / test
-
-BATCH_SIZE       = 1024
-POOL_FRACTION    = 0.7
-REPLACEMENT_PROB = 0.5
-
-NUM_ITERATIONS   = 200_000
-VALID_FREQ       = 20_000
-N_VAL_CONDITIONS = 20
-
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Condition key filter wrapper
-# Strips specified keys from condition dicts so model_default never sees prophet
+# Config helpers
 # ─────────────────────────────────────────────────────────────────────────────
-class ConditionFilterSampler:
-    """Wraps any sampler and removes unwanted keys from condition dicts."""
+DEFAULT_CONFIG = {
+    "zarr_path":  "/storage/pancellflow/tahoe.zarr",
+    "output_dir": "/storage/pancellflow/outputs",
+    "seed": 42,
+    "split": {
+        "by":     "drug",
+        "ratios": [0.7, 0.2, 0.1],
+    },
+    "training": {
+        "batch_size":       1024,
+        "pool_fraction":    0.7,
+        "replacement_prob": 0.5,
+        "num_iterations":   200_000,
+        "valid_freq":       20_000,
+        "n_val_conditions": 20,
+    },
+    "model": "default",
+    "wandb": {
+        "enabled":  False,
+        "project":  "pancellflow",
+        "entity":   None,
+        "run_name": None,
+    },
+}
 
-    def __init__(self, sampler, drop_keys: list[str]):
-        self._sampler   = sampler
-        self._drop_keys = set(drop_keys)
 
-    def __getattr__(self, name):
-        return getattr(self._sampler, name)
-
-    def sample(self, *args, **kwargs) -> dict[str, Any]:
-        batch = self._sampler.sample(*args, **kwargs)
-        # Training batch: condition is a flat dict {key: array}
-        if "condition" in batch and isinstance(batch["condition"], dict):
-            batch = dict(batch)
-            batch["condition"] = {k: v for k, v in batch["condition"].items()
-                                  if k not in self._drop_keys}
-        return batch
-
-    def init_sampler(self):
-        self._sampler.init_sampler()
-
-    @property
-    def initialized(self):
-        return self._sampler.initialized
+def deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base (override wins)."""
+    result = base.copy()
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
 
 
-class ConditionFilterValidationSampler:
-    """Wraps ValidationSampler and removes unwanted keys from condition dicts."""
+def load_config(config_path: str | None, overrides: dict) -> dict:
+    cfg = DEFAULT_CONFIG.copy()
+    if config_path:
+        with open(config_path) as f:
+            file_cfg = yaml.safe_load(f)
+        cfg = deep_merge(cfg, file_cfg or {})
+    cfg = deep_merge(cfg, overrides)
+    return cfg
 
-    def __init__(self, sampler: ValidationSampler, drop_keys: list[str]):
-        self._sampler   = sampler
-        self._drop_keys = set(drop_keys)
 
-    def __getattr__(self, name):
-        return getattr(self._sampler, name)
-
-    def sample(self, *args, **kwargs) -> dict[str, Any]:
-        batch = self._sampler.sample(*args, **kwargs)
-        # Validation batch: condition is {cond_key: {emb_key: array}}
-        if "condition" in batch:
-            batch = dict(batch)
-            batch["condition"] = {
-                ck: {k: v for k, v in cond.items() if k not in self._drop_keys}
-                for ck, cond in batch["condition"].items()
-            }
-        return batch
-
-    def init_sampler(self):
-        self._sampler.init_sampler()
-
-    @property
-    def initialized(self):
-        return self._sampler.initialized
+def set_nested(d: dict, dotkey: str, value: Any) -> None:
+    """Set d['a']['b'] from dotkey='a.b'."""
+    keys = dotkey.split(".")
+    for k in keys[:-1]:
+        d = d.setdefault(k, {})
+    d[keys[-1]] = value
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Random-embedding wrappers
-# Replaces specified condition keys with random vectors of the same shape.
-# Training sampler: new random vector each step (stochastic ablation).
-# Validation sampler: fixed random vector per (cond_key, emb_key) so metrics
-#   are comparable across val steps.
+# ConditionTransform — replaces wrapper sampler classes
+# Passed directly into ReservoirSampler and ValidationSampler.
 # ─────────────────────────────────────────────────────────────────────────────
-class ConditionRandomizeSampler:
-    """Wraps any sampler and replaces specified condition keys with random vectors."""
+class ConditionTransform:
+    """Transforms condition dicts at sample time.
 
-    def __init__(self, sampler, randomize_keys: list[str], seed: int = 0):
-        self._sampler        = sampler
-        self._randomize_keys = set(randomize_keys)
+    mode="default" : drops the 'prophet' key entirely.
+    mode="prophet" : no-op, returns condition unchanged.
+    mode="random"  : replaces 'prophet' values with random vectors.
+                     Training (cond_key=None)  → new random each call.
+                     Validation (cond_key=str) → fixed random per condition.
+    """
+
+    def __init__(self, mode: str, seed: int = 42):
+        self.mode            = mode
         self._rng            = np.random.default_rng(seed)
-
-    def __getattr__(self, name):
-        return getattr(self._sampler, name)
-
-    def sample(self, *args, **kwargs) -> dict[str, Any]:
-        batch = self._sampler.sample(*args, **kwargs)
-        if "condition" in batch and isinstance(batch["condition"], dict):
-            batch = dict(batch)
-            new_cond = {}
-            for k, v in batch["condition"].items():
-                if k in self._randomize_keys:
-                    arr = self._rng.standard_normal(v.shape).astype(v.dtype)
-                    print(f"  [random] replaced '{k}'  original norm={np.linalg.norm(v):.4f}  random norm={np.linalg.norm(arr):.4f}")
-                    new_cond[k] = arr
-                else:
-                    new_cond[k] = v
-            batch["condition"] = new_cond
-        return batch
-
-    def init_sampler(self):
-        self._sampler.init_sampler()
-
-    @property
-    def initialized(self):
-        return self._sampler.initialized
-
-
-class ConditionRandomizeValidationSampler:
-    """Wraps ValidationSampler and replaces specified condition keys with
-    fixed-per-condition random vectors (same drug → same random vector
-    across all val steps)."""
-
-    def __init__(self, sampler: ValidationSampler, randomize_keys: list[str], seed: int = 0):
-        self._sampler        = sampler
-        self._randomize_keys = set(randomize_keys)
         self._seed           = seed
-        self._cache: dict    = {}   # (cond_key, emb_key, shape) → array
+        self._cache: dict    = {}   # (cond_key, emb_key, shape) → fixed array
 
-    def __getattr__(self, name):
-        return getattr(self._sampler, name)
+    def __call__(self, cond: dict, cond_key: str | None = None) -> dict:
+        if self.mode == "prophet":
+            return cond
 
-    def _get_random(self, cond_key: str, emb_key: str, shape: tuple, dtype) -> np.ndarray:
-        cache_key = (cond_key, emb_key, shape)
-        if cache_key not in self._cache:
-            # Deterministic per (condition, emb_key) — reproducible across runs
-            int_seed = abs(hash(cond_key + emb_key + str(self._seed))) % (2 ** 31)
-            rng = np.random.default_rng(int_seed)
-            self._cache[cache_key] = rng.standard_normal(shape).astype(dtype)
-        return self._cache[cache_key]
-
-    def sample(self, *args, **kwargs) -> dict[str, Any]:
-        batch = self._sampler.sample(*args, **kwargs)
-        if "condition" in batch:
-            batch = dict(batch)
-            batch["condition"] = {
-                ck: {
-                    k: self._get_random(str(ck), k, v.shape, v.dtype)
-                    if k in self._randomize_keys else v
-                    for k, v in cond.items()
-                }
-                for ck, cond in batch["condition"].items()
-            }
-        return batch
-
-    def init_sampler(self):
-        self._sampler.init_sampler()
-
-    @property
-    def initialized(self):
-        return self._sampler.initialized
+        result = {}
+        for k, v in cond.items():
+            if k == "prophet":
+                if self.mode == "default":
+                    continue                          # drop key entirely
+                elif self.mode == "random":
+                    if cond_key is not None:
+                        # Fixed per condition across val steps
+                        cache_key = (cond_key, k, v.shape)
+                        if cache_key not in self._cache:
+                            int_seed = abs(hash(cond_key + k + str(self._seed))) % (2 ** 31)
+                            self._cache[cache_key] = (
+                                np.random.default_rng(int_seed)
+                                .standard_normal(v.shape)
+                                .astype(v.dtype)
+                            )
+                        result[k] = self._cache[cache_key]
+                    else:
+                        # New random each training step
+                        result[k] = self._rng.standard_normal(v.shape).astype(v.dtype)
+            else:
+                result[k] = v
+        return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,23 +168,24 @@ def print_dataset_stats(gd: GroupedDistribution, label: str = "Full dataset") ->
     ann  = gd.annotation
     data = gd.data
 
-    n_src  = len(data.src_data)
-    n_tgt  = len(data.tgt_data)
+    n_src = len(data.src_data)
+    n_tgt = len(data.tgt_data)
 
     src_labels = list(ann.src_dist_idx_to_labels.values())
     tgt_labels = list(ann.tgt_dist_idx_to_labels.values())
 
-    # cell lines: first element of each src label tuple
-    cell_lines = sorted({str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
-                         for lbl in src_labels})
-    # drugs: second element of each tgt label tuple (or first if only one key)
-    drugs = sorted({str(lbl[1]) if isinstance(lbl, (list, tuple)) and len(lbl) > 1
-                    else str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
-                    for lbl in tgt_labels})
+    cell_lines = sorted({
+        str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
+        for lbl in src_labels
+    })
+    drugs = sorted({
+        str(lbl[1]) if isinstance(lbl, (list, tuple)) and len(lbl) > 1
+        else str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
+        for lbl in tgt_labels
+    })
 
     src_sizes = [v.shape[0] for v in data.src_data.values()]
     tgt_sizes = [v.shape[0] for v in data.tgt_data.values()]
-
     cond_keys = list(next(iter(data.conditions.values())).keys()) if data.conditions else []
 
     print(f"\n{'─'*60}")
@@ -268,42 +205,57 @@ def print_dataset_stats(gd: GroupedDistribution, label: str = "Full dataset") ->
     print(f"{'─'*60}")
 
 
-def print_split_stats(train_gd, val_gd, test_gd) -> None:
-    def drug_set(gd):
+def print_split_stats(train_gd, val_gd, test_gd, split_by: str) -> None:
+    def label_sets(gd):
         tgt_labels = list(gd.annotation.tgt_dist_idx_to_labels.values())
-        return {str(lbl[1]) if isinstance(lbl, (list, tuple)) and len(lbl) > 1
-                else str(lbl) for lbl in tgt_labels}
+        src_labels = list(gd.annotation.src_dist_idx_to_labels.values())
+        drugs = {
+            str(lbl[1]) if isinstance(lbl, (list, tuple)) and len(lbl) > 1
+            else str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
+            for lbl in tgt_labels
+        }
+        cell_lines = {
+            str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
+            for lbl in src_labels
+        }
+        return drugs, cell_lines
 
-    tr, va, te = drug_set(train_gd), drug_set(val_gd), drug_set(test_gd)
-    print(f"\n  Split (by drug)")
-    print(f"    Train : {len(train_gd.data.tgt_data):>5} conditions  |  {len(tr):>4} drugs")
-    print(f"    Val   : {len(val_gd.data.tgt_data):>5} conditions  |  {len(va):>4} drugs")
-    print(f"    Test  : {len(test_gd.data.tgt_data):>5} conditions  |  {len(te):>4} drugs")
-    print(f"    Sample test drugs : {sorted(te)[:5]} ...")
+    tr_drugs, tr_cls = label_sets(train_gd)
+    va_drugs, va_cls = label_sets(val_gd)
+    te_drugs, te_cls = label_sets(test_gd)
+
+    print(f"\n  Split (by {split_by})")
+    print(f"    {'':8}  {'conditions':>10}  {'drugs':>6}  {'cell lines':>10}")
+    print(f"    {'Train':8}  {len(train_gd.data.tgt_data):>10}  {len(tr_drugs):>6}  "
+          f"{len(tr_cls):>10}  {sorted(tr_cls)}")
+    print(f"    {'Val':8}  {len(val_gd.data.tgt_data):>10}  {len(va_drugs):>6}  "
+          f"{len(va_cls):>10}  {sorted(va_cls)}")
+    print(f"    {'Test':8}  {len(test_gd.data.tgt_data):>10}  {len(te_drugs):>6}  "
+          f"{len(te_cls):>10}  {sorted(te_cls)}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging helpers
 # ─────────────────────────────────────────────────────────────────────────────
-def save_logs(name: str, logs: dict) -> None:
-    path = OUTPUT_DIR / f"{name}_training_logs.json"
+def save_logs(name: str, logs: dict, output_dir: Path) -> None:
+    path = output_dir / f"{name}_training_logs.json"
     serialisable = {k: [float(v) for v in vals] for k, vals in logs.items() if vals}
     with open(path, "w") as f:
         json.dump(serialisable, f, indent=2)
     print(f"  logs saved  → {path}")
 
 
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# ValMetricsLogger callback — appends metrics to JSON after every val step
+# Callbacks
 # ─────────────────────────────────────────────────────────────────────────────
 class ValMetricsLogger(ComputationCallback):
     """Appends val metrics to a JSON file immediately after each validation step."""
 
-    def __init__(self, save_path: str):
+    def __init__(self, save_path: str, valid_freq: int, wandb_run=None):
         self.save_path  = save_path
-        self._step      = 0
+        self._valid_freq = valid_freq
+        self._step       = 0
+        self._wandb_run  = wandb_run
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self._step = 0
@@ -325,14 +277,13 @@ class ValMetricsLogger(ComputationCallback):
             return
 
         entry = {
-            "step":       self._step,
+            "step":         self._step,
             "n_conditions": len(r2s),
-            "r_squared":  float(np.mean(r2s)),
-            "e_distance": float(np.mean(eds)),
-            "mmd":        float(np.mean(mmds)),
+            "r_squared":    float(np.mean(r2s)),
+            "e_distance":   float(np.mean(eds)),
+            "mmd":          float(np.mean(mmds)),
         }
 
-        # Load existing entries, append, write back
         if os.path.exists(self.save_path):
             with open(self.save_path) as f:
                 entries = json.load(f)
@@ -347,9 +298,17 @@ class ValMetricsLogger(ComputationCallback):
               f"E-dist={entry['e_distance']:.4f}  "
               f"MMD={entry['mmd']:.4f}")
 
+        if self._wandb_run is not None:
+            self._wandb_run.log({
+                "val_r_squared":  entry["r_squared"],
+                "val_e_distance": entry["e_distance"],
+                "val_mmd":        entry["mmd"],
+                "step":           self._step,
+            }, step=self._step)
+
     def on_log_iteration(self, valid_source_data, valid_true_data,
                          valid_pred_data, solver, **kwargs) -> dict:
-        self._step += VALID_FREQ
+        self._step += self._valid_freq
         self._compute_and_save(valid_true_data, valid_pred_data)
         return {}
 
@@ -359,13 +318,11 @@ class ValMetricsLogger(ComputationCallback):
         return {}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BestModelCheckpoint callback
-# ─────────────────────────────────────────────────────────────────────────────
 class BestModelCheckpoint(ComputationCallback):
-    def __init__(self, save_path: str):
-        self.save_path = save_path
-        self.best_r2   = -np.inf
+    def __init__(self, save_path: str, wandb_run=None):
+        self.save_path  = save_path
+        self.best_r2    = -np.inf
+        self._wandb_run = wandb_run
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self.best_r2 = -np.inf
@@ -387,6 +344,8 @@ class BestModelCheckpoint(ComputationCallback):
             with open(self.save_path, "wb") as f:
                 cloudpickle.dump(solver, f)
             print(f"    ✓ checkpoint saved  (val R²={mean_r2:.4f})")
+        if self._wandb_run is not None:
+            self._wandb_run.log({"best_val_r2": self.best_r2})
         return {"best_val_r2": self.best_r2}
 
     def on_train_end(self, valid_source_data, valid_true_data,
@@ -398,63 +357,64 @@ class BestModelCheckpoint(ComputationCallback):
 # ─────────────────────────────────────────────────────────────────────────────
 # Data helpers
 # ─────────────────────────────────────────────────────────────────────────────
-def make_split(zarr_path: Path):
+def make_split(cfg: dict):
+    zarr_path = Path(cfg["zarr_path"])
+    split_by  = cfg["split"]["by"]
+    ratios    = cfg["split"]["ratios"]
+    seed      = cfg["seed"]
+
     gd = GroupedDistribution.read_zarr(zarr_path)
     print_dataset_stats(gd, "Full dataset")
+
     splits = split_datasets(
         {"gd": gd},
-        split_by=["drug"],
+        split_by=[split_by],
         split_key="split",
-        ratios=SPLIT_RATIOS,
-        random_state=SEED,
+        ratios=ratios,
+        random_state=seed,
         holdout_combinations=False,
     )
     train_gd = splits["gd"]["train"]
     val_gd   = splits["gd"]["val"]
     test_gd  = splits["gd"]["test"]
-    print_split_stats(train_gd, val_gd, test_gd)
+    print_split_stats(train_gd, val_gd, test_gd, split_by)
     return train_gd, val_gd, test_gd
 
 
-def make_samplers(train_gd, val_gd, test_gd,
-                  drop_keys: list[str],
-                  randomize_keys: list[str]):
-    rng = np.random.default_rng(SEED)
+def make_samplers(train_gd, val_gd, test_gd, cfg: dict, transform: ConditionTransform | None):
+    seed      = cfg["seed"]
+    tcfg      = cfg["training"]
+    rng       = np.random.default_rng(seed)
+    n_val     = tcfg["n_val_conditions"]
 
-    raw_train = CombinedSampler(
+    train_sampler = CombinedSampler(
         samplers={"gd": ReservoirSampler(
             train_gd, rng,
-            batch_size=BATCH_SIZE,
-            pool_fraction=POOL_FRACTION,
-            replacement_prob=REPLACEMENT_PROB,
+            batch_size=tcfg["batch_size"],
+            pool_fraction=tcfg["pool_fraction"],
+            replacement_prob=tcfg["replacement_prob"],
+            condition_transform=transform,
         )},
         rng=rng,
     )
-    raw_val  = ValidationSampler(val_gd,  n_conditions_on_log_iteration=N_VAL_CONDITIONS,
-                                           n_conditions_on_train_end=N_VAL_CONDITIONS, seed=SEED)
-    raw_test = ValidationSampler(test_gd, n_conditions_on_log_iteration=None,
-                                           n_conditions_on_train_end=None, seed=SEED)
-
-    if drop_keys:
-        train_sampler = ConditionFilterSampler(raw_train, drop_keys)
-        val_sampler   = ConditionFilterValidationSampler(raw_val,  drop_keys)
-        test_sampler  = ConditionFilterValidationSampler(raw_test, drop_keys)
-    elif randomize_keys:
-        train_sampler = ConditionRandomizeSampler(raw_train, randomize_keys, seed=SEED)
-        val_sampler   = ConditionRandomizeValidationSampler(raw_val,  randomize_keys, seed=SEED)
-        test_sampler  = ConditionRandomizeValidationSampler(raw_test, randomize_keys, seed=SEED)
-    else:
-        train_sampler, val_sampler, test_sampler = raw_train, raw_val, raw_test
+    val_sampler  = ValidationSampler(
+        val_gd,
+        n_conditions_on_log_iteration=n_val,
+        n_conditions_on_train_end=n_val,
+        seed=seed,
+        condition_transform=transform,
+    )
+    test_sampler = ValidationSampler(
+        test_gd,
+        n_conditions_on_log_iteration=None,
+        n_conditions_on_train_end=None,
+        seed=seed,
+        condition_transform=transform,
+    )
 
     train_sampler.init_sampler()
     val_sampler.init_sampler()
     test_sampler.init_sampler()
-
-    print(f"  [diag] val conditions dict  : {len(val_gd.data.conditions)}")
-    print(f"  [diag] val tgt_data dict    : {len(val_gd.data.tgt_data)}")
-    print(f"  [diag] val src_to_tgt map   : {sum(len(v) for v in val_gd.data.src_to_tgt_dist_map.values())}")
-    print(f"  [diag] val _tgt_to_src      : {len(raw_val._tgt_to_src)}")
-
     return train_sampler, val_sampler, test_sampler
 
 
@@ -471,16 +431,16 @@ def evaluate_test(solver, test_sampler) -> dict:
     pred = jax.tree.map(solver.predict, src, cond)
 
     per_condition = {}
-    for cond_key in tqdm(sorted(true.keys()), desc="  test metrics"):
+    for cond_key in tqdm(sorted(true.keys(), key=str), desc="  test metrics"):
         y_true = np.array(true[cond_key])
         y_pred = np.array(pred[cond_key])
-        per_condition[cond_key] = {
+        per_condition[str(cond_key)] = {
             "r_squared":  float(compute_r_squared(y_true, y_pred)),
             "e_distance": float(compute_e_distance_fast(y_true, y_pred)),
             "mmd":        float(compute_scalar_mmd(y_true, y_pred)),
         }
 
-    metrics = ["r_squared", "e_distance", "mmd"]
+    metrics    = ["r_squared", "e_distance", "mmd"]
     aggregated = {m: float(np.mean([v[m] for v in per_condition.values()])) for m in metrics}
     return {"per_condition": per_condition, "aggregated": aggregated}
 
@@ -488,74 +448,60 @@ def evaluate_test(solver, test_sampler) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Train
 # ─────────────────────────────────────────────────────────────────────────────
-def train_model(name: str, mode: str) -> dict:
-    """
-    mode: "default"  — no prophet key (dropped)
-          "prophet"  — real prophet embeddings
-          "random"   — prophet key present but values replaced with random vectors
-    """
+def train_model(cfg: dict, wandb_run=None) -> dict:
+    mode       = cfg["model"]
+    output_dir = Path(cfg["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    name_map = {"default": "model_default", "prophet": "model_prophet", "random": "model_random"}
+    name     = name_map[mode]
+    ckpt_path = str(output_dir / f"{name}_best.pkl")
+
     print(f"\n{'='*64}")
-    print(f"  {name}  |  mode={mode}")
+    print(f"  {name}  |  mode={mode}  split_by={cfg['split']['by']}")
     print(f"{'='*64}")
 
-    drop_keys      = ["prophet"] if mode == "default" else []
-    randomize_keys = ["prophet"] if mode == "random"  else []
-    ckpt_path      = str(OUTPUT_DIR / f"{name}_best.pkl")
+    # Build condition transform (None = no-op for prophet)
+    transform = ConditionTransform(mode, seed=cfg["seed"]) if mode != "prophet" else None
 
     t0 = time.perf_counter()
     print("Loading & splitting data …")
-    train_gd, val_gd, test_gd = make_split(ZARR_PATH)
+    train_gd, val_gd, test_gd = make_split(cfg)
     print(f"  done in {time.perf_counter() - t0:.1f}s")
 
     print("Building samplers …")
     train_sampler, val_sampler, test_sampler = make_samplers(
-        train_gd, val_gd, test_gd, drop_keys, randomize_keys
+        train_gd, val_gd, test_gd, cfg, transform
     )
 
-    sample_batch = train_sampler.sample()
-    cond_keys    = list(sample_batch["condition"].keys())
-    data_dim     = sample_batch["src_cell_data"].shape[-1]
+    sample_batch    = train_sampler.sample()
+    cond_keys       = list(sample_batch["condition"].keys())
+    data_dim        = sample_batch["src_cell_data"].shape[-1]
+    cond_input_dims = {k: sample_batch["condition"][k].shape[-1] for k in cond_keys}
     print(f"  data_dim={data_dim}  condition_keys={cond_keys}")
 
     print("Building model …")
     sf = ScaleFlow()
     sf.prepare_model(sample_batch=sample_batch, max_combination_length=1)
 
-    vf = sf.solver.vf
+    vf       = sf.solver.vf
     n_params = sum(x.size for x in jax.tree.leaves(sf.solver.vf_state.params))
-    cond_input_dims = {k: sample_batch["condition"][k].shape[-1]
-                       for k in sample_batch["condition"]}
+
+    prophet_status = {"default": "NO  ✗", "prophet": "YES ✓", "random": "RANDOM ✓"}[mode]
     print(f"\n{'─'*60}")
     print(f"  Model architecture")
     print(f"{'─'*60}")
-    print(f"  Solver                : {type(sf.solver).__name__}")
     print(f"  Total parameters      : {n_params:,}")
-    print(f"")
-    print(f"  ── Data path ──────────────────────────────────────────")
-    print(f"  Data dim (input)      : {data_dim}")
-    print(f"  x_encoder (hidden)    : {tuple(vf.hidden_dims)}")
-    print(f"  time_encoder dims     : {tuple(vf.time_encoder_dims)}")
-    print(f"  conditioning          : {vf.conditioning}")
-    print(f"  decoder dims          : {tuple(vf.decoder_dims)}")
-    print(f"  Data dim (output)     : {vf.output_dim}")
-    print(f"")
-    print(f"  ── Condition encoder ──────────────────────────────────")
-    print(f"  Condition keys        : {list(cond_input_dims.keys())}")
-    prophet_status = ("YES ✓" if mode == "prophet" else
-                      "RANDOM ✓" if mode == "random" else "NO  ✗")
+    print(f"  Data dim              : {data_dim}")
     print(f"  Prophet embedding     : {prophet_status}")
     for k, d in cond_input_dims.items():
         print(f"  Input dim [{k:<10}]: {d}")
-    print(f"  condition_mode        : {vf.condition_mode}")
-    print(f"  pooling               : {vf.pooling}")
-    print(f"  embed_dim (output)    : {vf.condition_embedding_dim}")
-    print(f"  max_combination_len   : {vf.max_combination_length}")
     print(f"{'─'*60}")
 
-    # sinkhorn_div is not in metric_to_func_gpu, so it can't be used with
-    # use_gpu_optimized=True.  The three below cover what matters at val time;
-    # sinkhorn_div is still computed at test time in evaluate_test().
-    val_log_path = str(OUTPUT_DIR / f"{name}_val_metrics.json")
+    tcfg         = cfg["training"]
+    valid_freq   = tcfg["valid_freq"]
+    val_log_path = str(output_dir / f"{name}_val_metrics.json")
+
     callbacks = [
         Metrics(
             metrics=["r_squared", "e_distance", "mmd"],
@@ -563,26 +509,25 @@ def train_model(name: str, mode: str) -> dict:
             use_gpu_optimized=True,
             precision="bfloat16",
         ),
-        ValMetricsLogger(save_path=val_log_path),
-        BestModelCheckpoint(save_path=ckpt_path),
+        ValMetricsLogger(save_path=val_log_path, valid_freq=valid_freq, wandb_run=wandb_run),
+        BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
     ]
 
-    print(f"Training {NUM_ITERATIONS} iterations "
-          f"(val every {VALID_FREQ} steps, {N_VAL_CONDITIONS} conditions) …")
-    print(f"  tracking : loss | val_r_squared_mean | val_e_distance_mean | val_mmd_mean")
+    print(f"Training {tcfg['num_iterations']} iterations "
+          f"(val every {valid_freq} steps, {tcfg['n_val_conditions']} conditions) …")
     t0 = time.perf_counter()
     sf.train(
         train_dataloader=train_sampler,
         val_dataloader={"val": val_sampler},
-        num_iterations=NUM_ITERATIONS,
-        valid_freq=VALID_FREQ,
+        num_iterations=tcfg["num_iterations"],
+        valid_freq=valid_freq,
         callbacks=callbacks,
         monitor_metrics=["loss", "val_r_squared_mean", "val_e_distance_mean", "val_mmd_mean"],
     )
     elapsed = (time.perf_counter() - t0) / 60
     print(f"  training done in {elapsed:.1f} min")
 
-    save_logs(name, sf.trainer.training_logs)
+    save_logs(name, sf.trainer.training_logs, output_dir)
 
     if os.path.exists(ckpt_path):
         print(f"Loading best checkpoint from {ckpt_path} …")
@@ -595,10 +540,14 @@ def train_model(name: str, mode: str) -> dict:
     print("Evaluating on test set …")
     test_metrics = evaluate_test(best_solver, test_sampler)
 
-    result_path = OUTPUT_DIR / f"{name}_results.pkl"
+    result_path = output_dir / f"{name}_results.pkl"
     with open(result_path, "wb") as f:
         cloudpickle.dump(test_metrics, f)
-    print(f"  test results saved to {result_path}")
+    print(f"  test results saved → {result_path}")
+
+    if wandb_run is not None:
+        for metric, val in test_metrics["aggregated"].items():
+            wandb_run.summary[f"test_{metric}"] = val
 
     return {"solver": best_solver, "test_metrics": test_metrics}
 
@@ -608,28 +557,83 @@ def train_model(name: str, mode: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model",
-        choices=["default", "prophet", "random"],
-        required=True,
-        help=(
-            "'default' = no prophet embedding  |  "
-            "'prophet' = real prophet embeddings  |  "
-            "'random'  = random embeddings same size as prophet"
-        ),
-    )
+    parser.add_argument("--config", default="config/default.yaml",
+                        help="Path to YAML config file")
+    parser.add_argument("--model", choices=["default", "prophet", "random"],
+                        help="Override config model")
+    parser.add_argument("--split.by", dest="split_by",
+                        choices=["drug", "cell_line"],
+                        help="Override config split.by")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Enable wandb logging")
+    # Generic override: --set training.batch_size=2048
+    parser.add_argument("--set", nargs="*", metavar="KEY=VALUE",
+                        help="Override any config key using dot notation, e.g. training.batch_size=2048")
     args = parser.parse_args()
 
-    name_map = {
-        "default": "model_default",
-        "prophet": "model_prophet",
-        "random":  "model_random",
-    }
-    name   = name_map[args.model]
-    result = train_model(name, mode=args.model)
+    # ── Build config ─────────────────────────────────────────────────────────
+    overrides: dict = {}
+    if args.model:
+        overrides["model"] = args.model
+    if args.split_by:
+        overrides.setdefault("split", {})["by"] = args.split_by
+    if args.set:
+        for kv in args.set:
+            key, _, val = kv.partition("=")
+            # Try to parse as int/float/bool, else keep as string
+            for cast in (int, float):
+                try:
+                    val = cast(val)
+                    break
+                except ValueError:
+                    pass
+            if val == "true":  val = True
+            if val == "false": val = False
+            set_nested(overrides, key, val)
+    if args.wandb:
+        overrides.setdefault("wandb", {})["enabled"] = True
+
+    cfg = load_config(args.config, overrides)
+
+    # ── Optional wandb ────────────────────────────────────────────────────────
+    wandb_run = None
+    if cfg["wandb"]["enabled"]:
+        try:
+            import wandb
+            wcfg = cfg["wandb"]
+            # Flatten config for wandb (sweep may override values)
+            flat_cfg = {
+                "model":                    cfg["model"],
+                "split.by":                 cfg["split"]["by"],
+                "training.batch_size":      cfg["training"]["batch_size"],
+                "training.pool_fraction":   cfg["training"]["pool_fraction"],
+                "training.replacement_prob":cfg["training"]["replacement_prob"],
+                "training.num_iterations":  cfg["training"]["num_iterations"],
+                "training.valid_freq":      cfg["training"]["valid_freq"],
+                "training.n_val_conditions":cfg["training"]["n_val_conditions"],
+                "seed":                     cfg["seed"],
+            }
+            wandb_run = wandb.init(
+                project=wcfg.get("project", "pancellflow"),
+                entity=wcfg.get("entity"),
+                name=wcfg.get("run_name"),
+                config=flat_cfg,
+            )
+            # Sweep may override config — read back
+            sweep_cfg = dict(wandb_run.config)
+            for flat_key, val in sweep_cfg.items():
+                set_nested(cfg, flat_key, val)
+            print(f"  wandb run: {wandb_run.url}")
+        except ImportError:
+            print("  wandb not installed — skipping")
+
+    result = train_model(cfg, wandb_run=wandb_run)
 
     print(f"\n{'='*64}")
-    print(f"  Final test metrics — {name}")
+    print(f"  Final test metrics — {cfg['model']}")
     print(f"{'='*64}")
     for metric, val in result["test_metrics"]["aggregated"].items():
         print(f"  {metric:<20} {val:.4f}")
+
+    if wandb_run is not None:
+        wandb_run.finish()
