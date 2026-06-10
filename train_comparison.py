@@ -24,6 +24,7 @@ Usage
 """
 
 import argparse
+import ast
 import json
 import os
 import time
@@ -37,9 +38,12 @@ os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/storage/jax_cache")
 os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
 # ─────────────────────────────────────────────────────────────────────────────
 
+from functools import partial
+
 import cloudpickle
 import jax
 import numpy as np
+import optax
 from tqdm import tqdm
 
 from scaleflow.data import GroupedDistribution, split_datasets
@@ -47,6 +51,7 @@ from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, Valida
 from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
 from scaleflow.training._callbacks import ComputationCallback
+from scaleflow.utils import match_linear
 from scaleflow.metrics._metrics import (
     compute_r_squared,
     compute_e_distance_fast,
@@ -58,7 +63,9 @@ from scaleflow.metrics._metrics import (
 # Config helpers
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
-    "zarr_path":  "/storage/pancellflow/tahoe.zarr",
+    "zarr_path":  "/storage/pancellflow/tahoe.zarr",   # single-dataset fallback
+    "datasets":          None,   # multi-dataset: {name: {path, seed?, weight?}}
+    "selected_datasets": None,   # multi-dataset: [name, ...]
     "output_dir": "/storage/pancellflow/outputs",
     "seed": 42,
     "split": {
@@ -73,7 +80,24 @@ DEFAULT_CONFIG = {
         "valid_freq":       20_000,
         "n_val_conditions": 20,
     },
-    "model": "default",
+    "model": "default",                       # embedding mode: default | prophet | random
+    "solver": "otfm",                         # otfm | genot | eqm
+    "optimizer": {
+        "peak_lr":           1.0e-4,
+        "end_lr":            1.0e-5,
+        "init_lr":           0.0,
+        "warmup_iterations": 5000,
+        "grad_accumulation": 20,              # MultiSteps multiplier (1 = no accumulation)
+    },
+    "arch": {
+        "conditioning":            "concatenation",   # concatenation | film | resnet
+        "hidden_dims":             [2048, 2048, 2048],
+        "decoder_dims":            [4096, 4096, 4096],
+        "condition_embedding_dim": 256,
+        "max_combination_length":  1,
+        "match_fn_epsilon":        0.1,
+        "constant_noise":          None,      # float → probability_path={"constant_noise": x}
+    },
     "wandb": {
         "enabled":  False,
         "project":  "pancellflow",
@@ -110,6 +134,58 @@ def set_nested(d: dict, dotkey: str, value: Any) -> None:
     for k in keys[:-1]:
         d = d.setdefault(k, {})
     d[keys[-1]] = value
+
+
+def build_optimizer(cfg: dict) -> optax.GradientTransformation:
+    """Warmup-cosine-decay Adam, optionally wrapped in MultiSteps grad accumulation.
+
+    Schedule units: `num_iterations` / `warmup_iterations` are given in *training*
+    steps; since MultiSteps applies one real update every `grad_accumulation`
+    micro-steps, the schedule is expressed in optimizer-update units (divide by
+    grad_accumulation) so the cosine completes over the actual number of updates.
+    """
+    ocfg     = cfg["optimizer"]
+    num_iter = cfg["training"]["num_iterations"]
+    accum    = int(ocfg.get("grad_accumulation", 1)) or 1
+
+    opt_steps  = max(num_iter // accum, 1)
+    warmup_opt = max(min(int(ocfg["warmup_iterations"]) // accum, opt_steps - 1), 1)
+
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=float(ocfg.get("init_lr", 0.0)),
+        peak_value=float(ocfg["peak_lr"]),
+        warmup_steps=warmup_opt,
+        decay_steps=opt_steps,
+        end_value=float(ocfg["end_lr"]),
+    )
+    base_opt = optax.adam(learning_rate=lr_schedule)
+    return optax.MultiSteps(base_opt, accum) if accum > 1 else base_opt
+
+
+def _parse_cli_value(val: str) -> Any:
+    """Parse a CLI --set value into int/float/bool/list/None, else keep as string.
+
+    Handles: 256, 0.1, true/false, null/none, [1024], [1024,1024,1024].
+    """
+    low = val.strip().lower()
+    if low in ("null", "none"):
+        return None
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    # list / tuple literals, e.g. [1024] or [1024,1024]
+    if val.strip().startswith(("[", "(")):
+        try:
+            return list(ast.literal_eval(val))
+        except (ValueError, SyntaxError):
+            return val
+    for cast in (int, float):
+        try:
+            return cast(val)
+        except ValueError:
+            pass
+    return val
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -298,12 +374,17 @@ class ValMetricsLogger(ComputationCallback):
               f"E-dist={entry['e_distance']:.4f}  "
               f"MMD={entry['mmd']:.4f}")
 
+        import wandb as _wandb
+        print(f"    [val diag] self._wandb_run={self._wandb_run!r}  "
+              f"global wandb.run={_wandb.run!r}  "
+              f"same={self._wandb_run is _wandb.run}")
         if self._wandb_run is not None:
             self._wandb_run.log({
                 "val_r_squared":  entry["r_squared"],
                 "val_e_distance": entry["e_distance"],
                 "val_mmd":        entry["mmd"],
             })
+            print(f"    [val diag] logged val metrics, run._step={getattr(self._wandb_run, '_step', '?')}")
 
         return {}
 
@@ -358,92 +439,151 @@ class BestModelCheckpoint(ComputationCallback):
 # ─────────────────────────────────────────────────────────────────────────────
 # Data helpers
 # ─────────────────────────────────────────────────────────────────────────────
-def make_split(cfg: dict):
-    zarr_path = Path(cfg["zarr_path"])
-    split_by  = cfg["split"]["by"]
-    ratios    = cfg["split"]["ratios"]
-    seed      = cfg["seed"]
+def _dataset_specs(cfg: dict) -> list[tuple[str, str, int, float]]:
+    """Return [(name, zarr_path, seed, weight), ...].
 
-    gd = GroupedDistribution.read_zarr(zarr_path)
-    print_dataset_stats(gd, "Full dataset")
+    Multi-dataset mode: set cfg['selected_datasets'] = [name, ...] and
+    cfg['datasets'][name] = {path, seed?, weight?}.
+    Single-dataset fallback: uses cfg['zarr_path'].
+    """
+    sel = cfg.get("selected_datasets")
+    if sel:
+        specs = []
+        for name in sel:
+            info = cfg["datasets"][name]
+            specs.append((
+                str(name),
+                str(info["path"]),
+                int(info.get("seed", cfg["seed"])),
+                float(info.get("weight", 1.0)),
+            ))
+        return specs
+    # single-dataset fallback
+    return [("gd", str(cfg["zarr_path"]), int(cfg["seed"]), 1.0)]
 
-    splits = split_datasets(
-        {"gd": gd},
-        split_by=[split_by],
-        split_key="split",
-        ratios=ratios,
-        random_state=seed,
-        holdout_combinations=False,
-    )
-    train_gd = splits["gd"]["train"]
-    val_gd   = splits["gd"]["val"]
-    test_gd  = splits["gd"]["test"]
-    print_split_stats(train_gd, val_gd, test_gd, split_by)
-    return train_gd, val_gd, test_gd
+
+def make_split(cfg: dict) -> dict:
+    """Read & split each selected dataset.
+
+    Returns {name: {"train": gd, "val": gd, "test": gd, "seed": int, "weight": float}}.
+    """
+    split_by = cfg["split"]["by"]
+    ratios   = cfg["split"]["ratios"]
+
+    out: dict = {}
+    for name, path, seed, weight in _dataset_specs(cfg):
+        print(f"  reading [{name}] ← {path}")
+        gd = GroupedDistribution.read_zarr(Path(path))
+        print_dataset_stats(gd, f"Full dataset [{name}]")
+        splits = split_datasets(
+            {name: gd},
+            split_by=[split_by],
+            split_key="split",
+            ratios=ratios,
+            random_state=seed,
+            holdout_combinations=False,
+        )
+        train_gd = splits[name]["train"]
+        val_gd   = splits[name]["val"]
+        test_gd  = splits[name]["test"]
+        print_split_stats(train_gd, val_gd, test_gd, split_by)
+        out[name] = {"train": train_gd, "val": val_gd, "test": test_gd,
+                     "seed": seed, "weight": weight}
+    return out
 
 
-def make_samplers(train_gd, val_gd, test_gd, cfg: dict, transform: ConditionTransform | None):
-    seed      = cfg["seed"]
-    tcfg      = cfg["training"]
-    rng       = np.random.default_rng(seed)
-    n_val     = tcfg["n_val_conditions"]
+def make_samplers(splits: dict, cfg: dict, transform: ConditionTransform | None):
+    """Build one combined train sampler + per-dataset val/test sampler dicts."""
+    tcfg  = cfg["training"]
+    rng   = np.random.default_rng(cfg["seed"])
+    n_val = tcfg["n_val_conditions"]
 
-    train_sampler = CombinedSampler(
-        samplers={"gd": ReservoirSampler(
-            train_gd, rng,
+    train_samplers: dict = {}
+    weights: dict = {}
+    for name, d in splits.items():
+        train_samplers[name] = ReservoirSampler(
+            d["train"], np.random.default_rng(d["seed"]),
             batch_size=tcfg["batch_size"],
             pool_fraction=tcfg["pool_fraction"],
             replacement_prob=tcfg["replacement_prob"],
             condition_transform=transform,
-        )},
-        rng=rng,
-    )
-    val_sampler  = ValidationSampler(
-        val_gd,
-        n_conditions_on_log_iteration=n_val,
-        n_conditions_on_train_end=n_val,
-        seed=seed,
-        condition_transform=transform,
-    )
-    test_sampler = ValidationSampler(
-        test_gd,
-        n_conditions_on_log_iteration=None,
-        n_conditions_on_train_end=None,
-        seed=seed,
-        condition_transform=transform,
-    )
+        )
+        weights[name] = d["weight"]
+    # weights all-equal → CombinedSampler normalizes to uniform (same as before)
+    train_sampler = CombinedSampler(samplers=train_samplers, rng=rng, weights=weights)
+
+    val_samplers = {
+        name: ValidationSampler(
+            d["val"],
+            n_conditions_on_log_iteration=n_val,
+            n_conditions_on_train_end=n_val,
+            seed=d["seed"],
+            condition_transform=transform,
+        )
+        for name, d in splits.items()
+    }
+    test_samplers = {
+        name: ValidationSampler(
+            d["test"],
+            n_conditions_on_log_iteration=None,
+            n_conditions_on_train_end=None,
+            seed=d["seed"],
+            condition_transform=transform,
+        )
+        for name, d in splits.items()
+    }
 
     train_sampler.init_sampler()
-    val_sampler.init_sampler()
-    test_sampler.init_sampler()
-    return train_sampler, val_sampler, test_sampler
+    for s in val_samplers.values():
+        s.init_sampler()
+    for s in test_samplers.values():
+        s.init_sampler()
+    return train_sampler, val_samplers, test_samplers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test evaluation
 # ─────────────────────────────────────────────────────────────────────────────
-def evaluate_test(solver, test_sampler) -> dict:
-    batch = test_sampler.sample(mode="on_train_end")
-    src   = batch["source"]
-    cond  = batch["condition"]
-    true  = batch["target"]
+def evaluate_test(solver, test_samplers: dict) -> dict:
+    """Evaluate the solver on each dataset's test split.
 
-    print(f"  predicting {len(src)} test conditions …")
-    pred = jax.tree.map(solver.predict, src, cond)
+    Returns {"per_dataset": {name: {per_condition, aggregated}},
+             "per_condition": {name/cond: metrics},   # flat, dataset-prefixed
+             "aggregated": {metric: overall_mean}}.
+    """
+    metrics = ["r_squared", "e_distance", "mmd"]
+    per_dataset: dict = {}
+    all_per_condition: dict = {}
 
-    per_condition = {}
-    for cond_key in tqdm(sorted(true.keys(), key=str), desc="  test metrics"):
-        y_true = np.array(true[cond_key])
-        y_pred = np.array(pred[cond_key])
-        per_condition[str(cond_key)] = {
-            "r_squared":  float(compute_r_squared(y_true, y_pred)),
-            "e_distance": float(compute_e_distance_fast(y_true, y_pred)),
-            "mmd":        float(compute_scalar_mmd(y_true, y_pred)),
+    for name, sampler in test_samplers.items():
+        batch = sampler.sample(mode="on_train_end")
+        src, cond, true = batch["source"], batch["condition"], batch["target"]
+
+        print(f"  [{name}] predicting {len(src)} test conditions …")
+        pred = jax.tree.map(solver.predict, src, cond)
+
+        per_condition = {}
+        for cond_key in tqdm(sorted(true.keys(), key=str), desc=f"  test metrics [{name}]"):
+            y_true = np.array(true[cond_key])
+            y_pred = np.array(pred[cond_key])
+            m = {
+                "r_squared":  float(compute_r_squared(y_true, y_pred)),
+                "e_distance": float(compute_e_distance_fast(y_true, y_pred)),
+                "mmd":        float(compute_scalar_mmd(y_true, y_pred)),
+            }
+            per_condition[str(cond_key)] = m
+            all_per_condition[f"{name}/{cond_key}"] = m
+
+        per_dataset[name] = {
+            "per_condition": per_condition,
+            "aggregated": {mm: float(np.mean([v[mm] for v in per_condition.values()]))
+                           for mm in metrics},
         }
 
-    metrics    = ["r_squared", "e_distance", "mmd"]
-    aggregated = {m: float(np.mean([v[m] for v in per_condition.values()])) for m in metrics}
-    return {"per_condition": per_condition, "aggregated": aggregated}
+    aggregated = {mm: float(np.mean([v[mm] for v in all_per_condition.values()]))
+                  for mm in metrics}
+    return {"per_dataset": per_dataset, "per_condition": all_per_condition,
+            "aggregated": aggregated}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,13 +607,11 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
 
     t0 = time.perf_counter()
     print("Loading & splitting data …")
-    train_gd, val_gd, test_gd = make_split(cfg)
+    splits = make_split(cfg)
     print(f"  done in {time.perf_counter() - t0:.1f}s")
 
     print("Building samplers …")
-    train_sampler, val_sampler, test_sampler = make_samplers(
-        train_gd, val_gd, test_gd, cfg, transform
-    )
+    train_sampler, val_samplers, test_samplers = make_samplers(splits, cfg, transform)
 
     sample_batch    = train_sampler.sample()
     cond_keys       = list(sample_batch["condition"].keys())
@@ -482,8 +620,26 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
     print(f"  data_dim={data_dim}  condition_keys={cond_keys}")
 
     print("Building model …")
-    sf = ScaleFlow()
-    sf.prepare_model(sample_batch=sample_batch, max_combination_length=1)
+    arch = cfg["arch"]
+    sf = ScaleFlow(solver=cfg["solver"])
+    prepare_kwargs = dict(
+        sample_batch=sample_batch,
+        max_combination_length=arch["max_combination_length"],
+        conditioning=arch["conditioning"],
+        hidden_dims=tuple(arch["hidden_dims"]),
+        decoder_dims=tuple(arch["decoder_dims"]),
+        condition_embedding_dim=arch["condition_embedding_dim"],
+        match_fn=partial(match_linear, epsilon=arch["match_fn_epsilon"]),
+        optimizer=build_optimizer(cfg),
+    )
+    if arch.get("constant_noise") is not None:
+        prepare_kwargs["probability_path"] = {"constant_noise": arch["constant_noise"]}
+    sf.prepare_model(**prepare_kwargs)
+
+    ocfg = cfg["optimizer"]
+    print(f"  optimizer: adam warmup-cosine  peak={ocfg['peak_lr']:.1e}  "
+          f"end={ocfg['end_lr']:.1e}  warmup={ocfg['warmup_iterations']}  "
+          f"grad_accum={ocfg.get('grad_accumulation', 1)}")
 
     vf       = sf.solver.vf
     n_params = sum(x.size for x in jax.tree.leaves(sf.solver.vf_state.params))
@@ -495,6 +651,14 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
     print(f"  Total parameters      : {n_params:,}")
     print(f"  Data dim              : {data_dim}")
     print(f"  Prophet embedding     : {prophet_status}")
+    print(f"  Solver                : {cfg['solver']}")
+    print(f"  Conditioning          : {arch['conditioning']}")
+    print(f"  Hidden dims           : {list(arch['hidden_dims'])}")
+    print(f"  Decoder dims          : {list(arch['decoder_dims'])}")
+    print(f"  Condition emb dim     : {arch['condition_embedding_dim']}")
+    print(f"  Max combination length: {arch['max_combination_length']}")
+    print(f"  Match fn epsilon      : {arch['match_fn_epsilon']}")
+    print(f"  Constant noise        : {arch.get('constant_noise')}")
     for k, d in cond_input_dims.items():
         print(f"  Input dim [{k:<10}]: {d}")
     print(f"{'─'*60}")
@@ -514,16 +678,26 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
         BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
     ]
 
+    # Metrics callback names keys "{val_dataset}_{metric}_mean", so monitor must
+    # follow the actual dataset names (single fallback dataset is named "gd").
+    monitor_metrics = ["loss"]
+    for ds_name in val_samplers:
+        monitor_metrics += [
+            f"{ds_name}_r_squared_mean",
+            f"{ds_name}_e_distance_mean",
+            f"{ds_name}_mmd_mean",
+        ]
+
     print(f"Training {tcfg['num_iterations']} iterations "
           f"(val every {valid_freq} steps, {tcfg['n_val_conditions']} conditions) …")
     t0 = time.perf_counter()
     sf.train(
         train_dataloader=train_sampler,
-        val_dataloader={"val": val_sampler},
+        val_dataloader=val_samplers,
         num_iterations=tcfg["num_iterations"],
         valid_freq=valid_freq,
         callbacks=callbacks,
-        monitor_metrics=["loss", "val_r_squared_mean", "val_e_distance_mean", "val_mmd_mean"],
+        monitor_metrics=monitor_metrics,
     )
     elapsed = (time.perf_counter() - t0) / 60
     print(f"  training done in {elapsed:.1f} min")
@@ -540,7 +714,7 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
         best_solver = sf.solver
 
     print("Evaluating on test set …")
-    test_metrics = evaluate_test(best_solver, test_sampler)
+    test_metrics = evaluate_test(best_solver, test_samplers)
 
     result_path = output_dir / f"{name}_results.pkl"
     with open(result_path, "wb") as f:
@@ -549,6 +723,10 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
 
     if wandb_run is not None:
         test_log = {f"test_{metric}": val for metric, val in test_metrics["aggregated"].items()}
+        # per-dataset breakdown
+        for dsname, dsres in test_metrics["per_dataset"].items():
+            for metric, val in dsres["aggregated"].items():
+                test_log[f"test_{dsname}_{metric}"] = val
         wandb_run.log(test_log)                      # shows up as a chart point
         for k, v in test_log.items():
             wandb_run.summary[k] = v                 # also pinned in Summary panel
@@ -584,15 +762,7 @@ if __name__ == "__main__":
     if args.set:
         for kv in args.set:
             key, _, val = kv.partition("=")
-            # Try to parse as int/float/bool, else keep as string
-            for cast in (int, float):
-                try:
-                    val = cast(val)
-                    break
-                except ValueError:
-                    pass
-            if val == "true":  val = True
-            if val == "false": val = False
+            val = _parse_cli_value(val)
             set_nested(overrides, key, val)
     if args.wandb:
         overrides.setdefault("wandb", {})["enabled"] = True

@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# WandB sweep — single dataset, tweak model/solver/optimizer hyperparams
+# Usage:
+#   wandb sweep config/sweep_single.yaml        → prints sweep_id
+#   wandb agent <entity>/<project>/<sweep_id>
+#
+# Notes:
+#   • value:  <x>      → fixed for every run
+#   • values: [a, b]   → swept (grid tries each; bayes/random sample)
+#   • Dotted keys (arch.hidden_dims, optimizer.peak_lr, ...) map onto the nested
+#     config via set_nested — same mechanism as training.batch_size.
+#   • Lists pass through wandb.config as real lists (no quoting needed).
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: train_comparison.py
+method:  grid                     # grid | random | bayes
+
+metric:
+  goal: maximize
+  name: val_r_squared
+
+parameters:
+  # ── dataset (single) ──────────────────────────────────────────────────────
+  zarr_path:
+    value: /storage/pancellflow/tahoe_updated.zarr
+  model:                          # embedding mode
+    value: default                # default | prophet | random
+
+  # ── solver ────────────────────────────────────────────────────────────────
+  solver:
+    values: [otfm]           
+
+  # ── model architecture ───────────────────────────-------------------------
+  arch.decoder_dims:
+    value: [1024]
+  arch.condition_embedding_dim:
+    value: 256
+  arch.max_combination_length:
+    value: 1
+  arch.match_fn_epsilon:
+    value: 10
+  arch.constant_noise:
+    value: 0.1
+
+  # ── optimizer (warmup-cosine) ─────────────────────────────────────────────
+  optimizer.peak_lr:
+    values: [1.0e-4]      # ← swept: two peak LRs
+  optimizer.end_lr:
+    value: 1.0e-5
+  optimizer.warmup_iterations:
+    value: 1000
+  optimizer.grad_accumulation:
+    value: 10
+
+  # ── training ──────────────────────────────────────────────────────────────
+  training.pool_fraction:
+    value: 0.7
+  training.replacement_prob:
+    value: 0.5
+  training.num_iterations:
+    value: 45000
+  training.valid_freq:
+    value: 20000
+  training.n_val_conditions:
+    value: 20
