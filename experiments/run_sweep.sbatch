@@ -12,7 +12,7 @@
 #SBATCH --output=/lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/logs/sweep_%j.out
 #SBATCH --error=/lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/logs/sweep_%j.err
 
-export WANDB_API_KEY='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'
+export WANDB_API_KEY='<your_api_key>'
 CONTAINER_NAME="jax_container_${SLURM_ARRAY_TASK_ID}"
 rm -rf /localscratch/karthik.viswanathan/enroot/data/${CONTAINER_NAME}/
 mkdir -p /lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/logs
@@ -22,6 +22,6 @@ enroot start --rw \
     --mount /lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/:/storage/pancellflow \
     --env WANDB_API_KEY=$WANDB_API_KEY \
     ${CONTAINER_NAME} \
-    bash -c "cd /storage/pancellflow/CellFlow2 && wandb agent kv123/CellFlow2-experiments_experiments/mppmihfz"
+    bash -c "cd /storage/pancellflow/CellFlow2 && wandb agent <your_sweep_id>"
 
 enroot remove ${CONTAINER_NAME}
