@@ -3,7 +3,7 @@
 # Override individual keys via CLI: --model prophet --split.by cell_line
 # ─────────────────────────────────────────────────────────────────────────────
 
-zarr_path:  /storage/pancellflow/tahoe.zarr
+zarr_path:  /storage/pancellflow/tahoe_updated.zarr
 output_dir: /storage/pancellflow/outputs
 
 seed: 42

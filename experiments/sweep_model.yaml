@@ -1,12 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# WandB sweep — hyperparameter search (Bayesian optimisation)
+# WandB sweep — compare default vs random vs prophet
 # Usage:
-#   wandb sweep config/sweep_hyperparams.yaml    → prints sweep_id
+#   wandb sweep experiments/sweep_model.yaml          → prints sweep_id
 #   wandb agent <entity>/<project>/<sweep_id>
 # ─────────────────────────────────────────────────────────────────────────────
 
-program: train_comparison.py
-method:  bayes
+program: experiments/train_comparison.py
+method:  grid
 
 metric:
   goal: maximize
@@ -14,20 +14,4 @@ metric:
 
 parameters:
   model:
-    values: [default, prophet, random]
-
-  training.batch_size:
-    values: [512, 1024, 2048]
-
-  training.pool_fraction:
-    distribution: uniform
-    min: 0.5
-    max: 0.9
-
-  training.replacement_prob:
-    distribution: uniform
-    min: 0.1
-    max: 0.7
-
-  split.by:
-    values: [drug]
+    values: [default, random, prophet]

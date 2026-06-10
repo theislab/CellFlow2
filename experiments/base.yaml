@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CellFlow2 — base config (SINGLE SOURCE OF TRUTH)
+#
+# This file is ALWAYS loaded first by train_comparison.py. There are no
+# hardcoded defaults in the Python anymore — every default lives here.
+#
+# Override order (later wins):
+#   1. experiments/base.yaml         (this file, always loaded)
+#   2. --config <file>          (optional overlay, e.g. experiments/multi_dataset.yaml)
+#   3. --set key=value ...      (CLI overrides, dotted keys)
+#   4. wandb sweep parameters   (when launched by `wandb agent`)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+# Datasets are always declared in the registry below and selected by name.
+# For one dataset, the registry just has a single entry (as here).
+datasets:
+  tahoe:
+    path:   /storage/pancellflow/tahoe_updated.zarr
+    seed:   42
+    weight: 1.0
+
+selected_datasets: [tahoe]   # which datasets to train on this run
+
+output_dir: /storage/pancellflow/outputs
+seed: 42
+
+split:
+  by: drug                 # "drug" | "cell_line"
+  ratios: [0.7, 0.2, 0.1]
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  batch_size:       1024
+  pool_fraction:    0.7
+  replacement_prob: 0.5
+  num_iterations:   200000
+  valid_freq:       20000
+  n_val_conditions: 20      # null = all conditions
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model: default             # embedding mode: "default" | "prophet" | "random"
+solver: otfm               # "otfm" | "genot" | "eqm"
+
+optimizer:
+  peak_lr:           1.0e-4   # warmup target LR
+  end_lr:            1.0e-5   # cosine decay floor
+  init_lr:           0.0      # LR at step 0
+  warmup_iterations: 5000     # in training steps
+  grad_accumulation: 20       # MultiSteps multiplier (1 = off)
+
+arch:
+  conditioning:            concatenation   # concatenation | film | resnet
+  hidden_dims:             [2048, 2048, 2048]
+  decoder_dims:            [4096, 4096, 4096]
+  condition_embedding_dim: 256
+  max_combination_length:  1
+  match_fn_epsilon:        0.1
+  constant_noise:          null            # float → probability_path constant_noise
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+wandb:
+  enabled: false
+  project: pancellflow
+  entity:  null            # set to your wandb username/org
+  run_name: null           # null = auto-generated

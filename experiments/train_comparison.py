@@ -3,23 +3,28 @@ train_comparison.py
 
 Trains a CellFlow2 model on Tahoe data.
 
-Usage
+All defaults live in experiments/base.yaml (the single source of truth); it is
+always loaded first. An optional --config file overlays it, then --set CLI
+overrides, then wandb sweep params.
+
+Run from the repo root:
 ─────
-  # Use default config:
-  python train_comparison.py
+  # Use base config as-is:
+  python experiments/train_comparison.py
 
   # Override specific keys:
-  python train_comparison.py --model prophet
-  python train_comparison.py --model random --split.by cell_line
+  python experiments/train_comparison.py --model prophet
+  python experiments/train_comparison.py --model random --split.by cell_line
+  python experiments/train_comparison.py --set arch.hidden_dims=[1024] optimizer.peak_lr=2e-4
 
-  # Custom config file:
-  python train_comparison.py --config config/default.yaml --model prophet
+  # Overlay another YAML on top of base.yaml (path resolved next to the script):
+  python experiments/train_comparison.py --config multi_dataset.yaml
 
   # Enable wandb logging:
-  python train_comparison.py --wandb
+  python experiments/train_comparison.py --wandb
 
   # Run as wandb sweep agent (agent passes params automatically):
-  wandb sweep config/sweep_model.yaml
+  wandb sweep experiments/sweep_single.yaml
   wandb agent <sweep_id>
 """
 
@@ -61,50 +66,14 @@ from scaleflow.metrics._metrics import (
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config helpers
+#
+# All defaults live in experiments/base.yaml — the single source of truth.
+# There are no hardcoded config values in this file. base.yaml (resolved next to
+# this script) is always loaded first, then an optional --config overlay, then
+# CLI --set overrides.
 # ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_CONFIG = {
-    "zarr_path":  "/storage/pancellflow/tahoe.zarr",   # single-dataset fallback
-    "datasets":          None,   # multi-dataset: {name: {path, seed?, weight?}}
-    "selected_datasets": None,   # multi-dataset: [name, ...]
-    "output_dir": "/storage/pancellflow/outputs",
-    "seed": 42,
-    "split": {
-        "by":     "drug",
-        "ratios": [0.7, 0.2, 0.1],
-    },
-    "training": {
-        "batch_size":       1024,
-        "pool_fraction":    0.7,
-        "replacement_prob": 0.5,
-        "num_iterations":   200_000,
-        "valid_freq":       20_000,
-        "n_val_conditions": 20,
-    },
-    "model": "default",                       # embedding mode: default | prophet | random
-    "solver": "otfm",                         # otfm | genot | eqm
-    "optimizer": {
-        "peak_lr":           1.0e-4,
-        "end_lr":            1.0e-5,
-        "init_lr":           0.0,
-        "warmup_iterations": 5000,
-        "grad_accumulation": 20,              # MultiSteps multiplier (1 = no accumulation)
-    },
-    "arch": {
-        "conditioning":            "concatenation",   # concatenation | film | resnet
-        "hidden_dims":             [2048, 2048, 2048],
-        "decoder_dims":            [4096, 4096, 4096],
-        "condition_embedding_dim": 256,
-        "max_combination_length":  1,
-        "match_fn_epsilon":        0.1,
-        "constant_noise":          None,      # float → probability_path={"constant_noise": x}
-    },
-    "wandb": {
-        "enabled":  False,
-        "project":  "pancellflow",
-        "entity":   None,
-        "run_name": None,
-    },
-}
+CONFIG_DIR       = Path(__file__).resolve().parent          # experiments/
+BASE_CONFIG_PATH = CONFIG_DIR / "base.yaml"
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -118,10 +87,29 @@ def deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _resolve_config(config_path: str) -> Path:
+    """Resolve an overlay path: as given, else relative to this script's dir."""
+    p = Path(config_path)
+    if p.exists():
+        return p
+    alt = CONFIG_DIR / config_path
+    if alt.exists():
+        return alt
+    raise FileNotFoundError(f"Config overlay not found: {config_path} (also tried {alt})")
+
+
 def load_config(config_path: str | None, overrides: dict) -> dict:
-    cfg = DEFAULT_CONFIG.copy()
+    """Load config: base.yaml → optional --config overlay → CLI overrides."""
+    if not BASE_CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"Base config not found at {BASE_CONFIG_PATH}. "
+            f"It is the single source of truth for all defaults — it must exist."
+        )
+    with open(BASE_CONFIG_PATH) as f:
+        cfg = yaml.safe_load(f) or {}
+
     if config_path:
-        with open(config_path) as f:
+        with open(_resolve_config(config_path)) as f:
             file_cfg = yaml.safe_load(f)
         cfg = deep_merge(cfg, file_cfg or {})
     cfg = deep_merge(cfg, overrides)
@@ -442,14 +430,20 @@ class BestModelCheckpoint(ComputationCallback):
 def _dataset_specs(cfg: dict) -> list[tuple[str, str, int, float]]:
     """Return [(name, zarr_path, seed, weight), ...].
 
-    Multi-dataset mode: set cfg['selected_datasets'] = [name, ...] and
-    cfg['datasets'][name] = {path, seed?, weight?}.
-    Single-dataset fallback: uses cfg['zarr_path'].
+    Datasets are declared in cfg['datasets'] = {name: {path, seed?, weight?}}
+    and chosen by name via cfg['selected_datasets'] = [name, ...]. This holds
+    for both single- and multi-dataset training (single = one entry).
+    A legacy single 'zarr_path' is still honoured as a last-resort fallback.
     """
     sel = cfg.get("selected_datasets")
     if sel:
         specs = []
         for name in sel:
+            if name not in (cfg.get("datasets") or {}):
+                raise KeyError(
+                    f"selected_datasets includes '{name}' but it is not in "
+                    f"cfg['datasets'] (have: {list((cfg.get('datasets') or {}).keys())})"
+                )
             info = cfg["datasets"][name]
             specs.append((
                 str(name),
@@ -458,8 +452,14 @@ def _dataset_specs(cfg: dict) -> list[tuple[str, str, int, float]]:
                 float(info.get("weight", 1.0)),
             ))
         return specs
-    # single-dataset fallback
-    return [("gd", str(cfg["zarr_path"]), int(cfg["seed"]), 1.0)]
+    # legacy fallback: a single bare zarr_path
+    zarr_path = cfg.get("zarr_path")
+    if not zarr_path:
+        raise ValueError(
+            "No datasets configured. Set 'selected_datasets' (+ 'datasets' registry) "
+            "in experiments/base.yaml, or provide a single 'zarr_path'."
+        )
+    return [("gd", str(zarr_path), int(cfg["seed"]), 1.0)]
 
 
 def make_split(cfg: dict) -> dict:
@@ -739,8 +739,9 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config/default.yaml",
-                        help="Path to YAML config file")
+    parser.add_argument("--config", default=None,
+                        help="Optional YAML overlay on top of experiments/base.yaml "
+                             "(e.g. multi_dataset.yaml — resolved next to the script)")
     parser.add_argument("--model", choices=["default", "prophet", "random"],
                         help="Override config model")
     parser.add_argument("--split.by", dest="split_by",

@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # WandB sweep — single dataset, tweak model/solver/optimizer hyperparams
 # Usage:
-#   wandb sweep config/sweep_single.yaml        → prints sweep_id
+#   wandb sweep experiments/sweep_single.yaml        → prints sweep_id
 #   wandb agent <entity>/<project>/<sweep_id>
 #
 # Notes:
@@ -12,7 +12,7 @@
 #   • Lists pass through wandb.config as real lists (no quoting needed).
 # ─────────────────────────────────────────────────────────────────────────────
 
-program: train_comparison.py
+program: experiments/train_comparison.py
 method:  grid                     # grid | random | bayes
 
 metric:
@@ -21,7 +21,8 @@ metric:
 
 parameters:
   # ── dataset (single) ──────────────────────────────────────────────────────
-  zarr_path:
+  # base.yaml selects [tahoe]; point that entry's path at the zarr you want.
+  datasets.tahoe.path:
     value: /storage/pancellflow/tahoe_updated.zarr
   model:                          # embedding mode
     value: default                # default | prophet | random
@@ -30,7 +31,11 @@ parameters:
   solver:
     values: [otfm]           
 
-  # ── model architecture ───────────────────────────-------------------------
+  # ── arch ──────────────────────────────────────────────────────────────────
+  arch.conditioning:
+    value: concatenation          # concatenation | film | resnet
+  arch.hidden_dims:
+    values: [[2048, 2048, 2048]]   # ← swept: two architectures
   arch.decoder_dims:
     value: [1024]
   arch.condition_embedding_dim:
@@ -48,11 +53,13 @@ parameters:
   optimizer.end_lr:
     value: 1.0e-5
   optimizer.warmup_iterations:
-    value: 1000
+    value: 5000
   optimizer.grad_accumulation:
-    value: 10
+    value: 20
 
   # ── training ──────────────────────────────────────────────────────────────
+  training.batch_size:
+    value: 256
   training.pool_fraction:
     value: 0.7
   training.replacement_prob:
