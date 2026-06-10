@@ -1,17 +1,13 @@
-"""
-train_zarr.py — train a CellFlow2 model from prebuilt zarr GroupedDistributions.
+"""Train a CellFlow2 model from prebuilt zarr GroupedDistributions.
 
-train_comparison-style training: full Metrics callback + per-step JSON val logging
-(incl. r_squared_delta) + best-checkpoint + test evaluation + manual wandb.
-
-  python experiments/train_zarr.py
-  python experiments/train_zarr.py ablation=prophet
-  python experiments/train_zarr.py solver=eqm conditioning=adaln_zero
-  python experiments/train_zarr.py selected_datasets=[tahoe] wandb.enabled=true
+    python experiments/train_zarr.py
+    python experiments/train_zarr.py ablation=prophet
+    python experiments/train_zarr.py solver=eqm conditioning=adaln_zero
+    python experiments/train_zarr.py selected_datasets=[tahoe] wandb.enabled=true
 """
 import os
 
-# JAX env tweaks must be set before anything imports jax (scaleflow / utils do).
+# set JAX env before importing jax (pulled in by scaleflow / utils)
 os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/storage/jax_cache")
 os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
@@ -32,15 +28,11 @@ from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
 from scaleflow.utils import match_linear
 
-import utils       # ConditionTransform, build_optimizer
-import callbacks   # ValMetricsLogger, BestModelCheckpoint, evaluate_test, save_logs
+import utils
+import callbacks
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Train
-# ─────────────────────────────────────────────────────────────────────────────
 def run(cfg: DictConfig, gds: dict) -> dict:
-    """Split → samplers → model → train → test, for already-loaded GroupedDistributions."""
     mode       = cfg.ablation.mode
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -53,7 +45,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
           f"solver={cfg.solver.solver_key}  conditioning={cfg.model.conditioning_key}")
     print(f"{'='*64}")
 
-    # ── Optional wandb (manual, train_comparison style) ───────────────────────
     wandb_run = None
     if cfg.wandb.enabled:
         try:
@@ -68,7 +59,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         except ImportError:
             print("  wandb not installed — skipping")
 
-    # ── Split ─────────────────────────────────────────────────────────────────
     print("Splitting datasets …")
     data = split_datasets(
         gds,
@@ -79,7 +69,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         random_state=int(cfg.split.random_state),
     )
 
-    # ── Samplers (train / val / test) ─────────────────────────────────────────
     print("Creating samplers …")
     bs    = int(cfg.training.batch_size)
     n_val = cfg.training.get("n_val_conditions", None)
@@ -123,27 +112,24 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     sample_batch = train_sampler.sample()
     print(f"  condition keys: {[(k, tuple(v.shape)) for k, v in sample_batch['condition'].items()]}")
 
-    # ── Model ─────────────────────────────────────────────────────────────────
     print("Building model …")
     m            = cfg.model
     cond_key     = m.conditioning_key
-    cond_kwargs  = OmegaConf.to_container(m.conditioning_kwargs, resolve=True)
     hidden_dims  = tuple(int(x) for x in m.hidden_dims)
     decoder_dims = tuple(int(x) for x in m.decoder_dims)
-
     if cond_key == "adaln_zero" and decoder_dims[-1] != hidden_dims[-1]:
         raise ValueError(
-            f"For 'adaln_zero' conditioning, decoder_dims[-1] must equal hidden_dims[-1]. "
-            f"Got {decoder_dims[-1]} vs {hidden_dims[-1]}."
+            f"adaln_zero requires decoder_dims[-1] == hidden_dims[-1]; "
+            f"got {decoder_dims[-1]} vs {hidden_dims[-1]}."
         )
 
-    optimizer, _lr_schedule = utils.build_optimizer(cfg)
+    optimizer, _ = utils.build_optimizer(cfg)
     sf = ScaleFlow(solver=cfg.solver.solver_key)
     sf.prepare_model(
         sample_batch=sample_batch,
         max_combination_length=int(m.max_combination_length),
         conditioning=cond_key,
-        conditioning_kwargs=cond_kwargs,
+        conditioning_kwargs=OmegaConf.to_container(m.conditioning_kwargs, resolve=True),
         hidden_dims=hidden_dims,
         decoder_dims=decoder_dims,
         condition_embedding_dim=int(m.condition_embedding_dim),
@@ -154,7 +140,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     n_params = sum(x.size for x in jax.tree.leaves(sf.solver.vf_state.params))
     print(f"  total parameters: {n_params:,}")
 
-    # ── Callbacks (train_comparison style + r_squared_delta) ──────────────────
     val_log_path = str(output_dir / f"{name}_val_metrics.json")
     cbs = [
         Metrics(
@@ -167,8 +152,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
     ]
 
-    # Metrics callback keys metrics as "{ds}_{metric}_mean"; ValMetricsLogger adds
-    # "{ds}_r_squared_delta_mean". Monitor all of them per dataset.
     monitor_metrics = ["loss"]
     for ds in val_samplers:
         monitor_metrics += [
@@ -178,7 +161,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
             f"{ds}_r_squared_delta_mean",
         ]
 
-    # ── Train ─────────────────────────────────────────────────────────────────
     print(f"Training {int(cfg.training.num_iterations)} iterations "
           f"(val every {int(cfg.training.valid_freq)} steps) …")
     t0 = time.perf_counter()
@@ -193,7 +175,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     print(f"  training done in {(time.perf_counter() - t0) / 60:.1f} min")
     callbacks.save_logs(name, sf.trainer.training_logs, output_dir)
 
-    # ── Load best checkpoint, evaluate on test ────────────────────────────────
     if os.path.exists(ckpt_path):
         print(f"Loading best checkpoint from {ckpt_path} …")
         with open(ckpt_path, "rb") as f:

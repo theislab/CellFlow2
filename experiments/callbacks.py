@@ -1,17 +1,4 @@
-"""
-callbacks.py — train_comparison-style validation/eval for the unified scripts.
-
-Contents:
-  • r_squared_delta   — R²(pred − control, gt − control); control = mean over the
-                        source/control cells. Reuses compute_r_squared (which is
-                        r2_score over per-feature means), evaluated on the deltas.
-  • ValMetricsLogger  — per-step val metrics (r2 / e_dist / mmd / r²Δ) → JSON +
-                        wandb; returns per-dataset {ds}_r_squared_delta_mean so the
-                        delta is a real monitor_metrics key.
-  • BestModelCheckpoint — cloudpickle the solver whenever mean val R² improves.
-  • evaluate_test     — per-condition + aggregated test metrics (incl r²Δ).
-  • save_logs         — dump trainer.training_logs to JSON.
-"""
+"""Validation/test callbacks and the r_squared_delta metric."""
 from __future__ import annotations
 
 import json
@@ -31,37 +18,24 @@ from scaleflow.metrics._metrics import (
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Delta R² metric
-# ─────────────────────────────────────────────────────────────────────────────
 def r_squared_delta(y_true, y_pred, source) -> float:
-    """R²(pred − control, gt − control), control = mean over source/control cells.
-
-    compute_r_squared(a, b) == r2_score(mean(a, 0), mean(b, 0)); subtracting the
-    control mean from every cell shifts those per-feature means by −ctrl, so this
-    is exactly r2_score(mean(true) − ctrl, mean(pred) − ctrl) = R² of the deltas.
-    """
+    """R² of the perturbation delta: R²(pred - control, gt - control)."""
     ctrl = np.asarray(source).mean(axis=0)
     return float(compute_r_squared(np.asarray(y_true) - ctrl, np.asarray(y_pred) - ctrl))
 
 
 def _condition_metrics(y_true, y_pred, source) -> dict:
     yt, yp = np.asarray(y_true), np.asarray(y_pred)
-    m = {
+    return {
         "r_squared":  float(compute_r_squared(yt, yp)),
         "e_distance": float(compute_e_distance_fast(yt, yp)),
         "mmd":        float(compute_scalar_mmd(yt, yp)),
         "r_squared_delta": r_squared_delta(yt, yp, source) if source is not None else float("nan"),
     }
-    return m
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Callbacks
-# ─────────────────────────────────────────────────────────────────────────────
 class ValMetricsLogger(ComputationCallback):
-    """Appends pooled val metrics to a JSON file after each validation step, logs
-    them to wandb, and returns per-dataset r²Δ so it can be monitored."""
+    """Logs pooled val metrics to JSON + wandb; returns per-dataset r²Δ for monitoring."""
 
     METRICS = ("r_squared", "e_distance", "mmd", "r_squared_delta")
 
@@ -75,7 +49,6 @@ class ValMetricsLogger(ComputationCallback):
         self._step = 0
 
     def _gather(self, valid_source_data, valid_true_data, valid_pred_data):
-        """Return {dataset_key: [per-condition metric dict, ...]}."""
         per_ds: dict = {}
         for ds in valid_true_data:
             for cond_key, true_arr in valid_true_data[ds].items():
@@ -96,22 +69,19 @@ class ValMetricsLogger(ComputationCallback):
         for k in self.METRICS:
             entry[k] = float(np.nanmean([m[k] for m in flat]))
 
+        entries = []
         if os.path.exists(self.save_path):
             with open(self.save_path) as f:
                 entries = json.load(f)
-        else:
-            entries = []
         entries.append(entry)
         with open(self.save_path, "w") as f:
             json.dump(entries, f, indent=2)
 
         print(f"    val  R²={entry['r_squared']:.4f}  ΔR²={entry['r_squared_delta']:.4f}  "
               f"E-dist={entry['e_distance']:.4f}  MMD={entry['mmd']:.4f}  (step {self._step})")
-
         if self._wandb_run is not None:
             self._wandb_run.log({f"val_{k}": entry[k] for k in self.METRICS})
 
-        # per-dataset r²Δ → real monitor_metrics keys ({ds}_r_squared_delta_mean)
         return {
             f"{ds}_r_squared_delta_mean": float(np.nanmean([m["r_squared_delta"] for m in ms]))
             for ds, ms in per_ds.items()
@@ -165,15 +135,8 @@ class BestModelCheckpoint(ComputationCallback):
                                      valid_pred_data, solver)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test evaluation
-# ─────────────────────────────────────────────────────────────────────────────
 def evaluate_test(solver, test_samplers: dict) -> dict:
-    """Evaluate on each dataset's test split.
-
-    Returns {"per_dataset": {name: {per_condition, aggregated}},
-             "per_condition": {name/cond: metrics}, "aggregated": {metric: mean}}.
-    """
+    """Per-condition and aggregated test metrics for each dataset."""
     keys = list(ValMetricsLogger.METRICS)
     per_dataset: dict = {}
     all_per_condition: dict = {}
@@ -200,9 +163,6 @@ def evaluate_test(solver, test_samplers: dict) -> dict:
     return {"per_dataset": per_dataset, "per_condition": all_per_condition, "aggregated": aggregated}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Misc
-# ─────────────────────────────────────────────────────────────────────────────
 def save_logs(name: str, logs: dict, output_dir: Path) -> None:
     path = output_dir / f"{name}_training_logs.json"
     serialisable = {k: [float(v) for v in vals] for k, vals in logs.items() if vals}
