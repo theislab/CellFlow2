@@ -1,0 +1,6 @@
+# @package _global_
+split:
+  by: [drug_0, drug_1]    # split by drug-combination
+  ratios: [0.4, 0.3, 0.3]
+  random_state: 42
+  holdout_combinations: false

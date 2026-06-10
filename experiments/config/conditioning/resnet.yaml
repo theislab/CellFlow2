@@ -1,0 +1,2 @@
+conditioning_key: resnet
+conditioning_kwargs: {}

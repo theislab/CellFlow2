@@ -1,0 +1,2 @@
+# Prophet ablation: replace the 'prophet' embedding with random vectors.
+mode: random

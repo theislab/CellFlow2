@@ -1,0 +1,2 @@
+# Prophet ablation: keep the 'prophet' condition embedding as-is.
+mode: prophet

@@ -1,0 +1,40 @@
+# Registry of raw .h5ad datasets (unipert embeddings). Choose via selected_datasets.
+combosciplex:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/combosciplex_se.h5ad
+  seed: 43
+tahoe_a549:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_a549_w_emb.h5ad
+  seed: 44
+tahoe_aspc_1:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_aspc_1_w_emb.h5ad
+  seed: 44
+tahoe_h4:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_h4_w_emb.h5ad
+  seed: 44
+tahoe_hop62:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_hop62_w_emb.h5ad
+  seed: 44
+tahoe_panc_1:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_panc_1_w_emb.h5ad
+  seed: 44
+tahoe_snu_1:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_snu_1_w_emb.h5ad
+  seed: 44
+tahoe_sw48:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_sw48_w_emb.h5ad
+  seed: 44
+zhao21:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/zhao21_w_emb.h5ad
+  seed: 45
+aissa21:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/aissa21_w_emb.h5ad
+  seed: 47
+sciplex2:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex2_w_emb.h5ad
+  seed: 50
+sciplex3:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex3_w_emb.h5ad
+  seed: 51
+sciplex4:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/srivatsan20_sciplex4_w_emb.h5ad
+  seed: 52
