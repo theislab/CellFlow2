@@ -252,7 +252,7 @@ class ValMetricsLogger(ComputationCallback):
     """Appends val metrics to a JSON file immediately after each validation step."""
 
     def __init__(self, save_path: str, valid_freq: int, wandb_run=None):
-        self.save_path  = save_path
+        self.save_path   = save_path
         self._valid_freq = valid_freq
         self._step       = 0
         self._wandb_run  = wandb_run
@@ -260,7 +260,7 @@ class ValMetricsLogger(ComputationCallback):
     def on_train_begin(self, *args, **kwargs) -> None:
         self._step = 0
 
-    def _compute_and_save(self, valid_true_data, valid_pred_data) -> None:
+    def _compute_and_save(self, valid_true_data, valid_pred_data) -> dict:
         r2s, eds, mmds = [], [], []
         for dataset_key in valid_true_data:
             for cond_key, true_arr in valid_true_data[dataset_key].items():
@@ -274,7 +274,7 @@ class ValMetricsLogger(ComputationCallback):
                 mmds.append(float(compute_scalar_mmd(y_true, y_pred)))
 
         if not r2s:
-            return
+            return {}
 
         entry = {
             "step":         self._step,
@@ -303,23 +303,14 @@ class ValMetricsLogger(ComputationCallback):
                 "val_r_squared":  entry["r_squared"],
                 "val_e_distance": entry["e_distance"],
                 "val_mmd":        entry["mmd"],
-                "step":           self._step,
-            }, step=self._step)
+            })
+
+        return {}
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
                          valid_pred_data, solver, **kwargs) -> dict:
         self._step += self._valid_freq
         self._compute_and_save(valid_true_data, valid_pred_data)
-
-        # Log train_loss (mean over the last valid_freq steps) to wandb if available
-        if self._wandb_run is not None:
-            additional = kwargs.get("additional_metrics", {})
-            if "train_loss" in additional:
-                self._wandb_run.log(
-                    {"train_loss": additional["train_loss"]},
-                    step=self._step,
-                )
-
         return {}
 
     def on_train_end(self, valid_source_data, valid_true_data,
@@ -539,6 +530,7 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
 
     save_logs(name, sf.trainer.training_logs, output_dir)
 
+
     if os.path.exists(ckpt_path):
         print(f"Loading best checkpoint from {ckpt_path} …")
         with open(ckpt_path, "rb") as f:
@@ -556,8 +548,10 @@ def train_model(cfg: dict, wandb_run=None) -> dict:
     print(f"  test results saved → {result_path}")
 
     if wandb_run is not None:
-        for metric, val in test_metrics["aggregated"].items():
-            wandb_run.summary[f"test_{metric}"] = val
+        test_log = {f"test_{metric}": val for metric, val in test_metrics["aggregated"].items()}
+        wandb_run.log(test_log)                      # shows up as a chart point
+        for k, v in test_log.items():
+            wandb_run.summary[k] = v                 # also pinned in Summary panel
 
     return {"solver": best_solver, "test_metrics": test_metrics}
 
@@ -579,7 +573,7 @@ if __name__ == "__main__":
     # Generic override: --set training.batch_size=2048
     parser.add_argument("--set", nargs="*", metavar="KEY=VALUE",
                         help="Override any config key using dot notation, e.g. training.batch_size=2048")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()  # ignore extra args passed by wandb agent
 
     # ── Build config ─────────────────────────────────────────────────────────
     overrides: dict = {}
@@ -606,8 +600,9 @@ if __name__ == "__main__":
     cfg = load_config(args.config, overrides)
 
     # ── Optional wandb ────────────────────────────────────────────────────────
+    import os
     wandb_run = None
-    if cfg["wandb"]["enabled"]:
+    if cfg["wandb"]["enabled"] or os.environ.get("WANDB_SWEEP_ID"):
         try:
             import wandb
             wcfg = cfg["wandb"]
@@ -623,12 +618,17 @@ if __name__ == "__main__":
                 "training.n_val_conditions":cfg["training"]["n_val_conditions"],
                 "seed":                     cfg["seed"],
             }
-            wandb_run = wandb.init(
-                project=wcfg.get("project", "pancellflow"),
-                entity=wcfg.get("entity"),
-                name=wcfg.get("run_name"),
-                config=flat_cfg,
-            )
+            # If wandb agent already initialized a run (sweep mode), reuse it
+            if wandb.run is not None:
+                wandb_run = wandb.run
+                wandb_run.config.update(flat_cfg, allow_val_change=True)
+            else:
+                wandb_run = wandb.init(
+                    project=wcfg.get("project", "pancellflow"),
+                    entity=wcfg.get("entity"),
+                    name=wcfg.get("run_name"),
+                    config=flat_cfg,
+                )
             # Sweep may override config — read back
             sweep_cfg = dict(wandb_run.config)
             for flat_key, val in sweep_cfg.items():

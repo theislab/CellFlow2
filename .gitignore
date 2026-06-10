@@ -164,3 +164,4 @@ scripts/logs
 *.err
 *.out
 data/*
+wandb/

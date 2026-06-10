@@ -14,4 +14,19 @@ metric:
 
 parameters:
   model:
-    values: [default, random, prophet]
+    values: [default]
+  zarr_path:
+    value: /storage/pancellflow/tahoe_updated.zarr
+  training.batch_size:
+    value: 1024
+  training.pool_fraction:
+    value: 0.7
+  training.replacement_prob:
+    value: 0.5
+  training.num_iterations:
+    value: 200000
+  training.valid_freq:
+    value: 20000
+  training.n_val_conditions:
+    value: 20
+

@@ -30,4 +30,4 @@ parameters:
     max: 0.7
 
   split.by:
-    values: [drug, cell_line]
+    values: [drug]

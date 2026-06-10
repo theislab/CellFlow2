@@ -177,6 +177,13 @@ class CellFlowTrainer:
             self.training_logs["loss"].append(float(loss))
             self.training_logs[f"loss_{task}"].append(float(loss))
 
+            try:
+                import wandb
+                if wandb.run is not None:
+                    wandb.log({"train_loss": float(loss)})
+            except ImportError:
+                pass
+
             if ((it - 1) % valid_freq == 0) and (it > 1):
                 # Get predictions from validation data
                 valid_source_data, valid_true_data, valid_pred_data = self._validation_step(
