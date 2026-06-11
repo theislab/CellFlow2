@@ -1,69 +1,53 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# WandB sweep — single dataset, tweak model/solver/optimizer hyperparams
-# Usage:
-#   wandb sweep experiments/sweep_single.yaml        → prints sweep_id
+# WandB sweep for train_zarr.py — wandb-dominant over Hydra.
+#   wandb sweep experiments/sweep_single.yaml      → prints sweep_id
 #   wandb agent <entity>/<project>/<sweep_id>
 #
-# Notes:
-#   • value:  <x>      → fixed for every run
-#   • values: [a, b]   → swept (grid tries each; bayes/random sample)
-#   • Dotted keys (arch.hidden_dims, optimizer.peak_lr, ...) map onto the nested
-#     config via set_nested — same mechanism as training.batch_size.
-#   • Lists pass through wandb.config as real lists (no quoting needed).
+# `command` omits ${args} on purpose: Hydra composes the default config cleanly,
+# then train_zarr.py overlays wandb.config on top (the readback in run()). Params
+# arrive as real Python objects via wandb.config — so LISTS work natively.
+# Use DOTTED VALUE keys (ablation.mode, solver.solver_key, model.hidden_dims, …),
+# not Hydra group names.
 # ─────────────────────────────────────────────────────────────────────────────
 
-program: experiments/train_comparison.py
-method:  grid                     # grid | random | bayes
+program: experiments/train_zarr.py
+method:  grid
 
 metric:
   goal: maximize
   name: val_r_squared
 
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+
 parameters:
-  # ── dataset (single) ──────────────────────────────────────────────────────
-  # base.yaml selects [tahoe]; point that entry's path at the zarr you want.
-  datasets.tahoe.path:
-    value: /storage/pancellflow/tahoe_updated.zarr
-  model:                          # embedding mode
+  wandb.enabled:
+    value: true
+
+  ablation.mode:
     value: default                # default | prophet | random
+  solver.solver_key:
+    value: otfm                   # otfm | eqm | genot
 
-  # ── solver ────────────────────────────────────────────────────────────────
-  solver:
-    values: [otfm]           
-
-  # ── arch ──────────────────────────────────────────────────────────────────
-  arch.conditioning:
-    value: concatenation          # concatenation | film | resnet
-  arch.hidden_dims:
-    values: [[2048, 2048, 2048]]   # ← swept: two architectures
-  arch.decoder_dims:
+  # architecture — lists work now (overlaid via wandb.config, not the CLI)
+  model.hidden_dims:
+    value: [2048, 2048, 2048]
+  model.decoder_dims:
     value: [1024]
-  arch.condition_embedding_dim:
+  model.condition_embedding_dim:
     value: 256
-  arch.max_combination_length:
-    value: 1
-  arch.match_fn_epsilon:
-    value: 10
-  arch.constant_noise:
+  model.probability_path_kwargs.constant_noise:
     value: 0.1
 
-  # ── optimizer (warmup-cosine) ─────────────────────────────────────────────
-  optimizer.peak_lr:
-    values: [1.0e-4]      # ← swept: two peak LRs
-  optimizer.end_lr:
-    value: 1.0e-5
-  optimizer.warmup_iterations:
-    value: 5000
-  optimizer.grad_accumulation:
-    value: 20
+  match_fn.epsilon:
+    value: 10
 
-  # ── training ──────────────────────────────────────────────────────────────
+  training.peak_lr:
+    value: 1.0e-4
   training.batch_size:
     value: 256
-  training.pool_fraction:
-    value: 0.7
-  training.replacement_prob:
-    value: 0.5
   training.num_iterations:
     value: 45000
   training.valid_freq:

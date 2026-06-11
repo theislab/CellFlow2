@@ -1,33 +1,38 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# WandB sweep — hyperparameter search (Bayesian optimisation)
-# Usage:
+# WandB sweep — Bayesian hyperparameter search (train_zarr.py).
 #   wandb sweep experiments/sweep_hyperparams.yaml    → prints sweep_id
 #   wandb agent <entity>/<project>/<sweep_id>
+#
+# Lists (model.hidden_dims) sweep natively because params come via wandb.config,
+# not the CLI. Use dotted value keys throughout.
 # ─────────────────────────────────────────────────────────────────────────────
 
-program: experiments/train_comparison.py
+program: experiments/train_zarr.py
 method:  bayes
 
 metric:
   goal: maximize
   name: val_r_squared
 
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+
 parameters:
-  model:
+  wandb.enabled:
+    value: true
+
+  ablation.mode:
     values: [default, prophet, random]
+
+  model.hidden_dims:
+    values: [[1024], [2048, 2048], [4096, 4096, 4096]]
+
+  training.peak_lr:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-3
 
   training.batch_size:
     values: [512, 1024, 2048]
-
-  training.pool_fraction:
-    distribution: uniform
-    min: 0.5
-    max: 0.9
-
-  training.replacement_prob:
-    distribution: uniform
-    min: 0.1
-    max: 0.7
-
-  split.by:
-    values: [drug, cell_line]

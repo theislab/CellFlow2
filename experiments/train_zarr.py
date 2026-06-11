@@ -33,6 +33,29 @@ import callbacks
 
 
 def run(cfg: DictConfig, gds: dict) -> dict:
+    # ── wandb sweep is dominant: init first, then overlay its params onto cfg ──
+    # The agent sets WANDB_SWEEP_ID, so we init even if wandb.enabled wasn't set.
+    # wandb.config (incl. sweep overrides) wins over the composed Hydra cfg, and
+    # values arrive as real Python objects — so list params (hidden_dims, …) work.
+    wandb_run = None
+    if cfg.wandb.enabled or os.environ.get("WANDB_SWEEP_ID"):
+        try:
+            import wandb
+            wandb_run = wandb.init(
+                project=cfg.wandb.project,
+                entity=cfg.wandb.get("entity"),
+                name=cfg.wandb.get("run_name"),
+                config=OmegaConf.to_container(cfg, resolve=True),
+            )
+            OmegaConf.set_struct(cfg, False)
+            for k, v in dict(wandb_run.config).items():
+                if "." in k or not isinstance(v, dict):   # sweep overrides; skip echoed nested dicts
+                    OmegaConf.update(cfg, k, v)
+            OmegaConf.set_struct(cfg, True)
+            print(f"  wandb run: {wandb_run.url}")
+        except ImportError:
+            print("  wandb not installed — skipping")
+
     mode       = cfg.ablation.mode
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -44,20 +67,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     print(f"  {name}  |  mode={mode}  split_by={list(cfg.split.by)}  "
           f"solver={cfg.solver.solver_key}  conditioning={cfg.model.conditioning_key}")
     print(f"{'='*64}")
-
-    wandb_run = None
-    if cfg.wandb.enabled:
-        try:
-            import wandb
-            wandb_run = wandb.init(
-                project=cfg.wandb.project,
-                entity=cfg.wandb.get("entity"),
-                name=cfg.wandb.get("run_name"),
-                config=OmegaConf.to_container(cfg, resolve=True),
-            )
-            print(f"  wandb run: {wandb_run.url}")
-        except ImportError:
-            print("  wandb not installed — skipping")
 
     print("Splitting datasets …")
     data = split_datasets(
