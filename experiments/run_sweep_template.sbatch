@@ -11,6 +11,7 @@
 #SBATCH --qos=gpu_normal
 #SBATCH --output=/lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/logs/sweep_%j.out
 #SBATCH --error=/lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/logs/sweep_%j.err
+#SBATCH --array=1-<k_sweeps>%4  
 
 export WANDB_API_KEY='<your_api_key>'
 CONTAINER_NAME="jax_container_${SLURM_ARRAY_TASK_ID}"
