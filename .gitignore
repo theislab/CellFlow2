@@ -165,3 +165,5 @@ scripts/logs
 *.out
 data/*
 wandb/
+experiments/run_sweep.sbatch
+outputs/

@@ -20,4 +20,4 @@ parameters:
   wandb.enabled:
     value: true
   ablation.mode:
-    values: [default, random, prophet]
+    values: [prophet]

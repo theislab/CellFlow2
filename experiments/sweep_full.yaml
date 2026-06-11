@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# WandB sweep for train_zarr.py — full hyperparameter search (wandb-dominant).
+#   wandb sweep experiments/sweep_full.yaml      → prints sweep_id
+#   wandb agent <entity>/<project>/<sweep_id>
+#
+# Params arrive via wandb.config (overlaid onto the Hydra cfg by run()), so list
+# params (model.hidden_dims/decoder_dims) sweep natively. Use DOTTED VALUE keys.
+#
+# `method: bayes` + run_cap because the full grid here is astronomically large;
+# Bayesian search samples toward the metric instead of exhausting combinations.
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: experiments/train_zarr.py
+method:  bayes
+
+metric:
+  goal: maximize
+  name: val_r_squared          # also available: val_r_squared_delta (perturbation-effect R²), val_mmd, val_e_distance
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+
+run_cap: 200                    # stop after ~60 runs
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # ── ablation: default vs prophet vs random ────────────────────────────────
+  ablation.mode:
+    values: [default, prophet, random]
+
+  # ── solver ────────────────────────────────────────────────────────────────
+  solver.solver_key:
+    values: [otfm, eqm]        # genot omitted (needs extra encoder kwargs)
+
+  # ── model size (lists — native via readback) ──────────────────────────────
+  model.hidden_dims:
+    values:
+      - [1024]
+      - [2048, 2048]
+      - [2048, 2048, 2048]
+      - [4096, 4096, 4096]
+  model.decoder_dims:
+    values:
+      - [1024]
+      - [2048, 2048, 2048]
+      - [4096, 4096, 4096]
+  model.condition_embedding_dim:
+    values: [128, 256, 512]
+
+  # ── learning rate + schedule ──────────────────────────────────────────────
+  training.peak_lr:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-3
+  training.warmup_iterations:
+    values: [2000, 5000, 10000]
+  training.grad_accumulation:
+    values: [1, 10, 20]
+
+  # ── flow-matching / OT knobs ──────────────────────────────────────────────
+  match_fn.epsilon:
+    values: [0.1, 1.0, 10.0]
+  model.probability_path_kwargs.constant_noise:
+    values: [0.0, 0.1, 0.2]
+
+  # ── batch + reservoir sampler ─────────────────────────────────────────────
+  training.batch_size:
+    values: [256, 512, 1024]
+  training.pool_fraction:
+    distribution: uniform
+    min: 0.5
+    max: 0.9
+  training.replacement_prob:
+    distribution: uniform
+    min: 0.1
+    max: 0.7
+
+  # ── fixed (keeps runs comparable + bounded in wall-time) ──────────────────
+  training.num_iterations:
+    value: 200000
+  training.valid_freq:
+    value: 20000
+  training.n_val_conditions:
+    value: 40
