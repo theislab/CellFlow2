@@ -1,0 +1,4 @@
+# Registry of prebuilt zarr GroupedDistributions (selected via selected_datasets).
+tahoe:
+  path: /storage/pancellflow/tahoe_updated.zarr
+  seed: 42

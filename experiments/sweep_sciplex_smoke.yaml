@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Smoke test — does the new (dose-resolved) sciPlex zarr train end-to-end?
+#   wandb sweep experiments/sweep_sciplex_smoke.yaml   → prints sweep_id
+#   wandb agent <entity>/<project>/<sweep_id>
+#
+# 1 short run: tiny model, few iterations, quick validation + test. Verifies the
+# zarr loads, the dose scalar condition is consumed, and val/test/wandb all work.
+#
+# IMPORTANT: the dataset must be selected in `command` (fixed Hydra overrides),
+# not in `parameters` — main() loads the zarr before the wandb.config readback.
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: experiments/train_zarr.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_r_squared
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - datasets=zarr_sciplex            # swap the datasets group → sciPlex registry
+  - selected_datasets=[sciplex]      # load it (read in main(), pre-readback)
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # default drops prophet → tests {cell_line, drug, dose}. Switch to prophet to
+  # also exercise the prophet condition key.
+  ablation.mode:
+    value: prophet
+
+  # tiny + short for a fast smoke test (lists are fine — applied via readback)
+  model.hidden_dims:
+    value: [512]
+  model.decoder_dims:
+    value: [512]
+  training.batch_size:
+    value: 256
+  training.num_iterations:
+    value: 50000
+  training.valid_freq:
+    value: 50000
+  training.n_val_conditions:
+    value: 5

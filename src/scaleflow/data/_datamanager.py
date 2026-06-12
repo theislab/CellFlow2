@@ -27,6 +27,12 @@ class DataManager:
     tgt_dist_keys: list[str]
     data_location: AnnDataLocation
     rep_keys: dict[str, str] | None = None
+    # Optional extra embeddings keyed by a new condition name.
+    # Format: {new_condition_key: (obs_col_used_for_lookup, adata_uns_key)}
+    # Example: {"prophet": ("drug", "prophet_emb")}
+    # If the uns_key is absent at prepare_data time the entry is silently skipped,
+    # so the same DataManager definition works with and without the embedding.
+    extra_rep_keys: dict[str, tuple[str, str]] | None = None
 
     def __post_init__(
         self,
@@ -41,6 +47,44 @@ class DataManager:
                 raise ValueError(
                     "Representation locations must be a subset of the source and target distribution keys."
                 )
+        if self.extra_rep_keys is not None:
+            all_dist_keys = set(self.src_dist_keys) | set(self.tgt_dist_keys)
+            for new_key, (obs_col, _uns_key) in self.extra_rep_keys.items():
+                if obs_col not in all_dist_keys:
+                    raise ValueError(
+                        f"extra_rep_keys: obs_col '{obs_col}' must be in src_dist_keys or tgt_dist_keys."
+                    )
+                if new_key in all_dist_keys:
+                    raise ValueError(
+                        f"extra_rep_keys: new_key '{new_key}' conflicts with existing dist key '{new_key}'."
+                    )
+
+    def _get_label_for_col(
+        self,
+        obs_col: str,
+        src_label: tuple,
+        tgt_label: tuple,
+    ):
+        """Return the label value for ``obs_col`` from the current src/tgt label tuples.
+
+        Parameters
+        ----------
+        obs_col
+            The obs column whose label we want (must be in src_dist_keys or tgt_dist_keys).
+        src_label
+            Tuple of label values aligned with src_dist_keys.
+        tgt_label
+            Tuple of label values aligned with tgt_dist_keys.
+
+        Returns
+        -------
+        The label value, or :obj:`None` if ``obs_col`` is not found.
+        """
+        if obs_col in self.src_dist_keys:
+            return src_label[self.src_dist_keys.index(obs_col)]
+        if obs_col in self.tgt_dist_keys:
+            return tgt_label[self.tgt_dist_keys.index(obs_col)]
+        return None
 
     def _prepare_annotation(
         self,
@@ -113,7 +157,8 @@ class DataManager:
             zip(src_dist_labels.index, src_dist_labels.itertuples(index=False, name=None), strict=True)
         )
 
-        # prepare tgt_dist_labels
+        # prepare tgt_dist_labels — drug-only, used by _prepare_data for
+        # embedding lookups (must match tgt_dist_keys exactly).
         tgt_dist_labels = (
             obs.loc[~obs[self.dist_flag_key]][[*self.tgt_dist_keys, "tgt_dist_idx"]]
             .drop_duplicates()
@@ -123,6 +168,20 @@ class DataManager:
             zip(tgt_dist_labels.index, tgt_dist_labels.itertuples(index=False, name=None), strict=True)
         )
 
+        # prepare tgt_dist_labels_for_annotation — includes src_dist_keys so
+        # that each (cell_line, drug) pair gets a unique label in the zarr.
+        # This fixes ValidationSampler collapsing 252 conditions → 36 by
+        # ensuring _get_key() returns unique (cell_line, drug) cond_keys.
+        tgt_dist_labels_annotation = (
+            obs.loc[~obs[self.dist_flag_key]][[*src_tgt_dist_keys, "tgt_dist_idx"]]
+            .drop_duplicates()
+            .set_index("tgt_dist_idx")
+        )
+        tgt_dist_labels_annotation = dict(
+            zip(tgt_dist_labels_annotation.index,
+                tgt_dist_labels_annotation.itertuples(index=False, name=None), strict=True)
+        )
+
         annotation = GroupedDistributionAnnotation(
             src_tgt_dist_df=src_tgt_dist_df,
             old_obs_index=old_index_mapping,
@@ -130,7 +189,7 @@ class DataManager:
             src_dist_keys=self.src_dist_keys,
             dist_flag_key=self.dist_flag_key,
             src_dist_idx_to_labels=src_dist_labels,
-            tgt_dist_idx_to_labels=tgt_dist_labels,
+            tgt_dist_idx_to_labels=tgt_dist_labels_annotation,
             default_values=default_values,
             data_location=self.data_location,
         )
@@ -189,6 +248,22 @@ class DataManager:
                     for col, label in zip(self.tgt_dist_keys, tgt_label, strict=True):
                         emb = DataManager._col_to_repr(col_to_repr, col, label)
                         cond_dict[col] = emb[None, None, :]  # Shape: (1, 1, emb_dim) = (batch, set_size, emb_dim)
+
+                    # Optionally add extra representations (e.g. prophet_emb).
+                    # Each entry: new_condition_key -> (obs_col_for_lookup, adata_uns_key)
+                    # Silently skipped when the uns_key is absent so that the same
+                    # DataManager config works with or without the embedding.
+                    if self.extra_rep_keys is not None:
+                        for new_key, (obs_col, uns_key) in self.extra_rep_keys.items():
+                            if uns_key not in adata.uns:
+                                continue
+                            label = self._get_label_for_col(obs_col, src_label, tgt_label)
+                            if label is None:
+                                continue
+                            extra_repr = adata.uns[uns_key]
+                            if label in extra_repr:
+                                emb = np.array(extra_repr[label])
+                                cond_dict[new_key] = emb[None, None, :]  # Shape: (1, 1, emb_dim)
 
                     conditions[tgt_dist_idx] = cond_dict
 

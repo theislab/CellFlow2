@@ -1,0 +1,13 @@
+# @package _global_
+# DataManager configuration (how raw h5ad is grouped into distributions).
+# Only used by train_h5ad.py.
+data:
+  dist_flag_key: control
+  src_dist_keys: [cell_line]
+  tgt_dist_keys: [drug_0, drug_1]   # single-drug → [drug_0]; combos → [drug_0, drug_1]
+  rep_keys:
+    cell_line: cell_line_ccle_embeddings
+    drug_0:    drug_0_embeddings
+    drug_1:    drug_1_embeddings
+  cell_embedding:
+    key: X_state                    # adata.obsm key used as the cell representation

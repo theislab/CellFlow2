@@ -1,0 +1,6 @@
+# @package _global_
+split:
+  by: [cell_line]         # split by cell line instead of drug
+  ratios: [0.7, 0.2, 0.1]
+  random_state: 42
+  holdout_combinations: false

@@ -1,0 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Overlay: multi-dataset training (mixes several prebuilt zarrs)
+# base.yaml is loaded first; this only specifies what differs from it.
+#
+# Usage:
+#   python experiments/train_comparison.py --config experiments/multi_dataset.yaml
+#   # subset on the CLI:
+#   python experiments/train_comparison.py --config experiments/multi_dataset.yaml \
+#       --set selected_datasets=[tahoe]
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Registry of available datasets (each is a prebuilt zarr).
+datasets:
+  tahoe:
+    path:   /storage/pancellflow/tahoe_updated.zarr
+    seed:   42
+    weight: 1.0
+
+# Which datasets to actually use this run (presence of this key → multi-dataset mode).
+selected_datasets: [tahoe]

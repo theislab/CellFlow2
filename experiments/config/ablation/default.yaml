@@ -1,0 +1,2 @@
+# Prophet ablation: standard run (drops the 'prophet' condition key).
+mode: default

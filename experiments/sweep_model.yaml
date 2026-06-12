@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# WandB sweep — compare ablations default vs random vs prophet (train_zarr.py).
+#   wandb sweep experiments/sweep_model.yaml      → prints sweep_id
+#   wandb agent <entity>/<project>/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: experiments/train_zarr.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_r_squared
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+
+parameters:
+  wandb.enabled:
+    value: true
+  ablation.mode:
+    values: [prophet]

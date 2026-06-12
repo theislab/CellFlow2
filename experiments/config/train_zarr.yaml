@@ -1,0 +1,20 @@
+# @package _global_
+# Entrypoint config for train_zarr.py (prebuilt zarr GroupedDistributions).
+# Every group default holds the zarr profile, so this just selects defaults.
+# Override on the CLI, e.g.:
+#   python experiments/train_zarr.py ablation=prophet solver=eqm conditioning=adaln_zero
+defaults:
+  - solver: otfm
+  - conditioning: concatenation
+  - datasets: zarr_tahoe
+  - training: default
+  - model: default
+  - match_fn: default
+  - split: drug
+  - ablation: default
+  - wandb: default
+  - _self_
+
+seed: 42
+output_dir: /storage/pancellflow/outputs/sweep_sciplex
+selected_datasets: [tahoe]

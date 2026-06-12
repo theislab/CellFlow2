@@ -1,0 +1,13 @@
+# @package _global_
+training:
+  batch_size:        1024
+  num_iterations:    200000
+  warmup_iterations: 5000
+  peak_lr:           1.0e-4
+  end_lr:            1.0e-5
+  init_lr:           0.0
+  grad_accumulation: 20
+  valid_freq:        20000
+  n_val_conditions:  null    
+  pool_fraction:     0.7
+  replacement_prob:  0.5

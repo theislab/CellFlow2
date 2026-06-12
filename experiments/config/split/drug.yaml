@@ -1,0 +1,6 @@
+# @package _global_
+split:
+  by: [drug]              # split single-drug conditions by drug
+  ratios: [0.7, 0.2, 0.1]
+  random_state: 42
+  holdout_combinations: false

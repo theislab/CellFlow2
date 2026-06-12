@@ -1,0 +1,17 @@
+# @package _global_
+model:
+  hidden_dims:             [1024]
+  decoder_dims:            [1024]
+  condition_embedding_dim: 256
+  max_combination_length:  2        # 1 for single drug, 2 for drug_0 + drug_1
+  conditioning_key:        ${conditioning.conditioning_key}
+  conditioning_kwargs:     ${conditioning.conditioning_kwargs}
+  probability_path_kwargs: {constant_noise: 0.1}
+
+  # Condition (set) encoder — one pre-pool MLP per condition key (see model/default.yaml).
+  condition_encoder:
+    pooling:             attention_token
+    pooling_kwargs:      {}
+    cond_output_dropout: 0.9
+    encoder_arch:        [{layer_type: mlp, dims: [1024, 1024], dropout_rate: 0.0}]
+    layers_after_pool:   [{layer_type: mlp, dims: [1024, 1024], dropout_rate: 0.0}]
