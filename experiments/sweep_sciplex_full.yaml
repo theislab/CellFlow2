@@ -1,0 +1,70 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Focused sweep — sciPlex (dose-resolved). 4 axes, full grid = 72 runs.
+#   wandb sweep experiments/sweep_sciplex_focused.yaml   → prints sweep_id
+#   wandb agent <entity>/<project>/<sweep_id>
+#
+# GRID (not bayes): with few axes, grid runs every combination, so default /
+# prophet / random are compared at IDENTICAL settings — clean ablation.
+# Secondary knobs (epsilon, noise, warmup, grad_accum, sampler) are FIXED so the
+# search stays low-dimensional and interpretable.
+#
+# Dataset selection goes in `command` (Hydra override, applied before main()
+# loads the zarr). n_val_conditions inherits the config default (null = all).
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: experiments/train_zarr.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_r_squared          # also: val_r_squared_delta (perturbation-effect R²)
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - datasets=zarr_sciplex
+  - selected_datasets=[sciplex]
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # ── swept (3 × 2 × 3 × 4 = 72 runs) ───────────────────────────────────────
+  ablation.mode:
+    values: [default, prophet, random]
+  solver.solver_key:
+    values: [otfm, eqm]
+  model.hidden_dims:                      # consistent depth, width ladder
+    values:
+      - [1024, 1024, 1024]
+      - [2048, 2048, 2048]
+      - [4096, 4096, 4096]
+  training.peak_lr:
+    values: [5.0e-5, 1.0e-4, 3.0e-4, 1.0e-3]
+
+  # ── fixed secondary knobs ─────────────────────────────────────────────────
+  model.decoder_dims:
+    value: [2048, 2048, 2048]
+  model.condition_embedding_dim:
+    value: 256
+  match_fn.epsilon:
+    value: 1.0
+  model.probability_path_kwargs.constant_noise:
+    value: 0.1
+  training.batch_size:
+    value: 512
+  training.warmup_iterations:
+    value: 5000
+  training.grad_accumulation:
+    value: 20
+  training.pool_fraction:
+    value: 0.7
+  training.replacement_prob:
+    value: 0.5
+
+  # ── fixed training bounds ─────────────────────────────────────────────────
+  training.num_iterations:
+    value: 500000
+  training.valid_freq:
+    value: 25000

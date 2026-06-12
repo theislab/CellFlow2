@@ -8,6 +8,6 @@ training:
   init_lr:           0.0
   grad_accumulation: 20
   valid_freq:        20000
-  n_val_conditions:  20       # null = all conditions
+  n_val_conditions:  null    
   pool_fraction:     0.7
   replacement_prob:  0.5

@@ -59,7 +59,10 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     mode       = cfg.ablation.mode
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    name       = f"model_{mode}"
+    # tag outputs with the wandb run id so concurrent sweep runs don't overwrite
+    # each other's checkpoint / results (filename was previously only mode-based).
+    run_tag    = wandb_run.id if wandb_run is not None else "local"
+    name       = f"model_{mode}_{run_tag}"
     ckpt_path  = str(output_dir / f"{name}_best.pkl")
     transform  = utils.ConditionTransform(mode, seed=int(cfg.seed)) if mode != "prophet" else None
 

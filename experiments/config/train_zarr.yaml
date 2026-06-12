@@ -16,5 +16,5 @@ defaults:
   - _self_
 
 seed: 42
-output_dir: /storage/pancellflow/outputs
+output_dir: /storage/pancellflow/outputs/sweep_sciplex
 selected_datasets: [tahoe]
