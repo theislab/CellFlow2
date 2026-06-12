@@ -135,6 +135,13 @@ def run(cfg: DictConfig, gds: dict) -> dict:
             f"got {decoder_dims[-1]} vs {hidden_dims[-1]}."
         )
 
+    # set-encoder: one pre-pool MLP per condition key (incl. cell_line)
+    ce           = m.condition_encoder
+    encoder_arch = OmegaConf.to_container(ce.encoder_arch, resolve=True)
+    layers_before_pool = {k: encoder_arch for k in sample_batch["condition"]}
+    layers_after_pool  = OmegaConf.to_container(ce.layers_after_pool, resolve=True)
+    print(f"  set-encoder layers per modality: {list(layers_before_pool)}")
+
     optimizer, _ = utils.build_optimizer(cfg)
     sf = ScaleFlow(solver=cfg.solver.solver_key)
     sf.prepare_model(
@@ -142,6 +149,11 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         max_combination_length=int(m.max_combination_length),
         conditioning=cond_key,
         conditioning_kwargs=OmegaConf.to_container(m.conditioning_kwargs, resolve=True),
+        pooling=ce.pooling,
+        pooling_kwargs=OmegaConf.to_container(ce.pooling_kwargs, resolve=True),
+        layers_before_pool=layers_before_pool,
+        layers_after_pool=layers_after_pool,
+        cond_output_dropout=float(ce.cond_output_dropout),
         hidden_dims=hidden_dims,
         decoder_dims=decoder_dims,
         condition_embedding_dim=int(m.condition_embedding_dim),
