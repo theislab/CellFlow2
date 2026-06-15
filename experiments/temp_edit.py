@@ -222,8 +222,12 @@ def full_diagnostics(solver, split_samplers: dict, output_dir, name: str = "mode
 
 
 # ── plots (coloured by split) ────────────────────────────────────────────────
-def plot_diagnostics(df: pd.DataFrame, output_dir, tag: str = "diag", metric: str = "r_squared") -> dict:
-    """Three scatters coloured by `split`: effect-vs-metric, calibration, strength-vs-error."""
+def plot_diagnostics(df: pd.DataFrame, output_dir, tag: str = "diag", metric: str = "r_squared_delta") -> dict:
+    """Three scatters coloured by `split`: effect-vs-metric, calibration, strength-vs-error.
+
+    `metric` defaults to r_squared_delta — plain r_squared is inflated by the control
+    baseline, so effect-size-vs-r²Δ is what reveals weak-effect conditions carrying the score.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
