@@ -9,8 +9,6 @@ import jax.numpy as jnp
 import numpy as np
 from flax.core import frozen_dict
 from flax.training import train_state
-from ott.neural.methods.flows import dynamics
-from ott.neural.networks import velocity_field
 from ott.solvers import utils as solver_utils
 
 from scaleflow import utils

@@ -734,7 +734,7 @@ class ReservoirSampler(SamplerABC):
                 fut: Future = info["future"]
                 try:
                     prepared = fut.result(timeout=0)  # already done
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     print(f"background load failed for {new_idx}: {e}")
                     continue
 
