@@ -3,8 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+
 import scaleflow
-from scaleflow._compat import ConstantNoiseFlow
 from scaleflow.solvers import _eqm, _genot, _otfm
 from scaleflow.utils import match_linear
 
@@ -73,7 +73,7 @@ class TestSolver:
             solver = _otfm.OTFlowMatching(
                 vf=vf,
                 match_fn=match_linear,
-                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                probability_path=ConstantNoiseFlow(0.0),
                 optimizer=opt,
                 conditions={"drug": np.random.rand(2, 1, 3)},
                 rng=vf_rng,
@@ -82,7 +82,7 @@ class TestSolver:
             solver = _genot.GENOT(
                 vf=vf,
                 data_match_fn=match_linear,
-                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                probability_path=ConstantNoiseFlow(0.0),
                 optimizer=opt,
                 source_dim=5,
                 target_dim=5,
@@ -137,7 +137,7 @@ class TestSolver:
             solver = _otfm.OTFlowMatching(
                 vf=vf,
                 match_fn=match_linear,
-                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                probability_path=ConstantNoiseFlow(0.0),
                 optimizer=opt,
                 conditions=cond[("drug_1",)],
                 rng=vf_rng,
@@ -153,7 +153,7 @@ class TestSolver:
             solver = _genot.GENOT(
                 vf=vf,
                 data_match_fn=match_linear,
-                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                probability_path=ConstantNoiseFlow(0.0),
                 optimizer=opt,
                 source_dim=5,
                 target_dim=5,
@@ -200,7 +200,7 @@ class TestSolver:
             solver1 = _otfm.OTFlowMatching(
                 vf=vf1,
                 match_fn=match_linear,
-                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                probability_path=ConstantNoiseFlow(0.0),
                 optimizer=opt,
                 conditions={condition_key: drug},
                 rng=vf_rng,

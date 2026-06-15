@@ -7,10 +7,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax.training import train_state
-from ott.neural.methods.flows import dynamics
 from ott.solvers import utils as solver_utils
 
 from scaleflow import utils
+from scaleflow._compat import BaseFlow
 from scaleflow._types import ArrayLike
 from scaleflow.networks._velocity_field import MultiTaskConditionalVelocityField
 from scaleflow.solvers.utils import ema_update
@@ -46,7 +46,7 @@ class MultiTaskOTFlowMatching:
     def __init__(
         self,
         vf: MultiTaskConditionalVelocityField,
-        probability_path: dynamics.BaseFlow,
+        probability_path: BaseFlow,
         match_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = None,
         time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
         phenotype_loss_weight: float = 1.0,
