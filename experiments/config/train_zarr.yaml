@@ -13,6 +13,7 @@ defaults:
   - split: drug
   - ablation: default
   - wandb: default
+  - diagnostics: default
   - _self_
 
 seed: 42

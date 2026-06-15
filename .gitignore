@@ -168,3 +168,8 @@ wandb/
 experiments/run_sweep.sbatch
 outputs/
 !experiments/config/wandb/
+
+# analysis generated tables (large; e.g. 63MB linkage csv)
+analysis/tables/
+analysis/figures/
+analysis/_cache/

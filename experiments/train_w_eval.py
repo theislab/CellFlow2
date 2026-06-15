@@ -1,0 +1,288 @@
+"""Train a CellFlow2 model + effect-size / perturbation diagnostics.
+
+Same as train_zarr.py, plus (from temp_edit.py, still staged — src/callbacks untouched):
+  • EffectSizeMonitor  — logs gap_closure / effect-ratio scalars each val step.
+  • full_diagnostics   — one subsampled predict pass over train/val/test → per-condition
+                         table + scatter plots (effect-vs-metric, calibration, strength-vs-error),
+                         saved to output_dir and (optionally) logged to wandb.
+
+    python experiments/train_w_eval.py
+    python experiments/train_w_eval.py ablation=prophet wandb.enabled=true
+    python experiments/train_w_eval.py diagnostics.n_conditions=200   # optional override
+"""
+import os
+
+# set JAX env before importing jax (pulled in by scaleflow / utils)
+os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
+os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/storage/jax_cache")
+os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
+
+# allow wandb up to 2 hours to upload at the end of a long training run
+os.environ.setdefault("WANDB_HTTP_TIMEOUT", "7200")
+os.environ.setdefault("WANDB_INIT_TIMEOUT", "7200")
+os.environ.setdefault("WANDB_RETRY_MAX", "10")
+os.environ.setdefault("WANDB_SILENT", "true")
+
+import time
+from functools import partial
+from pathlib import Path
+
+import cloudpickle
+import hydra
+import jax
+import numpy as np
+from omegaconf import DictConfig, OmegaConf
+
+from scaleflow.data import GroupedDistribution, split_datasets
+from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
+from scaleflow.model import ScaleFlow
+from scaleflow.training import Metrics
+from scaleflow.utils import match_linear
+
+import utils
+import callbacks
+import temp_edit   # staged effect-size diagnostics
+
+
+def run(cfg: DictConfig, gds: dict) -> dict:
+    # ── wandb sweep is dominant: init first, then overlay its params onto cfg ──
+    wandb_run = None
+    if cfg.wandb.enabled or os.environ.get("WANDB_SWEEP_ID"):
+        try:
+            import wandb
+            wandb_run = wandb.init(
+                project=cfg.wandb.project,
+                entity=cfg.wandb.get("entity"),
+                name=cfg.wandb.get("run_name"),
+                config=OmegaConf.to_container(cfg, resolve=True),
+                settings=wandb.Settings(init_timeout=7200),
+            )
+            OmegaConf.set_struct(cfg, False)
+            for k, v in dict(wandb_run.config).items():
+                if "." in k or not isinstance(v, dict):
+                    OmegaConf.update(cfg, k, v)
+            OmegaConf.set_struct(cfg, True)
+            print(f"  wandb run: {wandb_run.url}")
+        except ImportError:
+            print("  wandb not installed — skipping")
+
+    mode       = cfg.ablation.mode
+    output_dir = Path(cfg.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_tag    = wandb_run.id if wandb_run is not None else "local"
+    name       = f"model_{mode}_{run_tag}"
+    ckpt_path  = output_dir / f"{name}_best_ckpt"   # orbax saves to a directory
+    transform  = utils.ConditionTransform(mode, seed=int(cfg.seed)) if mode != "prophet" else None
+
+    print(f"\n{'='*64}")
+    print(f"  {name}  |  mode={mode}  split_by={list(cfg.split.by)}  "
+          f"solver={cfg.solver.solver_key}  conditioning={cfg.model.conditioning_key}")
+    print(f"{'='*64}")
+
+    print("Splitting datasets …")
+    data = split_datasets(
+        gds,
+        holdout_combinations=bool(cfg.split.holdout_combinations),
+        split_by=list(cfg.split.by),
+        split_key="split",
+        ratios=list(cfg.split.ratios),
+        random_state=int(cfg.split.random_state),
+    )
+
+    print("Creating samplers …")
+    bs    = int(cfg.training.batch_size)
+    n_val = cfg.training.get("n_val_conditions", None)
+    n_val = int(n_val) if n_val is not None else None
+
+    train_samplers, val_samplers, test_samplers = {}, {}, {}
+    for ds in gds:
+        seed = int(cfg.datasets[ds].get("seed", cfg.seed))
+        train_samplers[ds] = ReservoirSampler(
+            data[ds]["train"], np.random.default_rng(seed),
+            batch_size=bs,
+            pool_fraction=float(cfg.training.pool_fraction),
+            replacement_prob=float(cfg.training.replacement_prob),
+            condition_transform=transform,
+        )
+        val_samplers[ds] = ValidationSampler(
+            data[ds]["val"],
+            n_conditions_on_log_iteration=n_val,
+            n_conditions_on_train_end=n_val,
+            seed=seed,
+            condition_transform=transform,
+        )
+        test_samplers[ds] = ValidationSampler(
+            data[ds]["test"],
+            n_conditions_on_log_iteration=None,
+            n_conditions_on_train_end=None,
+            seed=seed,
+            condition_transform=transform,
+        )
+
+    train_sampler = CombinedSampler(
+        samplers=train_samplers,
+        rng=np.random.default_rng(int(cfg.split.random_state)),
+    )
+    train_sampler.init_sampler()
+    for s in val_samplers.values():
+        s.init_sampler()
+    for s in test_samplers.values():
+        s.init_sampler()
+
+    sample_batch = train_sampler.sample()
+    print(f"  condition keys: {[(k, tuple(v.shape)) for k, v in sample_batch['condition'].items()]}")
+
+    print("Building model …")
+    m            = cfg.model
+    cond_key     = m.conditioning_key
+    hidden_dims  = tuple(int(x) for x in m.hidden_dims)
+    decoder_dims = tuple(int(x) for x in m.decoder_dims)
+    if cond_key == "adaln_zero" and decoder_dims[-1] != hidden_dims[-1]:
+        raise ValueError(
+            f"adaln_zero requires decoder_dims[-1] == hidden_dims[-1]; "
+            f"got {decoder_dims[-1]} vs {hidden_dims[-1]}."
+        )
+
+    # set-encoder: one pre-pool MLP per condition key (incl. cell_line)
+    ce           = m.condition_encoder
+    encoder_arch = OmegaConf.to_container(ce.encoder_arch, resolve=True)
+    layers_before_pool = {k: encoder_arch for k in sample_batch["condition"]}
+    layers_after_pool  = OmegaConf.to_container(ce.layers_after_pool, resolve=True)
+    print(f"  set-encoder layers per modality: {list(layers_before_pool)}")
+
+    optimizer, _ = utils.build_optimizer(cfg)
+    predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
+    sf = ScaleFlow(solver=cfg.solver.solver_key)
+    sf._validation_data["predict_kwargs"] = predict_kwargs
+    sf.prepare_model(
+        sample_batch=sample_batch,
+        max_combination_length=int(m.max_combination_length),
+        conditioning=cond_key,
+        conditioning_kwargs=OmegaConf.to_container(m.conditioning_kwargs, resolve=True),
+        pooling=ce.pooling,
+        pooling_kwargs=OmegaConf.to_container(ce.pooling_kwargs, resolve=True),
+        layers_before_pool=layers_before_pool,
+        layers_after_pool=layers_after_pool,
+        cond_output_dropout=float(ce.cond_output_dropout),
+        hidden_dims=hidden_dims,
+        decoder_dims=decoder_dims,
+        condition_embedding_dim=int(m.condition_embedding_dim),
+        match_fn=partial(match_linear, epsilon=float(cfg.match_fn.epsilon)),
+        probability_path=OmegaConf.to_container(m.probability_path_kwargs, resolve=True),
+        optimizer=optimizer,
+    )
+    n_params = sum(x.size for x in jax.tree.leaves(sf.solver.vf_state.params))
+    print(f"  total parameters: {n_params:,}")
+
+    val_log_path = str(output_dir / f"{name}_val_metrics.json")
+    cbs = [
+        Metrics(
+            metrics=["r_squared", "e_distance", "mmd"],
+            metric_aggregations=["mean"],
+            use_gpu_optimized=True,
+            precision="bfloat16",
+        ),
+        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
+        callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
+        temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
+    ]
+
+    monitor_metrics = ["loss"]
+    for ds in val_samplers:
+        monitor_metrics += [
+            f"{ds}_r_squared_mean",
+            f"{ds}_e_distance_mean",
+            f"{ds}_mmd_mean",
+            f"{ds}_r_squared_delta_mean",
+            f"{ds}_gap_closure_mean",      # from EffectSizeMonitor
+        ]
+
+    print(f"Training {int(cfg.training.num_iterations)} iterations "
+          f"(val every {int(cfg.training.valid_freq)} steps) …")
+    t0 = time.perf_counter()
+    sf.train(
+        train_dataloader=train_sampler,
+        val_dataloader=val_samplers,
+        num_iterations=int(cfg.training.num_iterations),
+        valid_freq=int(cfg.training.valid_freq),
+        callbacks=cbs,
+        monitor_metrics=monitor_metrics,
+    )
+    print(f"  training done in {(time.perf_counter() - t0) / 60:.1f} min")
+    callbacks.save_logs(name, sf.trainer.training_logs, output_dir)
+
+    if ckpt_path.exists():
+        print(f"Loading best checkpoint from {ckpt_path} …")
+        import orbax.checkpoint as ocp
+        params = ocp.PyTreeCheckpointer().restore(
+            ckpt_path, item=sf.solver.vf_state.params
+        )
+        best_solver = sf.solver
+        best_solver.vf_state = best_solver.vf_state.replace(params=params)
+    else:
+        print("  no checkpoint found — using final iterate")
+        best_solver = sf.solver
+
+    print("Evaluating on test set …")
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers)
+
+    result_path = output_dir / f"{name}_results.pkl"
+    with open(result_path, "wb") as f:
+        cloudpickle.dump(test_metrics, f)
+    print(f"  test results saved → {result_path}")
+
+    if wandb_run is not None:
+        test_log = {f"test_{k}": v for k, v in test_metrics["aggregated"].items()}
+        for dsname, dsres in test_metrics["per_dataset"].items():
+            for k, v in dsres["aggregated"].items():
+                test_log[f"test_{dsname}_{k}"] = v
+        wandb_run.log(test_log)
+        for k, v in test_log.items():
+            wandb_run.summary[k] = v
+
+    # ── effect-size diagnostics over train / val / test (one subsampled predict each) ──
+    diag_cfg  = cfg.get("diagnostics", {})
+    n_diag    = int(diag_cfg.get("n_conditions", 100))
+    max_cells = int(diag_cfg.get("max_cells", 2000))
+    print(f"Running effect-size diagnostics ({n_diag} conditions/split) …")
+    diag_samplers = temp_edit.make_diagnostic_samplers(
+        data, n_conditions=n_diag, transform=transform, seed=int(cfg.seed)
+    )
+    temp_edit.full_diagnostics(
+        best_solver, diag_samplers, output_dir, name,
+        wandb_run=wandb_run, max_cells=max_cells, seed=int(cfg.seed),
+    )
+
+    print(f"\n{'='*64}")
+    print(f"  Final test metrics — {name}")
+    print(f"{'='*64}")
+    for k, v in test_metrics["aggregated"].items():
+        print(f"  {k:<18} {v:.4f}")
+
+    if wandb_run is not None:
+        wandb_run.finish(timeout=300)  # give wandb 5 min to sync, then exit
+
+    return {"solver": best_solver, "test_metrics": test_metrics}
+
+
+@hydra.main(config_path="config", config_name="train_zarr", version_base=None)
+def main(cfg: DictConfig) -> None:
+    gds = {}
+    for name in cfg.selected_datasets:
+        path = str(cfg.datasets[name].path)
+        print(f"Reading [{name}] ← {path}")
+        gds[name] = GroupedDistribution.read_zarr(Path(path))
+    try:
+        run(cfg, gds)
+    except Exception:
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.run.finish(exit_code=1)
+        except Exception:
+            pass
+        raise
+
+
+if __name__ == "__main__":
+    main()

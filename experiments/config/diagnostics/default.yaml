@@ -1,0 +1,6 @@
+# @package _global_
+# Final-step effect-size diagnostics (train_w_eval.py → temp_edit.full_diagnostics).
+diagnostics:
+  n_conditions: 200    # conditions per split — RANDOMLY subsampled (no replacement, seeded);
+                       # all conditions used if a split has fewer than this.
+  max_cells:    2000   # cells per condition for MMD/effect — randomly subsampled (seeded), O(N²).
