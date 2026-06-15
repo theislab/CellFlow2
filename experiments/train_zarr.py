@@ -12,6 +12,14 @@ os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/storage/jax_cache")
 os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
 
+# allow wandb up to 2 hours to upload at the end of a long training run
+os.environ.setdefault("WANDB_HTTP_TIMEOUT", "7200")
+os.environ.setdefault("WANDB_INIT_TIMEOUT", "7200")
+# retry failed uploads instead of dropping data
+os.environ.setdefault("WANDB_RETRY_MAX", "10")
+# write logs offline if network drops mid-run; sync manually later
+os.environ.setdefault("WANDB_SILENT", "true")  # suppress wandb spam to stdout
+
 import time
 from functools import partial
 from pathlib import Path
@@ -34,9 +42,6 @@ import callbacks
 
 def run(cfg: DictConfig, gds: dict) -> dict:
     # ── wandb sweep is dominant: init first, then overlay its params onto cfg ──
-    # The agent sets WANDB_SWEEP_ID, so we init even if wandb.enabled wasn't set.
-    # wandb.config (incl. sweep overrides) wins over the composed Hydra cfg, and
-    # values arrive as real Python objects — so list params (hidden_dims, …) work.
     wandb_run = None
     if cfg.wandb.enabled or os.environ.get("WANDB_SWEEP_ID"):
         try:
@@ -46,10 +51,11 @@ def run(cfg: DictConfig, gds: dict) -> dict:
                 entity=cfg.wandb.get("entity"),
                 name=cfg.wandb.get("run_name"),
                 config=OmegaConf.to_container(cfg, resolve=True),
+                settings=wandb.Settings(init_timeout=7200),
             )
             OmegaConf.set_struct(cfg, False)
             for k, v in dict(wandb_run.config).items():
-                if "." in k or not isinstance(v, dict):   # sweep overrides; skip echoed nested dicts
+                if "." in k or not isinstance(v, dict):
                     OmegaConf.update(cfg, k, v)
             OmegaConf.set_struct(cfg, True)
             print(f"  wandb run: {wandb_run.url}")
@@ -59,8 +65,6 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     mode       = cfg.ablation.mode
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    # tag outputs with the wandb run id so concurrent sweep runs don't overwrite
-    # each other's checkpoint / results (filename was previously only mode-based).
     run_tag    = wandb_run.id if wandb_run is not None else "local"
     name       = f"model_{mode}_{run_tag}"
     ckpt_path  = output_dir / f"{name}_best_ckpt"   # orbax saves to a directory
@@ -143,7 +147,9 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     print(f"  set-encoder layers per modality: {list(layers_before_pool)}")
 
     optimizer, _ = utils.build_optimizer(cfg)
+    predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
     sf = ScaleFlow(solver=cfg.solver.solver_key)
+    sf._validation_data["predict_kwargs"] = predict_kwargs
     sf.prepare_model(
         sample_batch=sample_batch,
         max_combination_length=int(m.max_combination_length),
@@ -235,7 +241,7 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         print(f"  {k:<18} {v:.4f}")
 
     if wandb_run is not None:
-        wandb_run.finish()
+        wandb_run.finish(timeout=300)  # give wandb 5 min to sync, then exit
 
     return {"solver": best_solver, "test_metrics": test_metrics}
 

@@ -81,7 +81,6 @@ class ValMetricsLogger(ComputationCallback):
               f"E-dist={entry['e_distance']:.4f}  MMD={entry['mmd']:.4f}  (step {self._step})")
         if self._wandb_run is not None:
             self._wandb_run.log({f"val_{k}": entry[k] for k in self.METRICS})
-
         return {
             f"{ds}_r_squared_delta_mean": float(np.nanmean([m["r_squared_delta"] for m in ms]))
             for ds, ms in per_ds.items()
@@ -98,17 +97,17 @@ class ValMetricsLogger(ComputationCallback):
 
 
 class BestModelCheckpoint(ComputationCallback):
-    """Save solver params with orbax whenever mean val R² improves."""
+    """Save solver params with orbax whenever mean val R²Δ improves."""
 
     def __init__(self, save_path: str, wandb_run=None):
         # save_path is used as a directory for orbax (e.g. .../model_X_best_ckpt)
-        self.save_path  = Path(save_path)
-        self.best_r2    = -np.inf
-        self._wandb_run = wandb_run
-        self._ckptr     = ocp.PyTreeCheckpointer()
+        self.save_path    = Path(save_path)
+        self.best_r2_delta = -np.inf
+        self._wandb_run   = wandb_run
+        self._ckptr       = ocp.PyTreeCheckpointer()
 
     def on_train_begin(self, *args, **kwargs) -> None:
-        self.best_r2 = -np.inf
+        self.best_r2_delta = -np.inf
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
                          valid_pred_data, solver, **kwargs) -> dict:
@@ -118,21 +117,23 @@ class BestModelCheckpoint(ComputationCallback):
                 pred_arr = valid_pred_data[ds].get(cond_key)
                 if pred_arr is None:
                     continue
-                scores.append(compute_r_squared(np.asarray(true_arr), np.asarray(pred_arr)))
+                src_arr = valid_source_data.get(ds, {}).get(cond_key)
+                if src_arr is None:
+                    continue
+                scores.append(r_squared_delta(true_arr, pred_arr, src_arr))
         if not scores:
             return {}
-        mean_r2 = float(np.mean(scores))
-        if mean_r2 > self.best_r2:
-            self.best_r2 = mean_r2
-            # orbax requires a fresh directory — remove previous checkpoint first
+        mean_r2_delta = float(np.nanmean(scores))
+        if mean_r2_delta > self.best_r2_delta:
+            self.best_r2_delta = mean_r2_delta
             import shutil
             if self.save_path.exists():
                 shutil.rmtree(self.save_path)
             self._ckptr.save(self.save_path, solver.vf_state.params)
-            print(f"    ✓ checkpoint saved  (val R²={mean_r2:.4f})")
+            print(f"    ✓ checkpoint saved  (val R²Δ={mean_r2_delta:.4f})")
         if self._wandb_run is not None:
-            self._wandb_run.log({"best_val_r2": self.best_r2})
-        return {"best_val_r2": self.best_r2}
+            self._wandb_run.log({"best_val_r2_delta": self.best_r2_delta})
+        return {"best_val_r2_delta": self.best_r2_delta}
 
     def on_train_end(self, valid_source_data, valid_true_data,
                      valid_pred_data, solver, **kwargs) -> dict:
