@@ -3,9 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
-from ott.neural.methods.flows import dynamics
-
 import scaleflow
+from scaleflow._compat import ConstantNoiseFlow
 from scaleflow.solvers import _eqm, _genot, _otfm
 from scaleflow.utils import match_linear
 
