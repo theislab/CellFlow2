@@ -5,13 +5,15 @@ import pytest
 
 import scaleflow
 
+# scaleflow uses max_combination_length == 1: one token per covariate (set_size=1).
+# Covariates are concatenated along the set axis (axis=-2) into a bag of tokens
+# before pooling, so each covariate is a single (batch, 1, emb) tensor.
 cond = {
-    "pert1": jnp.ones((1, 3, 3)),
-    "pert2": jnp.ones((1, 3, 10)),
-    "pert3": jnp.ones((1, 3, 5)),
+    "pert1": jnp.ones((1, 1, 3)),
+    "pert2": jnp.ones((1, 1, 10)),
+    "pert3": jnp.ones((1, 1, 5)),
 }
-cond = {k: v.at[0, 2, :].set(0.0) for k, v in cond.items()}
-cond["pert4_skip_pool"] = jnp.ones((1, 3, 5))
+cond["pert4_skip_pool"] = jnp.ones((1, 1, 5))
 
 layers_before_pool = [
     {
@@ -20,8 +22,11 @@ layers_before_pool = [
             {"layer_type": "self_attention", "num_heads": 4, "qkv_dim": 32},
         ),
         "pert2": ({"layer_type": "mlp", "dims": (32, 32)},),
-        "pert3": (),
-        "pert4_skip_pool": (),
+        # scaleflow concatenates covariates along the set axis (axis=-2) before
+        # pooling, so every covariate must be projected to a common feature dim.
+        # Mirror real usage: a uniform pre-pool projection per condition key.
+        "pert3": ({"layer_type": "mlp", "dims": (32, 32)},),
+        "pert4_skip_pool": ({"layer_type": "mlp", "dims": (32, 32)},),
     },
     ({"layer_type": "mlp", "dims": (32, 32)},),
     (

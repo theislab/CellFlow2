@@ -293,6 +293,7 @@ class GroupedDistributionAnnotation:
         )
         return None
 
+
 @dataclass
 class GroupedDistribution:
     data: GroupedDistributionData

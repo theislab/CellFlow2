@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Callable
 from functools import partial
 from typing import Any
@@ -9,10 +10,10 @@ import numpy as np
 import optax
 from flax.core import frozen_dict
 from flax.training import train_state
-from ott.neural.methods.flows import dynamics
 from ott.solvers import utils as solver_utils
 
 from scaleflow import utils
+from scaleflow._compat import BaseFlow
 from scaleflow._types import ArrayLike
 from scaleflow.networks._velocity_field import ConditionalVelocityField
 from scaleflow.solvers.utils import ema_update
@@ -48,7 +49,7 @@ class OTFlowMatching:
     def __init__(
         self,
         vf: ConditionalVelocityField,
-        probability_path: dynamics.BaseFlow,
+        probability_path: BaseFlow,
         match_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = None,
         time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
         phenotype_predictor: Any | None = None,
@@ -70,6 +71,10 @@ class OTFlowMatching:
         self.vf_state = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_state_inference = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_step_fn = self._get_vf_step_fn()
+        # Cache of jitted predict fns keyed on the frozen diffeqsolve kwargs. Params are
+        # passed as an argument (not closed over), so the compiled fn is reused across
+        # parameter updates instead of recompiling on every predict call.
+        self._predict_fn_cache: dict[frozen_dict.FrozenDict, Any] = {}
 
         self.phenotype_predictor = phenotype_predictor
         if self.phenotype_predictor is not None:
@@ -301,6 +306,39 @@ class OTFlowMatching:
             return np.asarray(cond_mean), np.asarray(cond_logvar)
         return cond_mean, cond_logvar
 
+    def _get_predict_fn(self, kwargs_frozen: frozen_dict.FrozenDict) -> Callable:  # type: ignore[type-arg]
+        """Build (and cache) the jitted predict fn for a given set of diffeqsolve kwargs.
+
+        ``params`` are threaded through as an argument rather than closed over, so the
+        compiled function can be reused as the inference parameters change.
+        """
+        if kwargs_frozen in self._predict_fn_cache:
+            return self._predict_fn_cache[kwargs_frozen]
+
+        kwargs = dict(kwargs_frozen)
+
+        def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
+            params, condition, encoder_noise = args
+            return self.vf_state_inference.apply_fn({"params": params}, t, x, condition, encoder_noise, train=False)[0]
+
+        def solve_ode(
+            params: Any, x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray
+        ) -> jnp.ndarray:
+            ode_term = diffrax.ODETerm(vf)
+            result = diffrax.diffeqsolve(
+                ode_term,
+                t0=0.0,
+                t1=1.0,
+                y0=x,
+                args=(params, condition, encoder_noise),
+                **kwargs,
+            )
+            return result.ys[0]
+
+        fn = jax.jit(jax.vmap(solve_ode, in_axes=[None, 0, None, None]))
+        self._predict_fn_cache[kwargs_frozen] = fn
+        return fn
+
     def _predict_jit(
         self, x: ArrayLike, condition: dict[str, ArrayLike], rng: jax.Array | None = None, **kwargs: Any
     ) -> ArrayLike:
@@ -308,39 +346,21 @@ class OTFlowMatching:
         kwargs.setdefault("dt0", None)
         kwargs.setdefault("solver", diffrax.Tsit5())
         kwargs.setdefault("stepsize_controller", diffrax.PIDController(rtol=1e-5, atol=1e-5))
-        kwargs = frozen_dict.freeze(kwargs)
+        kwargs_frozen = frozen_dict.freeze(kwargs)
 
         noise_dim = (1, self.vf.condition_embedding_dim)
         use_mean = rng is None or self.condition_encoder_mode == "deterministic"
         rng = utils.default_prng_key(rng)
         encoder_noise = jnp.zeros(noise_dim) if use_mean else jax.random.normal(rng, noise_dim)
 
-        def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
-            params = self.vf_state_inference.params
-            condition, encoder_noise = args
-            return self.vf_state_inference.apply_fn({"params": params}, t, x, condition, encoder_noise, train=False)[0]
-
-        def solve_ode(x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray) -> jnp.ndarray:
-            ode_term = diffrax.ODETerm(vf)
-            result = diffrax.diffeqsolve(
-                ode_term,
-                t0=0.0,
-                t1=1.0,
-                y0=x,
-                args=(condition, encoder_noise),
-                **kwargs,
-            )
-            return result.ys[0]
-
-        x_pred = jax.jit(jax.vmap(solve_ode, in_axes=[0, None, None]))(x, condition, encoder_noise)
-        return x_pred
+        predict_fn = self._get_predict_fn(kwargs_frozen)
+        return predict_fn(self.vf_state_inference.params, x, condition, encoder_noise)
 
     def predict(
         self,
         x: ArrayLike | dict[str, ArrayLike],
         condition: dict[str, ArrayLike] | dict[str, dict[str, ArrayLike]],
         rng: jax.Array | None = None,
-        batched: bool = False,
         show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
@@ -352,20 +372,15 @@ class OTFlowMatching:
         Parameters
         ----------
         x
-            A dictionary with keys indicating the name of the condition and values containing
-            the input data as arrays. If ``batched=False`` provide an array of shape [batch_size, ...].
+            Either a single array of shape ``[batch_size, ...]`` or a dictionary mapping
+            condition names to such arrays (predicted per condition).
         condition
-            A dictionary with keys indicating the name of the condition and values containing
-            the condition of input data as arrays. If ``batched=False`` provide an array of shape
-            [batch_size, ...].
+            The condition(s) corresponding to ``x``: a dict of arrays for a single input,
+            or a dict mapping condition names to such dicts when ``x`` is a dict.
         rng
             Random number generator to sample from the latent distribution,
             only used if ``condition_mode='stochastic'``. If :obj:`None`, the
             mean embedding is used.
-        batched
-            Whether to use batched prediction. This is only supported if the input has
-            the same number of cells for each condition. For example, this works when using
-            :class:`~scaleflow.data.ValidationSampler` to sample the validation data.
         show_progress
             Whether to show a progress bar when predicting over multiple conditions.
         kwargs
@@ -375,26 +390,20 @@ class OTFlowMatching:
         -------
         The push-forward distribution of ``x`` under condition ``condition``.
         """
-        if batched and not x:
+        if "batched" in kwargs:
+            warnings.warn(
+                "The `batched` argument is deprecated and ignored. Dictionary input is "
+                "predicted per condition; the lazy per-condition path provides the same "
+                "parallelism without eagerly materializing arrays.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            kwargs.pop("batched")
+
+        if isinstance(x, dict) and not x:
             return {}
 
-        if batched:
-            keys = sorted(x.keys())
-            condition_keys = sorted(set().union(*(condition[k].keys() for k in keys)))
-            _predict_jit = jax.jit(lambda x, condition: self._predict_jit(x, condition, rng, **kwargs))
-            batched_predict = jax.vmap(_predict_jit, in_axes=(0, dict.fromkeys(condition_keys, 0)))
-            # assert that the number of cells is the same for each condition
-            n_cells = x[keys[0]].shape[0]
-            for k in keys:
-                assert x[k].shape[0] == n_cells, "The number of cells must be the same for each condition"
-            src_inputs = jnp.stack([x[k] for k in keys], axis=0)
-            batched_conditions = {}
-            for cond_key in condition_keys:
-                batched_conditions[cond_key] = jnp.stack([condition[k][cond_key] for k in keys])
-
-            pred_targets = batched_predict(src_inputs, batched_conditions)
-            return {k: pred_targets[i] for i, k in enumerate(keys)}
-        elif isinstance(x, dict):
+        if isinstance(x, dict):
             if show_progress:
                 from tqdm import tqdm
 
