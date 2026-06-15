@@ -71,6 +71,10 @@ class OTFlowMatching:
         self.vf_state = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_state_inference = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_step_fn = self._get_vf_step_fn()
+        # Cache of jitted predict fns keyed on the frozen diffeqsolve kwargs. Params are
+        # passed as an argument (not closed over), so the compiled fn is reused across
+        # parameter updates instead of recompiling on every predict call.
+        self._predict_fn_cache: dict[frozen_dict.FrozenDict, Any] = {}
 
         self.phenotype_predictor = phenotype_predictor
         if self.phenotype_predictor is not None:
@@ -302,6 +306,39 @@ class OTFlowMatching:
             return np.asarray(cond_mean), np.asarray(cond_logvar)
         return cond_mean, cond_logvar
 
+    def _get_predict_fn(self, kwargs_frozen: frozen_dict.FrozenDict) -> Callable:  # type: ignore[type-arg]
+        """Build (and cache) the jitted predict fn for a given set of diffeqsolve kwargs.
+
+        ``params`` are threaded through as an argument rather than closed over, so the
+        compiled function can be reused as the inference parameters change.
+        """
+        if kwargs_frozen in self._predict_fn_cache:
+            return self._predict_fn_cache[kwargs_frozen]
+
+        kwargs = dict(kwargs_frozen)
+
+        def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
+            params, condition, encoder_noise = args
+            return self.vf_state_inference.apply_fn({"params": params}, t, x, condition, encoder_noise, train=False)[0]
+
+        def solve_ode(
+            params: Any, x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray
+        ) -> jnp.ndarray:
+            ode_term = diffrax.ODETerm(vf)
+            result = diffrax.diffeqsolve(
+                ode_term,
+                t0=0.0,
+                t1=1.0,
+                y0=x,
+                args=(params, condition, encoder_noise),
+                **kwargs,
+            )
+            return result.ys[0]
+
+        fn = jax.jit(jax.vmap(solve_ode, in_axes=[None, 0, None, None]))
+        self._predict_fn_cache[kwargs_frozen] = fn
+        return fn
+
     def _predict_jit(
         self, x: ArrayLike, condition: dict[str, ArrayLike], rng: jax.Array | None = None, **kwargs: Any
     ) -> ArrayLike:
@@ -309,32 +346,15 @@ class OTFlowMatching:
         kwargs.setdefault("dt0", None)
         kwargs.setdefault("solver", diffrax.Tsit5())
         kwargs.setdefault("stepsize_controller", diffrax.PIDController(rtol=1e-5, atol=1e-5))
-        kwargs = frozen_dict.freeze(kwargs)
+        kwargs_frozen = frozen_dict.freeze(kwargs)
 
         noise_dim = (1, self.vf.condition_embedding_dim)
         use_mean = rng is None or self.condition_encoder_mode == "deterministic"
         rng = utils.default_prng_key(rng)
         encoder_noise = jnp.zeros(noise_dim) if use_mean else jax.random.normal(rng, noise_dim)
 
-        def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
-            params = self.vf_state_inference.params
-            condition, encoder_noise = args
-            return self.vf_state_inference.apply_fn({"params": params}, t, x, condition, encoder_noise, train=False)[0]
-
-        def solve_ode(x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray) -> jnp.ndarray:
-            ode_term = diffrax.ODETerm(vf)
-            result = diffrax.diffeqsolve(
-                ode_term,
-                t0=0.0,
-                t1=1.0,
-                y0=x,
-                args=(condition, encoder_noise),
-                **kwargs,
-            )
-            return result.ys[0]
-
-        x_pred = jax.jit(jax.vmap(solve_ode, in_axes=[0, None, None]))(x, condition, encoder_noise)
-        return x_pred
+        predict_fn = self._get_predict_fn(kwargs_frozen)
+        return predict_fn(self.vf_state_inference.params, x, condition, encoder_noise)
 
     def predict(
         self,

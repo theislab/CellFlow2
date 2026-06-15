@@ -123,6 +123,51 @@ class TestSolver:
         with pytest.warns(DeprecationWarning, match="batched"):
             solver.predict(src, cond, batched=True)
 
+    @pytest.mark.parametrize("solver_class", ["otfm", "genot"])
+    def test_predict_fn_cache_reused(self, dataloader, solver_class):
+        """The jitted predict fn is cached (compiled once) yet reflects updated params."""
+        opt = optax.adam(1e-3)
+        if solver_class == "otfm":
+            vf = scaleflow.networks.ConditionalVelocityField(
+                output_dim=5, max_combination_length=2, condition_embedding_dim=12, hidden_dims=(8, 8), decoder_dims=(8, 8)
+            )
+            solver = _otfm.OTFlowMatching(
+                vf=vf,
+                match_fn=match_linear,
+                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                optimizer=opt,
+                conditions=cond[("drug_1",)],
+                rng=vf_rng,
+            )
+        else:
+            vf = scaleflow.networks.GENOTConditionalVelocityField(
+                output_dim=5, max_combination_length=2, condition_embedding_dim=12, hidden_dims=(8, 8), decoder_dims=(8, 8)
+            )
+            solver = _genot.GENOT(
+                vf=vf,
+                data_match_fn=match_linear,
+                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                optimizer=opt,
+                source_dim=5,
+                target_dim=5,
+                conditions=cond[("drug_1",)],
+                rng=vf_rng,
+            )
+
+        x = np.asarray(src[("drug_1",)])
+        c = cond[("drug_1",)]
+        pred_kwargs = {"max_steps": 16, "throw": False}
+
+        pred_before = np.asarray(solver.predict(x, c, **pred_kwargs))
+        for i in range(3):
+            solver.step_fn(jax.random.PRNGKey(i), dataloader.sample())
+        pred_after = np.asarray(solver.predict(x, c, **pred_kwargs))
+
+        # Compiled once and reused (no per-call recompile), ...
+        assert len(solver._predict_fn_cache) == 1
+        # ... but predictions still track the updated parameters (params passed, not baked in).
+        assert not np.allclose(pred_before, pred_after)
+
     @pytest.mark.parametrize("solver_class", ["otfm", "eqm"])
     @pytest.mark.parametrize("ema", [0.5, 1.0])
     def test_EMA(self, dataloader, eqm_dataloader, solver_class, ema):

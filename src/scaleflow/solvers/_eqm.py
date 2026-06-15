@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from flax.core import frozen_dict
 from flax.training import train_state
 from ott.solvers import utils as solver_utils
 
@@ -70,6 +71,9 @@ class EquilibriumMatching:
         self.vf_state = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_state_inference = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_step_fn = self._get_vf_step_fn()
+        # Cache of jitted predict fns keyed on the frozen sampler config; params are
+        # threaded as an argument so the compiled fn is reused across calls.
+        self._predict_fn_cache: dict[frozen_dict.FrozenDict, Any] = {}
 
         self.phenotype_predictor = phenotype_predictor
         if self.phenotype_predictor is not None:
@@ -353,28 +357,52 @@ class EquilibriumMatching:
         rng = utils.default_prng_key(rng)
         encoder_noise = jnp.zeros(noise_dim) if use_mean else jax.random.normal(rng, noise_dim)
 
+        config_frozen = frozen_dict.freeze(
+            {"eta": eta, "max_steps": max_steps, "use_nesterov": use_nesterov, "mu": mu}
+        )
+        predict_fn = self._get_predict_fn(config_frozen)
+        return predict_fn(self.vf_state_inference.params, x, condition, encoder_noise)
+
+    def _get_predict_fn(self, config_frozen: frozen_dict.FrozenDict) -> Callable:  # type: ignore[type-arg]
+        """Build (and cache) the jitted gradient-descent sampler for a sampler config.
+
+        ``params`` are threaded as an argument rather than closed over, so the compiled
+        function is reused across parameter updates instead of recompiling each call.
+        """
+        if config_frozen in self._predict_fn_cache:
+            return self._predict_fn_cache[config_frozen]
+
+        cfg = dict(config_frozen)
+        eta = cfg["eta"]
+        max_steps = cfg["max_steps"]
+        use_nesterov = cfg["use_nesterov"]
+        mu = cfg["mu"]
+
         def gradient_field(
-            x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray
+            params: Any, x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray
         ) -> jnp.ndarray:
-            params = self.vf_state_inference.params
             return self.vf_state_inference.apply_fn({"params": params}, x, condition, encoder_noise, train=False)[0]
 
-        def sample_gd(x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray) -> jnp.ndarray:
+        def sample_gd(
+            params: Any, x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray
+        ) -> jnp.ndarray:
             """Basic gradient descent sampler."""
 
             def gd_step(i, x_val):
-                f = gradient_field(x_val, condition, encoder_noise)
+                f = gradient_field(params, x_val, condition, encoder_noise)
                 return x_val - eta * f
 
             return jax.lax.fori_loop(0, max_steps, gd_step, x)
 
-        def sample_nag(x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray) -> jnp.ndarray:
+        def sample_nag(
+            params: Any, x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray
+        ) -> jnp.ndarray:
             """Nesterov accelerated gradient descent sampler."""
 
             def nag_step(i, state):
                 x_val, velocity = state
                 x_lookahead = x_val - mu * velocity
-                f = gradient_field(x_lookahead, condition, encoder_noise)
+                f = gradient_field(params, x_lookahead, condition, encoder_noise)
                 new_velocity = mu * velocity + eta * f
                 new_x = x_val - new_velocity
                 return (new_x, new_velocity)
@@ -384,8 +412,9 @@ class EquilibriumMatching:
             return final_x
 
         sampler = sample_nag if use_nesterov else sample_gd
-        x_pred = jax.jit(jax.vmap(sampler, in_axes=[0, None, None]))(x, condition, encoder_noise)
-        return x_pred
+        fn = jax.jit(jax.vmap(sampler, in_axes=[None, 0, None, None]))
+        self._predict_fn_cache[config_frozen] = fn
+        return fn
 
     def predict(
         self,
