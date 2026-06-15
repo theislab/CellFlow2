@@ -5,6 +5,7 @@ import optax
 import pytest
 
 import scaleflow
+from scaleflow._compat import ConstantNoiseFlow
 from scaleflow.solvers import _eqm, _genot, _otfm
 from scaleflow.utils import match_linear
 

@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+
 import scaleflow
 from scaleflow._compat import ConstantNoiseFlow
 from scaleflow.solvers import _otfm
