@@ -51,9 +51,7 @@ class DataManager:
             all_dist_keys = set(self.src_dist_keys) | set(self.tgt_dist_keys)
             for new_key, (obs_col, _uns_key) in self.extra_rep_keys.items():
                 if obs_col not in all_dist_keys:
-                    raise ValueError(
-                        f"extra_rep_keys: obs_col '{obs_col}' must be in src_dist_keys or tgt_dist_keys."
-                    )
+                    raise ValueError(f"extra_rep_keys: obs_col '{obs_col}' must be in src_dist_keys or tgt_dist_keys.")
                 if new_key in all_dist_keys:
                     raise ValueError(
                         f"extra_rep_keys: new_key '{new_key}' conflicts with existing dist key '{new_key}'."
@@ -178,8 +176,11 @@ class DataManager:
             .set_index("tgt_dist_idx")
         )
         tgt_dist_labels_annotation = dict(
-            zip(tgt_dist_labels_annotation.index,
-                tgt_dist_labels_annotation.itertuples(index=False, name=None), strict=True)
+            zip(
+                tgt_dist_labels_annotation.index,
+                tgt_dist_labels_annotation.itertuples(index=False, name=None),
+                strict=True,
+            )
         )
 
         annotation = GroupedDistributionAnnotation(
@@ -313,9 +314,7 @@ class DataManager:
         obs, annotation, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels = self._prepare_annotation(
             adata, verbose=verbose
         )
-        data = self._prepare_data(
-            adata, obs, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels, verbose=verbose
-        )
+        data = self._prepare_data(adata, obs, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels, verbose=verbose)
 
         return GroupedDistribution(data=data, annotation=annotation)
 

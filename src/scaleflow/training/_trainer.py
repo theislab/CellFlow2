@@ -60,11 +60,12 @@ class CellFlowTrainer:
         dict[str, dict[str, ArrayLike]],
     ]:
         """Compute predictions for validation data.
-        
+
         Handles ValidationSampler format: {"source": dict, "condition": dict, "target": dict}
         where each dict maps condition_key -> data.
         """
         from functools import partial
+
         import jax
 
         valid_source_data: dict[str, dict[str, ArrayLike]] = {}
@@ -77,12 +78,12 @@ class CellFlowTrainer:
         for val_key, vdl in val_pbar:
             val_pbar.set_description(f"Validation ({val_key}) - sampling")
             # Initialize sampler if not already initialized
-            if hasattr(vdl, '_initialized') and not vdl._initialized:
+            if hasattr(vdl, "_initialized") and not vdl._initialized:
                 vdl.init_sampler()
             batch = vdl.sample()  # Samplers use internal rng
 
             val_pbar.set_description(f"Validation ({val_key}) - extracting data")
-            
+
             # Handle ValidationSampler format: {"source": dict, "condition": dict, "target": dict}
             if "source" in batch and "condition" in batch:
                 src = batch["source"]  # dict mapping cond_key -> source cells
@@ -179,6 +180,7 @@ class CellFlowTrainer:
 
             try:
                 import wandb
+
                 if wandb.run is not None:
                     wandb.log({"train_loss": float(loss)})
             except ImportError:

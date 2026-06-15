@@ -319,9 +319,7 @@ class ValidationSampler:
         # Fallback to string index if no labels
         return (str(tgt_idx),)
 
-    def sample(
-        self, mode: str = "on_log_iteration"
-    ) -> dict[str, dict[tuple[str, ...], Any]]:
+    def sample(self, mode: str = "on_log_iteration") -> dict[str, dict[tuple[str, ...], Any]]:
         """Sample validation data organized by condition key.
 
         Parameters
@@ -351,9 +349,7 @@ class ValidationSampler:
 
         # Sample a subset of conditions if needed
         if n_conditions < n_total:
-            selected_indices = self._rng.choice(
-                all_tgt_indices, size=n_conditions, replace=False
-            ).tolist()
+            selected_indices = self._rng.choice(all_tgt_indices, size=n_conditions, replace=False).tolist()
         else:
             selected_indices = all_tgt_indices
 
@@ -387,10 +383,12 @@ class ValidationSampler:
                 cond = self._condition_transform(cond, cond_key=str(cond_key))
             condition_dict[cond_key] = cond
 
-        print(f"  [val diag] selected: {len(selected_indices)}  "
-              f"unique cond_keys: {len(source_dict)}  "
-              f"collisions: {sum(key_collision_count.values())}  "
-              f"example colliding keys: {list(key_collision_count.keys())[:3]}")
+        print(
+            f"  [val diag] selected: {len(selected_indices)}  "
+            f"unique cond_keys: {len(source_dict)}  "
+            f"collisions: {sum(key_collision_count.values())}  "
+            f"example colliding keys: {list(key_collision_count.keys())[:3]}"
+        )
 
         return {"source": source_dict, "condition": condition_dict, "target": target_dict}
 
@@ -575,7 +573,7 @@ class ReservoirSampler(SamplerABC):
         self._replacement_prob = replacement_prob
         self._pool_size = math.ceil(pool_fraction * self.n_source_dists)
 
-        self._pool_usage_count = {idx: 0 for idx in data.data.src_data.keys()}
+        self._pool_usage_count = dict.fromkeys(data.data.src_data.keys(), 0)
         self._condition_transform = condition_transform
         self._initialized = False
         self._src_idx_pool = None
