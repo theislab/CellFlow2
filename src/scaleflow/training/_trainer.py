@@ -155,7 +155,6 @@ class CellFlowTrainer:
         """
         self.training_logs = {"loss": [], "loss_gex": [], "loss_functional": []}
         rng_jax = jax.random.PRNGKey(0)
-        rng_np = np.random.default_rng(0)
 
         # Initiate callbacks
         valid_loaders = valid_loaders or {}

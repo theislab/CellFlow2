@@ -10,10 +10,10 @@ import numpy as np
 import optax
 from flax.core import frozen_dict
 from flax.training import train_state
-from ott.neural.methods.flows import dynamics
 from ott.solvers import utils as solver_utils
 
 from scaleflow import utils
+from scaleflow._compat import BaseFlow
 from scaleflow._types import ArrayLike
 from scaleflow.networks._velocity_field import ConditionalVelocityField
 from scaleflow.solvers.utils import ema_update
@@ -49,7 +49,7 @@ class OTFlowMatching:
     def __init__(
         self,
         vf: ConditionalVelocityField,
-        probability_path: dynamics.BaseFlow,
+        probability_path: BaseFlow,
         match_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = None,
         time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
         phenotype_predictor: Any | None = None,

@@ -313,7 +313,7 @@ class ValidationSampler:
         labels = self._data.annotation.tgt_dist_idx_to_labels.get(tgt_idx)
         if labels is not None:
             # Convert to tuple of strings
-            if isinstance(labels, (list, np.ndarray)):
+            if isinstance(labels, (list | np.ndarray)):
                 return tuple(str(lbl) for lbl in labels)
             return (str(labels),)
         # Fallback to string index if no labels
@@ -473,7 +473,7 @@ class PredictionSampler:
         labels = self._data.annotation.tgt_dist_idx_to_labels.get(tgt_idx)
         if labels is not None:
             # Convert to tuple of strings
-            if isinstance(labels, (list, np.ndarray)):
+            if isinstance(labels, (list | np.ndarray)):
                 return tuple(str(lbl) for lbl in labels)
             return (str(labels),)
         # Fallback to string index if no labels
