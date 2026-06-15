@@ -1,14 +1,11 @@
-import functools
-import time
-
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
-from ott.neural.methods.flows import dynamics
 
 import scaleflow
+from scaleflow._compat import ConstantNoiseFlow
 from scaleflow.solvers import _eqm, _genot, _otfm
 from scaleflow.utils import match_linear
 
@@ -28,7 +25,7 @@ def eqm_dataloader():
     class DataLoader:
         n_conditions = 10
 
-        def sample(self, rng):
+        def sample(self):
             return {
                 "src_cell_data": jnp.ones((10, 5)) * 10,
                 "tgt_cell_data": jnp.ones((10, 5)),
@@ -38,9 +35,26 @@ def eqm_dataloader():
     return DataLoader()
 
 
+@pytest.fixture
+def dataloader():
+    # otfm/genot use single-perturbation conditions (set_size=1) keyed by "drug",
+    # matching the solver `conditions={"drug": (..., 1, 3)}` below.
+    class DataLoader:
+        n_conditions = 10
+
+        def sample(self):
+            return {
+                "src_cell_data": jnp.ones((10, 5)) * 10,
+                "tgt_cell_data": jnp.ones((10, 5)),
+                "condition": {"drug": jnp.ones((10, 1, 3))},
+            }
+
+    return DataLoader()
+
+
 class TestSolver:
     @pytest.mark.parametrize("solver_class", ["otfm", "genot", "eqm"])
-    def test_predict_batch(self, dataloader, eqm_dataloader, solver_class):
+    def test_predict_multi_condition(self, dataloader, eqm_dataloader, solver_class):
         if solver_class == "otfm":
             vf_class = scaleflow.networks.ConditionalVelocityField
         elif solver_class == "genot":
@@ -60,7 +74,7 @@ class TestSolver:
             solver = _otfm.OTFlowMatching(
                 vf=vf,
                 match_fn=match_linear,
-                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                probability_path=ConstantNoiseFlow(0.0),
                 optimizer=opt,
                 conditions={"drug": np.random.rand(2, 1, 3)},
                 rng=vf_rng,
@@ -69,7 +83,7 @@ class TestSolver:
             solver = _genot.GENOT(
                 vf=vf,
                 data_match_fn=match_linear,
-                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                probability_path=ConstantNoiseFlow(0.0),
                 optimizer=opt,
                 source_dim=5,
                 target_dim=5,
@@ -93,28 +107,74 @@ class TestSolver:
             num_iterations=2,
             valid_freq=1,
         )
-        start_batched = time.time()
-        x_pred_batched = solver.predict(src, cond, batched=True)
-        end_batched = time.time()
-        diff_batched = end_batched - start_batched
-
-        start_nonbatched = time.time()
-        x_pred_nonbatched = jax.tree.map(
-            functools.partial(solver.predict, batched=False),
+        # Predicting on a dict of conditions returns one prediction per condition,
+        # and must match predicting each condition individually.
+        x_pred_dict = solver.predict(src, cond)
+        x_pred_per_condition = jax.tree.map(
+            solver.predict,
             src,
             cond,  # type: ignore[attr-defined]
         )
-        end_nonbatched = time.time()
-        diff_nonbatched = end_nonbatched - start_nonbatched
+        for key in src:
+            assert x_pred_dict[key].shape == src[key].shape
+            assert np.allclose(x_pred_dict[key], x_pred_per_condition[key], atol=1e-1, rtol=1e-2)
 
-        assert x_pred_batched[("drug_1",)].shape == x_pred_nonbatched[("drug_1",)].shape
-        assert np.allclose(
-            x_pred_batched[("drug_1",)],
-            x_pred_nonbatched[("drug_1",)],
-            atol=1e-1,
-            rtol=1e-2,
-        )
-        assert diff_nonbatched - diff_batched > 0.5
+        # The removed `batched` argument is accepted but ignored, with a deprecation warning.
+        with pytest.warns(DeprecationWarning, match="batched"):
+            solver.predict(src, cond, batched=True)
+
+    @pytest.mark.parametrize("solver_class", ["otfm", "genot"])
+    def test_predict_fn_cache_reused(self, dataloader, solver_class):
+        """The jitted predict fn is cached (compiled once) yet reflects updated params."""
+        opt = optax.adam(1e-3)
+        if solver_class == "otfm":
+            vf = scaleflow.networks.ConditionalVelocityField(
+                output_dim=5,
+                max_combination_length=2,
+                condition_embedding_dim=12,
+                hidden_dims=(8, 8),
+                decoder_dims=(8, 8),
+            )
+            solver = _otfm.OTFlowMatching(
+                vf=vf,
+                match_fn=match_linear,
+                probability_path=ConstantNoiseFlow(0.0),
+                optimizer=opt,
+                conditions=cond[("drug_1",)],
+                rng=vf_rng,
+            )
+        else:
+            vf = scaleflow.networks.GENOTConditionalVelocityField(
+                output_dim=5,
+                max_combination_length=2,
+                condition_embedding_dim=12,
+                hidden_dims=(8, 8),
+                decoder_dims=(8, 8),
+            )
+            solver = _genot.GENOT(
+                vf=vf,
+                data_match_fn=match_linear,
+                probability_path=ConstantNoiseFlow(0.0),
+                optimizer=opt,
+                source_dim=5,
+                target_dim=5,
+                conditions=cond[("drug_1",)],
+                rng=vf_rng,
+            )
+
+        x = np.asarray(src[("drug_1",)])
+        c = cond[("drug_1",)]
+        pred_kwargs = {"max_steps": 16, "throw": False}
+
+        pred_before = np.asarray(solver.predict(x, c, **pred_kwargs))
+        for i in range(3):
+            solver.step_fn(jax.random.PRNGKey(i), dataloader.sample())
+        pred_after = np.asarray(solver.predict(x, c, **pred_kwargs))
+
+        # Compiled once and reused (no per-call recompile), ...
+        assert len(solver._predict_fn_cache) == 1
+        # ... but predictions still track the updated parameters (params passed, not baked in).
+        assert not np.allclose(pred_before, pred_after)
 
     @pytest.mark.parametrize("solver_class", ["otfm", "eqm"])
     @pytest.mark.parametrize("ema", [0.5, 1.0])
@@ -141,7 +201,7 @@ class TestSolver:
             solver1 = _otfm.OTFlowMatching(
                 vf=vf1,
                 match_fn=match_linear,
-                probability_path=dynamics.ConstantNoiseFlow(0.0),
+                probability_path=ConstantNoiseFlow(0.0),
                 optimizer=opt,
                 conditions={condition_key: drug},
                 rng=vf_rng,

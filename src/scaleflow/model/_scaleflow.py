@@ -13,11 +13,11 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pandas as pd
-from ott.neural.methods.flows import dynamics
 
 from scaleflow import _constants
+from scaleflow._compat import BrownianBridge, ConstantNoiseFlow
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
-from scaleflow.data import DataManager, GroupedDistribution, ReservoirSampler, SamplerABC
+from scaleflow.data import DataManager, GroupedDistribution, SamplerABC
 from scaleflow.model._utils import _write_predictions
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
@@ -25,8 +25,6 @@ from scaleflow.solvers import _eqm, _genot, _otfm
 from scaleflow.training._callbacks import BaseCallback
 from scaleflow.training._trainer import CellFlowTrainer
 from scaleflow.utils import match_linear
-
-from scaleflow.data import SamplerABC
 
 __all__ = ["ScaleFlow"]
 
@@ -242,17 +240,11 @@ class ScaleFlow:
             n_conditions_on_train_end=n_conditions_on_train_end,
         )
         self._validation_data[name] = val_data
-        # Batched prediction is not compatible with split covariates
-        # as all conditions need to be the same size
-        split_val = len(val_data.control_to_perturbation) > 1
         predict_kwargs = predict_kwargs or {}
-        # Check if predict_kwargs is alreday provided from an earlier call
+        # Check if predict_kwargs is already provided from an earlier call
         if "predict_kwargs" in self._validation_data and len(predict_kwargs):
             self._validation_data["predict_kwargs"].update(predict_kwargs)
             predict_kwargs = self._validation_data["predict_kwargs"]
-        # Set batched prediction to False if split_val is True
-        if split_val:
-            predict_kwargs["batched"] = False
         self._validation_data["predict_kwargs"] = predict_kwargs
 
     def prepare_model(
@@ -447,7 +439,6 @@ class ScaleFlow:
         - :attr:`scaleflow.model.CellFlow.trainer` - an instance of the
           :class:`scaleflow.training.CellFlowTrainer`.
         """
-
         # Store the seed for use in train method
         self._seed = seed
 
@@ -542,9 +533,9 @@ class ScaleFlow:
 
         probability_path, noise = next(iter(probability_path.items()))
         if probability_path == "constant_noise":
-            probability_path = dynamics.ConstantNoiseFlow(noise)
+            probability_path = ConstantNoiseFlow(noise)
         elif probability_path == "bridge":
-            probability_path = dynamics.BrownianBridge(noise)
+            probability_path = BrownianBridge(noise)
         else:
             raise NotImplementedError(
                 f"The key of `probability_path` must be `'constant_noise'` or `'bridge'` but found {probability_path}."
@@ -659,10 +650,8 @@ class ScaleFlow:
         - :attr:`scaleflow.model.CellFlow.dataloader` - the training dataloader.
         - :attr:`scaleflow.model.CellFlow.solver` - the trained solver.
         """
-
         if self.trainer is None:
             raise ValueError("Model not initialized. Please call `prepare_model` first.")
-
 
         # validation_dataloaders = {}
         # for k, v in self._validation_data.items():
@@ -893,9 +882,9 @@ class ScaleFlow:
     def load(
         cls,
         filename: str,
-    ) -> "CellFlow":
+    ) -> "ScaleFlow":
         """
-        Load a :class:`~scaleflow.model.CellFlow` model from a saved instance.
+        Load a :class:`~scaleflow.model.ScaleFlow` model from a saved instance.
 
         Parameters
         ----------
