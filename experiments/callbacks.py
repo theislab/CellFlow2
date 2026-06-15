@@ -5,9 +5,9 @@ import json
 import os
 from pathlib import Path
 
-import cloudpickle
 import jax
 import numpy as np
+import orbax.checkpoint as ocp
 from tqdm import tqdm
 
 from scaleflow.training._callbacks import ComputationCallback
@@ -98,12 +98,14 @@ class ValMetricsLogger(ComputationCallback):
 
 
 class BestModelCheckpoint(ComputationCallback):
-    """Cloudpickle the solver whenever mean val R² improves."""
+    """Save solver params with orbax whenever mean val R² improves."""
 
     def __init__(self, save_path: str, wandb_run=None):
-        self.save_path  = save_path
+        # save_path is used as a directory for orbax (e.g. .../model_X_best_ckpt)
+        self.save_path  = Path(save_path)
         self.best_r2    = -np.inf
         self._wandb_run = wandb_run
+        self._ckptr     = ocp.PyTreeCheckpointer()
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self.best_r2 = -np.inf
@@ -122,8 +124,11 @@ class BestModelCheckpoint(ComputationCallback):
         mean_r2 = float(np.mean(scores))
         if mean_r2 > self.best_r2:
             self.best_r2 = mean_r2
-            with open(self.save_path, "wb") as f:
-                cloudpickle.dump(solver, f)
+            # orbax requires a fresh directory — remove previous checkpoint first
+            import shutil
+            if self.save_path.exists():
+                shutil.rmtree(self.save_path)
+            self._ckptr.save(self.save_path, solver.vf_state.params)
             print(f"    ✓ checkpoint saved  (val R²={mean_r2:.4f})")
         if self._wandb_run is not None:
             self._wandb_run.log({"best_val_r2": self.best_r2})

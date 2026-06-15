@@ -63,7 +63,7 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     # each other's checkpoint / results (filename was previously only mode-based).
     run_tag    = wandb_run.id if wandb_run is not None else "local"
     name       = f"model_{mode}_{run_tag}"
-    ckpt_path  = str(output_dir / f"{name}_best.pkl")
+    ckpt_path  = output_dir / f"{name}_best_ckpt"   # orbax saves to a directory
     transform  = utils.ConditionTransform(mode, seed=int(cfg.seed)) if mode != "prophet" else None
 
     print(f"\n{'='*64}")
@@ -199,10 +199,14 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     print(f"  training done in {(time.perf_counter() - t0) / 60:.1f} min")
     callbacks.save_logs(name, sf.trainer.training_logs, output_dir)
 
-    if os.path.exists(ckpt_path):
+    if ckpt_path.exists():
         print(f"Loading best checkpoint from {ckpt_path} …")
-        with open(ckpt_path, "rb") as f:
-            best_solver = cloudpickle.load(f)
+        import orbax.checkpoint as ocp
+        params = ocp.PyTreeCheckpointer().restore(
+            ckpt_path, item=sf.solver.vf_state.params
+        )
+        best_solver = sf.solver
+        best_solver.vf_state = best_solver.vf_state.replace(params=params)
     else:
         print("  no checkpoint found — using final iterate")
         best_solver = sf.solver
@@ -243,7 +247,16 @@ def main(cfg: DictConfig) -> None:
         path = str(cfg.datasets[name].path)
         print(f"Reading [{name}] ← {path}")
         gds[name] = GroupedDistribution.read_zarr(Path(path))
-    run(cfg, gds)
+    try:
+        run(cfg, gds)
+    except Exception:
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.run.finish(exit_code=1)
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":
