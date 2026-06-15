@@ -7,11 +7,13 @@ import diffrax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import linen as nn
 from flax.core import frozen_dict
 from flax.training import train_state
 from ott.solvers import utils as solver_utils
 
 from scaleflow import utils
+from scaleflow._compat import BaseFlow
 from scaleflow._types import ArrayLike
 from scaleflow.solvers.utils import _multivariate_normal
 
@@ -57,8 +59,8 @@ class GENOT:
 
     def __init__(
         self,
-        vf: velocity_field.VelocityField,
-        probability_path: dynamics.BaseFlow,
+        vf: nn.Module,
+        probability_path: BaseFlow,
         data_match_fn: DataMatchFn,
         *,
         source_dim: int,

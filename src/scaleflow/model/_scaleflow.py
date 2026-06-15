@@ -13,9 +13,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pandas as pd
-from ott.neural.methods.flows import dynamics
-
 from scaleflow import _constants
+from scaleflow._compat import BrownianBridge, ConstantNoiseFlow
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
 from scaleflow.data import DataManager, GroupedDistribution, SamplerABC
 from scaleflow.model._utils import _write_predictions
