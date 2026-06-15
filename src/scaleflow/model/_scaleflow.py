@@ -17,7 +17,7 @@ from ott.neural.methods.flows import dynamics
 
 from scaleflow import _constants
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
-from scaleflow.data import DataManager, GroupedDistribution, ReservoirSampler, SamplerABC
+from scaleflow.data import DataManager, GroupedDistribution, SamplerABC
 from scaleflow.model._utils import _write_predictions
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
@@ -25,8 +25,6 @@ from scaleflow.solvers import _eqm, _genot, _otfm
 from scaleflow.training._callbacks import BaseCallback
 from scaleflow.training._trainer import CellFlowTrainer
 from scaleflow.utils import match_linear
-
-from scaleflow.data import SamplerABC
 
 __all__ = ["ScaleFlow"]
 
@@ -441,7 +439,6 @@ class ScaleFlow:
         - :attr:`scaleflow.model.CellFlow.trainer` - an instance of the
           :class:`scaleflow.training.CellFlowTrainer`.
         """
-
         # Store the seed for use in train method
         self._seed = seed
 
@@ -653,7 +650,6 @@ class ScaleFlow:
         - :attr:`scaleflow.model.CellFlow.dataloader` - the training dataloader.
         - :attr:`scaleflow.model.CellFlow.solver` - the trained solver.
         """
-
         if self.trainer is None:
             raise ValueError("Model not initialized. Please call `prepare_model` first.")
 
@@ -887,9 +883,9 @@ class ScaleFlow:
     def load(
         cls,
         filename: str,
-    ) -> "CellFlow":
+    ) -> "ScaleFlow":
         """
-        Load a :class:`~scaleflow.model.CellFlow` model from a saved instance.
+        Load a :class:`~scaleflow.model.ScaleFlow` model from a saved instance.
 
         Parameters
         ----------
