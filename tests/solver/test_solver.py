@@ -129,7 +129,11 @@ class TestSolver:
         opt = optax.adam(1e-3)
         if solver_class == "otfm":
             vf = scaleflow.networks.ConditionalVelocityField(
-                output_dim=5, max_combination_length=2, condition_embedding_dim=12, hidden_dims=(8, 8), decoder_dims=(8, 8)
+                output_dim=5,
+                max_combination_length=2,
+                condition_embedding_dim=12,
+                hidden_dims=(8, 8),
+                decoder_dims=(8, 8),
             )
             solver = _otfm.OTFlowMatching(
                 vf=vf,
@@ -141,7 +145,11 @@ class TestSolver:
             )
         else:
             vf = scaleflow.networks.GENOTConditionalVelocityField(
-                output_dim=5, max_combination_length=2, condition_embedding_dim=12, hidden_dims=(8, 8), decoder_dims=(8, 8)
+                output_dim=5,
+                max_combination_length=2,
+                condition_embedding_dim=12,
+                hidden_dims=(8, 8),
+                decoder_dims=(8, 8),
             )
             solver = _genot.GENOT(
                 vf=vf,

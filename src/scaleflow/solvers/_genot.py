@@ -313,7 +313,9 @@ class GENOT:
 
         kwargs = dict(kwargs_frozen)
 
-        def vf(t: float, x: jnp.ndarray, args: tuple[Any, jnp.ndarray, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
+        def vf(
+            t: float, x: jnp.ndarray, args: tuple[Any, jnp.ndarray, dict[str, jnp.ndarray], jnp.ndarray]
+        ) -> jnp.ndarray:
             params, x_0, condition, encoder_noise = args
             return self.vf_state.apply_fn({"params": params}, t, x, x_0, condition, encoder_noise, train=False)[0]
 

@@ -357,9 +357,7 @@ class EquilibriumMatching:
         rng = utils.default_prng_key(rng)
         encoder_noise = jnp.zeros(noise_dim) if use_mean else jax.random.normal(rng, noise_dim)
 
-        config_frozen = frozen_dict.freeze(
-            {"eta": eta, "max_steps": max_steps, "use_nesterov": use_nesterov, "mu": mu}
-        )
+        config_frozen = frozen_dict.freeze({"eta": eta, "max_steps": max_steps, "use_nesterov": use_nesterov, "mu": mu})
         predict_fn = self._get_predict_fn(config_frozen)
         return predict_fn(self.vf_state_inference.params, x, condition, encoder_noise)
 

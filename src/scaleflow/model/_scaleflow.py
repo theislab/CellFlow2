@@ -653,7 +653,6 @@ class ScaleFlow:
         if self.trainer is None:
             raise ValueError("Model not initialized. Please call `prepare_model` first.")
 
-
         # validation_dataloaders = {}
         # for k, v in self._validation_data.items():
         #     if k != "predict_kwargs":
