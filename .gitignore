@@ -168,3 +168,6 @@ wandb/
 experiments/run_sweep.sbatch
 outputs/
 !experiments/config/wandb/
+
+# analysis: large generated artifacts (cache/tables/figures) — ignored for now
+analysis/
