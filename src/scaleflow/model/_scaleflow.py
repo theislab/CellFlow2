@@ -242,17 +242,11 @@ class ScaleFlow:
             n_conditions_on_train_end=n_conditions_on_train_end,
         )
         self._validation_data[name] = val_data
-        # Batched prediction is not compatible with split covariates
-        # as all conditions need to be the same size
-        split_val = len(val_data.control_to_perturbation) > 1
         predict_kwargs = predict_kwargs or {}
-        # Check if predict_kwargs is alreday provided from an earlier call
+        # Check if predict_kwargs is already provided from an earlier call
         if "predict_kwargs" in self._validation_data and len(predict_kwargs):
             self._validation_data["predict_kwargs"].update(predict_kwargs)
             predict_kwargs = self._validation_data["predict_kwargs"]
-        # Set batched prediction to False if split_val is True
-        if split_val:
-            predict_kwargs["batched"] = False
         self._validation_data["predict_kwargs"] = predict_kwargs
 
     def prepare_model(

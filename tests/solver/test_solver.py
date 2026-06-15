@@ -1,6 +1,3 @@
-import functools
-import time
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -28,7 +25,7 @@ def eqm_dataloader():
     class DataLoader:
         n_conditions = 10
 
-        def sample(self, rng):
+        def sample(self):
             return {
                 "src_cell_data": jnp.ones((10, 5)) * 10,
                 "tgt_cell_data": jnp.ones((10, 5)),
@@ -38,9 +35,26 @@ def eqm_dataloader():
     return DataLoader()
 
 
+@pytest.fixture
+def dataloader():
+    # otfm/genot use single-perturbation conditions (set_size=1) keyed by "drug",
+    # matching the solver `conditions={"drug": (..., 1, 3)}` below.
+    class DataLoader:
+        n_conditions = 10
+
+        def sample(self):
+            return {
+                "src_cell_data": jnp.ones((10, 5)) * 10,
+                "tgt_cell_data": jnp.ones((10, 5)),
+                "condition": {"drug": jnp.ones((10, 1, 3))},
+            }
+
+    return DataLoader()
+
+
 class TestSolver:
     @pytest.mark.parametrize("solver_class", ["otfm", "genot", "eqm"])
-    def test_predict_batch(self, dataloader, eqm_dataloader, solver_class):
+    def test_predict_multi_condition(self, dataloader, eqm_dataloader, solver_class):
         if solver_class == "otfm":
             vf_class = scaleflow.networks.ConditionalVelocityField
         elif solver_class == "genot":
@@ -93,28 +107,21 @@ class TestSolver:
             num_iterations=2,
             valid_freq=1,
         )
-        start_batched = time.time()
-        x_pred_batched = solver.predict(src, cond, batched=True)
-        end_batched = time.time()
-        diff_batched = end_batched - start_batched
-
-        start_nonbatched = time.time()
-        x_pred_nonbatched = jax.tree.map(
-            functools.partial(solver.predict, batched=False),
+        # Predicting on a dict of conditions returns one prediction per condition,
+        # and must match predicting each condition individually.
+        x_pred_dict = solver.predict(src, cond)
+        x_pred_per_condition = jax.tree.map(
+            solver.predict,
             src,
             cond,  # type: ignore[attr-defined]
         )
-        end_nonbatched = time.time()
-        diff_nonbatched = end_nonbatched - start_nonbatched
+        for key in src:
+            assert x_pred_dict[key].shape == src[key].shape
+            assert np.allclose(x_pred_dict[key], x_pred_per_condition[key], atol=1e-1, rtol=1e-2)
 
-        assert x_pred_batched[("drug_1",)].shape == x_pred_nonbatched[("drug_1",)].shape
-        assert np.allclose(
-            x_pred_batched[("drug_1",)],
-            x_pred_nonbatched[("drug_1",)],
-            atol=1e-1,
-            rtol=1e-2,
-        )
-        assert diff_nonbatched - diff_batched > 0.5
+        # The removed `batched` argument is accepted but ignored, with a deprecation warning.
+        with pytest.warns(DeprecationWarning, match="batched"):
+            solver.predict(src, cond, batched=True)
 
     @pytest.mark.parametrize("solver_class", ["otfm", "eqm"])
     @pytest.mark.parametrize("ema", [0.5, 1.0])

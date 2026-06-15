@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Callable
 from functools import partial
 from typing import Any
@@ -340,7 +341,6 @@ class OTFlowMatching:
         x: ArrayLike | dict[str, ArrayLike],
         condition: dict[str, ArrayLike] | dict[str, dict[str, ArrayLike]],
         rng: jax.Array | None = None,
-        batched: bool = False,
         show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
@@ -352,20 +352,15 @@ class OTFlowMatching:
         Parameters
         ----------
         x
-            A dictionary with keys indicating the name of the condition and values containing
-            the input data as arrays. If ``batched=False`` provide an array of shape [batch_size, ...].
+            Either a single array of shape ``[batch_size, ...]`` or a dictionary mapping
+            condition names to such arrays (predicted per condition).
         condition
-            A dictionary with keys indicating the name of the condition and values containing
-            the condition of input data as arrays. If ``batched=False`` provide an array of shape
-            [batch_size, ...].
+            The condition(s) corresponding to ``x``: a dict of arrays for a single input,
+            or a dict mapping condition names to such dicts when ``x`` is a dict.
         rng
             Random number generator to sample from the latent distribution,
             only used if ``condition_mode='stochastic'``. If :obj:`None`, the
             mean embedding is used.
-        batched
-            Whether to use batched prediction. This is only supported if the input has
-            the same number of cells for each condition. For example, this works when using
-            :class:`~scaleflow.data.ValidationSampler` to sample the validation data.
         show_progress
             Whether to show a progress bar when predicting over multiple conditions.
         kwargs
@@ -375,26 +370,20 @@ class OTFlowMatching:
         -------
         The push-forward distribution of ``x`` under condition ``condition``.
         """
-        if batched and not x:
+        if "batched" in kwargs:
+            warnings.warn(
+                "The `batched` argument is deprecated and ignored. Dictionary input is "
+                "predicted per condition; the lazy per-condition path provides the same "
+                "parallelism without eagerly materializing arrays.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            kwargs.pop("batched")
+
+        if isinstance(x, dict) and not x:
             return {}
 
-        if batched:
-            keys = sorted(x.keys())
-            condition_keys = sorted(set().union(*(condition[k].keys() for k in keys)))
-            _predict_jit = jax.jit(lambda x, condition: self._predict_jit(x, condition, rng, **kwargs))
-            batched_predict = jax.vmap(_predict_jit, in_axes=(0, dict.fromkeys(condition_keys, 0)))
-            # assert that the number of cells is the same for each condition
-            n_cells = x[keys[0]].shape[0]
-            for k in keys:
-                assert x[k].shape[0] == n_cells, "The number of cells must be the same for each condition"
-            src_inputs = jnp.stack([x[k] for k in keys], axis=0)
-            batched_conditions = {}
-            for cond_key in condition_keys:
-                batched_conditions[cond_key] = jnp.stack([condition[k][cond_key] for k in keys])
-
-            pred_targets = batched_predict(src_inputs, batched_conditions)
-            return {k: pred_targets[i] for i, k in enumerate(keys)}
-        elif isinstance(x, dict):
+        if isinstance(x, dict):
             if show_progress:
                 from tqdm import tqdm
 
