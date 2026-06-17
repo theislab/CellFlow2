@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Sinkhorn loss-regularization sweep — sciPlex, prophet mode.
+# Sweeps sinkhorn_alpha to find the best regularization strength.
+#   wandb sweep experiments/sweep_sinkhorn.yaml   → prints sweep_id
+#   wandb agent pancellflow/sciplex-sinkhorn/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: experiments/train_zarr.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_r_squared_delta
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - datasets=zarr_sciplex
+  - selected_datasets=[sciplex]
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # ── swept ────────────────────────────────────────────────────────────────
+  match_fn.sinkhorn_alpha:
+    values: [0.0, 1.0e-4, 1.0e-3, 1.0e-2]
+
+  # ── ablation ─────────────────────────────────────────────────────────────
+  ablation.mode:
+    value: prophet
+
+  # ── architecture ─────────────────────────────────────────────────────────
+  model.conditioning_key:
+    value: concatenation
+  model.hidden_dims:
+    value: [2048, 2048, 2048]
+  model.decoder_dims:
+    value: [2048, 2048, 2048]
+  model.condition_embedding_dim:
+    value: 256
+  model.probability_path_kwargs.constant_noise:
+    value: 0.1
+
+  # ── matching ──────────────────────────────────────────────────────────────
+  match_fn.epsilon:
+    value: 1.0
+
+  # ── training ─────────────────────────────────────────────────────────────
+  training.peak_lr:
+    value: 1.0e-4
+  training.batch_size:
+    value: 512
+  training.warmup_iterations:
+    value: 10000
+  training.grad_accumulation:
+    value: 20
+  training.pool_fraction:
+    value: 0.7
+  training.replacement_prob:
+    value: 0.5
+  training.num_iterations:
+    value: 2000000
+  training.valid_freq:
+    value: 200000
