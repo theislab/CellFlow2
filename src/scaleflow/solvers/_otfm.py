@@ -56,6 +56,7 @@ class OTFlowMatching:
         loss_weight_gex: float = 1.0,
         loss_weight_functional: float = 1.0,
         sinkhorn_alpha: float = 0.0,
+        debug: bool = False,
         **kwargs: Any,
     ):
         self._is_trained: bool = False
@@ -66,6 +67,8 @@ class OTFlowMatching:
         self.time_sampler = time_sampler
         self.match_fn = jax.jit(match_fn) if match_fn is not None else None
         self.sinkhorn_alpha = sinkhorn_alpha
+        self.debug = debug
+        self._debug_step: int = 0
         self.ema = kwargs.pop("ema", 1.0)
         self.loss_weight_gex = loss_weight_gex
         self.loss_weight_functional = loss_weight_functional
@@ -247,6 +250,15 @@ class OTFlowMatching:
                 cross   = src @ tgt.T                          # (n, m)
                 sq_dists = src_sq[:, None] + tgt_sq[None, :] - 2.0 * cross  # (n, m)
                 ot_cost = float(jnp.sum(tmat * sq_dists))
+                if self.debug:
+                    mean_sq = float(jnp.mean(sq_dists))
+                    print(
+                        f"[sinkhorn debug | step {self._debug_step}] "
+                        f"ot_cost={ot_cost:.4f}  mean_pairwise_sq={mean_sq:.4f}  "
+                        f"scale=1/(1+{self.sinkhorn_alpha}*{ot_cost:.2f})="
+                        f"{1.0 / (1.0 + self.sinkhorn_alpha * ot_cost):.4f}",
+                        flush=True,
+                    )
             src_ixs, tgt_ixs = solver_utils.sample_joint(rng_resample, tmat)
             src, tgt = src[src_ixs], tgt[tgt_ixs]
 
@@ -264,7 +276,16 @@ class OTFlowMatching:
         # Dividing by (1 + alpha * C) scales gradient magnitude inversely with
         # transport distance, preventing high-OT batches from dominating training.
         if self.sinkhorn_alpha > 0.0 and ot_cost > 0.0:
+            raw_loss = loss
             loss = loss / (1.0 + self.sinkhorn_alpha * ot_cost)
+            if self.debug:
+                print(
+                    f"[sinkhorn debug | step {self._debug_step}] "
+                    f"loss: {raw_loss:.6f} -> {loss:.6f}",
+                    flush=True,
+                )
+
+        self._debug_step += 1
 
         if self.ema == 1.0:
             self.vf_state_inference = self.vf_state
