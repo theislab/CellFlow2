@@ -180,7 +180,7 @@ def run(cfg: DictConfig, gds: dict) -> dict:
             use_gpu_optimized=True,
             precision="bfloat16",
         ),
-        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
+        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
         callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
     ]
 
@@ -190,7 +190,7 @@ def run(cfg: DictConfig, gds: dict) -> dict:
             f"{ds}_r_squared_mean",
             f"{ds}_e_distance_mean",
             f"{ds}_mmd_mean",
-            f"{ds}_r_squared_delta_mean",
+            f"{ds}_nn_displacement_corr",
         ]
 
     print(f"Training {int(cfg.training.num_iterations)} iterations "
