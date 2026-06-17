@@ -290,6 +290,7 @@ class ScaleFlow:
         phenotype_output_dim: int = 1,
         loss_weight_gex: float = 1.0,
         loss_weight_functional: float = 1.0,
+        sinkhorn_alpha: float = 0.0,
         seed=0,
     ) -> None:
         """Prepare the model for training.
@@ -562,6 +563,7 @@ class ScaleFlow:
                 phenotype_predictor=phenotype_predictor,
                 loss_weight_gex=loss_weight_gex,
                 loss_weight_functional=loss_weight_functional,
+                sinkhorn_alpha=sinkhorn_alpha,
                 optimizer=optimizer,
                 conditions=sample_conditions,
                 rng=jax.random.PRNGKey(seed),

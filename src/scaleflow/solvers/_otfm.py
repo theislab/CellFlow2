@@ -55,6 +55,7 @@ class OTFlowMatching:
         phenotype_predictor: Any | None = None,
         loss_weight_gex: float = 1.0,
         loss_weight_functional: float = 1.0,
+        sinkhorn_alpha: float = 0.0,
         **kwargs: Any,
     ):
         self._is_trained: bool = False
@@ -64,6 +65,7 @@ class OTFlowMatching:
         self.probability_path = probability_path
         self.time_sampler = time_sampler
         self.match_fn = jax.jit(match_fn) if match_fn is not None else None
+        self.sinkhorn_alpha = sinkhorn_alpha
         self.ema = kwargs.pop("ema", 1.0)
         self.loss_weight_gex = loss_weight_gex
         self.loss_weight_functional = loss_weight_functional
@@ -232,8 +234,19 @@ class OTFlowMatching:
         time = self.time_sampler(rng_time, n)
         encoder_noise = jax.random.normal(rng_encoder_noise, (n, self.vf.condition_embedding_dim))
 
+        ot_cost = 0.0
         if self.match_fn is not None:
             tmat = self.match_fn(src, tgt)
+            # Compute primal OT cost from transport matrix: sum(T * C), C_ij = ||src_i - tgt_j||^2
+            # Used for sinkhorn loss scaling — no second OT solve needed.
+            if self.sinkhorn_alpha > 0.0:
+                # ||a-b||² = ||a||² + ||b||² - 2aᵀb
+                # avoids materialising the (n, m, d) difference tensor
+                src_sq  = jnp.sum(src ** 2, axis=1)          # (n,)
+                tgt_sq  = jnp.sum(tgt ** 2, axis=1)          # (m,)
+                cross   = src @ tgt.T                          # (n, m)
+                sq_dists = src_sq[:, None] + tgt_sq[None, :] - 2.0 * cross  # (n, m)
+                ot_cost = float(jnp.sum(tmat * sq_dists))
             src_ixs, tgt_ixs = solver_utils.sample_joint(rng_resample, tmat)
             src, tgt = src[src_ixs], tgt[tgt_ixs]
 
@@ -246,6 +259,12 @@ class OTFlowMatching:
             condition,
             encoder_noise,
         )
+
+        # Sinkhorn regularization: downweight loss for hard batches (high OT cost).
+        # Dividing by (1 + alpha * C) scales gradient magnitude inversely with
+        # transport distance, preventing high-OT batches from dominating training.
+        if self.sinkhorn_alpha > 0.0 and ot_cost > 0.0:
+            loss = loss / (1.0 + self.sinkhorn_alpha * ot_cost)
 
         if self.ema == 1.0:
             self.vf_state_inference = self.vf_state
