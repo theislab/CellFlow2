@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Sinkhorn dry run — sciPlex, 500 iterations.
+# Prints OT cost + loss scaling every step so you can sanity-check the values.
+#
+# Usage:
+#   python experiments/train_zarr.py \
+#     --config-dir experiments/config \
+#     --config-name train_zarr \
+#     datasets=zarr_sciplex \
+#     selected_datasets=[sciplex] \
+#     ablation.mode=prophet \
+#     model.hidden_dims=[512,512] \
+#     model.decoder_dims=[512,512] \
+#     model.condition_embedding_dim=256 \
+#     model.conditioning_key=concatenation \
+#     model.probability_path_kwargs.constant_noise=0.1 \
+#     match_fn.epsilon=1.0 \
+#     match_fn.sinkhorn_alpha=1e-3 \
+#     match_fn.debug=true \
+#     training.peak_lr=1e-4 \
+#     training.batch_size=256 \
+#     training.warmup_iterations=50 \
+#     training.grad_accumulation=1 \
+#     training.num_iterations=500 \
+#     training.valid_freq=500 \
+#     training.pool_fraction=0.7 \
+#     training.replacement_prob=0.5 \
+#     wandb.enabled=false \
+#     output_dir=/storage/pancellflow/outputs/sinkhorn_dryrun
+# ─────────────────────────────────────────────────────────────────────────────
+
+# @package _global_
+defaults:
+  - solver: otfm
+  - conditioning: concatenation
+  - datasets: zarr_sciplex
+  - training: default
+  - model: default
+  - match_fn: default
+  - split: drug
+  - ablation: default
+  - wandb: default
+  - _self_
+
+seed: 42
+output_dir: /storage/pancellflow/outputs/sinkhorn_dryrun
+selected_datasets: [sciplex]
+
+ablation:
+  mode: prophet
+
+model:
+  hidden_dims: [512, 512]
+  decoder_dims: [512, 512]
+  condition_embedding_dim: 256
+  probability_path_kwargs:
+    constant_noise: 0.1
+
+match_fn:
+  epsilon: 1.0
+  sinkhorn_alpha: 1.0e-3
+  debug: true
+
+training:
+  peak_lr: 1.0e-4
+  batch_size: 256
+  warmup_iterations: 50
+  grad_accumulation: 1      # no accumulation — see raw per-step loss
+  num_iterations: 500
+  valid_freq: 500           # validate once at the end
+  pool_fraction: 0.7
+  replacement_prob: 0.5
+
+wandb:
+  enabled: false

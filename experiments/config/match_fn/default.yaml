@@ -2,3 +2,4 @@
 match_fn:
   epsilon: 0.1
   sinkhorn_alpha: 0.0   # 0 = disabled; set e.g. 1e-3 to regularize hard batches
+  debug: false          # print OT cost + loss scaling each step (for inspection only)

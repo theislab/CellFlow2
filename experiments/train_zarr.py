@@ -166,6 +166,7 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         match_fn=partial(match_linear, epsilon=float(cfg.match_fn.epsilon)),
         probability_path=OmegaConf.to_container(m.probability_path_kwargs, resolve=True),
         sinkhorn_alpha=float(cfg.match_fn.get("sinkhorn_alpha", 0.0)),
+        solver_kwargs={"debug": bool(cfg.match_fn.get("debug", False))} if cfg.match_fn.get("debug", False) else None,
         optimizer=optimizer,
     )
     n_params = sum(x.size for x in jax.tree.leaves(sf.solver.vf_state.params))
