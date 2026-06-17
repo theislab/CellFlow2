@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 3-run ablation sweep — sciPlex, concatenation conditioning.
+# Grid over modes only (default / random / prophet), all other knobs fixed.
+#   wandb sweep experiments/sweep_sciplex_3runs.yaml   → prints sweep_id
+#   wandb agent pancellflow/sciplex-sped-up/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: experiments/train_zarr.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_r_squared_delta
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - datasets=zarr_sciplex
+  - selected_datasets=[sciplex]
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # ── swept (3 runs) ───────────────────────────────────────────────────────
+  ablation.mode:
+    values: [default, random, prophet]
+
+  # ── architecture ─────────────────────────────────────────────────────────
+  model.conditioning_key:
+    value: concatenation
+  model.hidden_dims:
+    value: [2048, 2048, 2048]
+  model.decoder_dims:
+    value: [2048, 2048, 2048]
+  model.condition_embedding_dim:
+    value: 256
+  model.probability_path_kwargs.constant_noise:
+    value: 0.1
+
+  # ── matching ──────────────────────────────────────────────────────────────
+  match_fn.epsilon:
+    value: 1.0
+
+  # ── training ─────────────────────────────────────────────────────────────
+  training.peak_lr:
+    value: 4.0e-4
+  training.batch_size:
+    value: 512
+  training.warmup_iterations:
+    value: 10000
+  training.grad_accumulation:
+    value: 20
+  training.pool_fraction:
+    value: 0.7
+  training.replacement_prob:
+    value: 0.5
+  training.num_iterations:
+    value: 2000000
+  training.valid_freq:
+    value: 200000
