@@ -40,14 +40,17 @@ import utils
 import callbacks
 
 
-def run(cfg: DictConfig, gds: dict) -> dict:
+def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     # ── wandb sweep is dominant: init first, then overlay its params onto cfg ──
     wandb_run = None
     if cfg.wandb.enabled or os.environ.get("WANDB_SWEEP_ID"):
         try:
             import wandb
+            # In sweep mode, project is already set by the sweep itself.
+            # Outside sweep mode, use cfg.wandb.project.
+            project = cfg.wandb.project if not os.environ.get("WANDB_SWEEP_ID") else None
             wandb_run = wandb.init(
-                project=cfg.wandb.project,
+                project=project,
                 entity=cfg.wandb.get("entity"),
                 name=cfg.wandb.get("run_name"),
                 config=OmegaConf.to_container(cfg, resolve=True),
@@ -61,6 +64,34 @@ def run(cfg: DictConfig, gds: dict) -> dict:
             print(f"  wandb run: {wandb_run.url}")
         except ImportError:
             print("  wandb not installed — skipping")
+
+    # ── log resolved config so sweep overrides can be verified ──────────────
+    m = cfg.model
+    print(f"\n{'─'*64}")
+    print(f"  resolved config (post wandb overlay)")
+    print(f"{'─'*64}")
+    for name, ds in cfg.datasets.items():
+        print(f"  datasets.{name}.path       = {ds.path}")
+    print(f"  ablation.mode              = {cfg.ablation.mode}")
+    print(f"  model.conditioning_key     = {m.conditioning_key}")
+    print(f"  model.hidden_dims          = {list(m.hidden_dims)}")
+    print(f"  model.decoder_dims         = {list(m.decoder_dims)}")
+    print(f"  model.condition_emb_dim    = {m.condition_embedding_dim}")
+    print(f"  match_fn.epsilon           = {cfg.match_fn.epsilon}")
+    print(f"  match_fn.sinkhorn_alpha    = {cfg.match_fn.get('sinkhorn_alpha', 0.0)}")
+    print(f"  training.num_iterations    = {cfg.training.num_iterations}")
+    print(f"  training.batch_size        = {cfg.training.batch_size}")
+    print(f"  training.peak_lr           = {cfg.training.peak_lr}")
+    print(f"  training.grad_accumulation = {cfg.training.grad_accumulation}")
+    print(f"{'─'*64}\n")
+
+    # ── load zarr AFTER wandb overlay so sweep path overrides take effect ──
+    if gds is None:
+        gds = {}
+        for name in cfg.selected_datasets:
+            path = str(cfg.datasets[name].path)
+            print(f"Reading [{name}] ← {path}")
+            gds[name] = GroupedDistribution.read_zarr(Path(path))
 
     mode       = cfg.ablation.mode
     output_dir = Path(cfg.output_dir)
@@ -250,13 +281,8 @@ def run(cfg: DictConfig, gds: dict) -> dict:
 
 @hydra.main(config_path="config", config_name="train_zarr", version_base=None)
 def main(cfg: DictConfig) -> None:
-    gds = {}
-    for name in cfg.selected_datasets:
-        path = str(cfg.datasets[name].path)
-        print(f"Reading [{name}] ← {path}")
-        gds[name] = GroupedDistribution.read_zarr(Path(path))
     try:
-        run(cfg, gds)
+        run(cfg)
     except Exception:
         try:
             import wandb

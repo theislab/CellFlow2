@@ -1,4 +1,3 @@
-# %%
 """
 process_sciplex_prophet.py
 
@@ -25,16 +24,27 @@ Output
 
 from scaleflow.data import DataManager, AnnDataLocation
 from pathlib import Path
+import argparse
 import anndata as ad
 import h5py
 import time
 import numpy as np
 
-start_time = time.time()
-print("loading data")
+parser = argparse.ArgumentParser()
+parser.add_argument("--embedding_key", type=str, default="X_state",
+                    help="adata.obsm key to use as cell representation (e.g. X_state, X_pca, AE_10)")
+parser.add_argument("--output_path", type=str, default=None,
+                    help="Output zarr path. Defaults to /storage/pancellflow/sciplex3_<embedding_key>.zarr")
+parser.add_argument("--data_path", type=str,
+                    default="/storage/pancellflow/sciplex3_prophet_filtered.h5ad")
+args = parser.parse_args()
 
-OUTPUT_PATH = Path("/storage/pancellflow/sciplex3.zarr")
-DATA_PATH   = Path("/storage/pancellflow/sciplex3_prophet_filtered.h5ad")
+EMBEDDING_KEY = args.embedding_key
+OUTPUT_PATH   = Path(args.output_path) if args.output_path else Path(f"/storage/pancellflow/sciplex3_{EMBEDDING_KEY}.zarr")
+DATA_PATH     = Path(args.data_path)
+
+start_time = time.time()
+print(f"loading data  (embedding={EMBEDDING_KEY}  output={OUTPUT_PATH})")
 
 with h5py.File(DATA_PATH, "r") as f:
     adata = ad.AnnData(
@@ -68,7 +78,7 @@ dm  = DataManager(
         "cell_line": "cell_line_ccle_embeddings",  
         "drug":      "drug_0_embeddings",      
     },
-    data_location=adl.obsm["X_state"],          
+    data_location=adl.obsm[EMBEDDING_KEY],
     extra_rep_keys={"prophet": ("drug", "prophet_emb")},
 )
 

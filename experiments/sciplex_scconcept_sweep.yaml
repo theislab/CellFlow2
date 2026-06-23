@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# scConcept (512-dim) sweep — learning rate × hidden dims, sciPlex, prophet mode.
+# 5 lr × 2 hidden_dims = 10 runs.
+#   wandb sweep experiments/sweep_scconcept.yaml   → prints sweep_id
+#   wandb agent pancellflow/sciplex-scconcept/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+program: experiments/train_zarr.py
+method:  grid
+project: sciplex_scconcept_prophet
+
+metric:
+  goal: maximize
+  name: val_nn_displacement_corr
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - datasets=zarr_sciplex
+  - selected_datasets=[sciplex]
+
+parameters:
+  wandb.enabled:
+    value: true
+  wandb.project:
+    value: sciplex_scconcept_prophet
+
+  # ── fixed: scConcept zarr ─────────────────────────────────────────────────
+  datasets.sciplex.path:
+    value: /storage/pancellflow/sciplex3_X_scconcept.zarr
+
+  # ── swept ────────────────────────────────────────────────────────────────
+  training.peak_lr:
+    values: [1.0e-5, 5.0e-5, 1.0e-4, 5.0e-4, 1.0e-3]
+
+  model.hidden_dims:
+    values:
+      - [256, 256, 256]
+      - [512, 512, 512]
+
+  model.decoder_dims:
+    values:
+      - [256, 256, 256]
+      - [512, 512, 512]
+
+  # ── architecture (fixed) ─────────────────────────────────────────────────
+  model.conditioning_key:
+    value: concatenation
+  model.condition_embedding_dim:
+    value: 256
+  model.probability_path_kwargs.constant_noise:
+    value: 0.1
+
+  # ── ablation ─────────────────────────────────────────────────────────────
+  ablation.mode:
+    value: prophet
+
+  # ── matching ─────────────────────────────────────────────────────────────
+  match_fn.epsilon:
+    value: 1.0
+  match_fn.sinkhorn_alpha:
+    value: 0.0
+
+  # ── training ─────────────────────────────────────────────────────────────
+  training.batch_size:
+    value: 512
+  training.warmup_iterations:
+    value: 10000
+  training.grad_accumulation:
+    value: 20
+  training.pool_fraction:
+    value: 0.7
+  training.replacement_prob:
+    value: 0.5
+  training.num_iterations:
+    value: 2000000
+  training.valid_freq:
+    value: 200000
