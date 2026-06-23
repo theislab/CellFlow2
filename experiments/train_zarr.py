@@ -38,6 +38,7 @@ from scaleflow.utils import match_linear
 
 import utils
 import callbacks
+import temp_edit
 
 
 def run(cfg: DictConfig, gds: dict | None = None) -> dict:
@@ -203,6 +204,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         ),
         callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
         callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
+        temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
     ]
 
     monitor_metrics = ["loss"]
@@ -212,6 +214,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             f"{ds}_e_distance_mean",
             f"{ds}_mmd_mean",
             f"{ds}_nn_displacement_corr",
+            f"{ds}_gap_closure_mean",
         ]
 
     print(f"Training {int(cfg.training.num_iterations)} iterations "
@@ -257,6 +260,19 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         for k, v in test_log.items():
             wandb_run.summary[k] = v
 
+    # ── effect-size diagnostics over train / val / test (one predict pass each) ──
+    diag_cfg  = cfg.get("diagnostics", {})
+    n_diag    = int(diag_cfg.get("n_conditions", 100))
+    max_cells = int(diag_cfg.get("max_cells", 2000))
+    print(f"Running effect-size diagnostics ({n_diag} conditions/split) …")
+    diag_samplers = temp_edit.make_diagnostic_samplers(
+        data, n_conditions=n_diag, transform=transform, seed=int(cfg.seed)
+    )
+    temp_edit.full_diagnostics(
+        best_solver, diag_samplers, output_dir, name,
+        wandb_run=wandb_run, max_cells=max_cells, seed=int(cfg.seed),
+    )
+
     print(f"\n{'='*64}")
     print(f"  Final test metrics — {name}")
     print(f"{'='*64}")
@@ -264,7 +280,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         print(f"  {k:<18} {v:.4f}")
 
     if wandb_run is not None:
-        wandb_run.finish() 
+        wandb_run.finish(timeout=300)
 
     return {"solver": best_solver, "test_metrics": test_metrics}
 
