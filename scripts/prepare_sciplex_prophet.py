@@ -12,16 +12,13 @@ so each condition dict gets a "prophet" key looked up from
 adata.uns["prophet_emb"][drug_name]. If "prophet_emb" is absent the DataManager
 silently skips it.
 
-⚠️  Verify against your sciPlex h5ad (the Inspect cell of the notebook prints these):
-    - data_location  : obsm key holding the cell representation (Tahoe used "X_state")
-    - rep_keys        : uns keys for the cell-line / drug embeddings
-    - src/tgt_dist_keys: obs columns ("cell_line", "drug")
-If sciPlex uses different names, change them HERE (not in the notebook).
-
-Output
-──────
-/storage/pancellflow/sciplex3.zarr
+Usage
+─────
+python prepare_sciplex_prophet.py --embedding_key X_state
+python prepare_sciplex_prophet.py --embedding_key X_scgpt --output_path /storage/pancellflow/sciplex3_X_scgpt.zarr
 """
+
+import argparse
 
 from scaleflow.data import DataManager, AnnDataLocation
 from pathlib import Path
@@ -30,11 +27,25 @@ import h5py
 import time
 import numpy as np
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--embedding_key", type=str, default="X_state",
+                    help="obsm key for cell state representation (e.g. X_state, X_scgpt, X_scconcept, X_scimilarity)")
+parser.add_argument("--output_path", type=str, default=None,
+                    help="Output zarr path (default: /storage/pancellflow/sciplex3_<embedding_key>.zarr)")
+parser.add_argument("--data_path", type=str, default="/storage/pancellflow/sciplex3_prophet_filtered.h5ad",
+                    help="Input h5ad path")
+args = parser.parse_args()
+
+EMBEDDING_KEY = args.embedding_key
+DATA_PATH     = Path(args.data_path)
+OUTPUT_PATH   = Path(args.output_path) if args.output_path else Path(f"/storage/pancellflow/sciplex3_{EMBEDDING_KEY}.zarr")
+
+print(f"embedding_key = {EMBEDDING_KEY}")
+print(f"output_path   = {OUTPUT_PATH}")
+print(f"data_path     = {DATA_PATH}")
+
 start_time = time.time()
 print("loading data")
-
-OUTPUT_PATH = Path("/storage/pancellflow/sciplex3.zarr")
-DATA_PATH   = Path("/storage/pancellflow/sciplex3_prophet_filtered.h5ad")
 
 with h5py.File(DATA_PATH, "r") as f:
     adata = ad.AnnData(
@@ -53,7 +64,7 @@ print(f"data loaded (took {load_time:.2f} seconds)")
 # may be NaN; perturbed cells must have a real dose else they'd form a NaN group.
 adata.obs = adata.obs.rename(columns={"dose_value": "dose"})
 adata.obs["dose"] = adata.obs["dose"].astype("float32")
-adata.obs["dose"] = np.log1p(adata.obs["dose"].astype("float32")) 
+adata.obs["dose"] = np.log1p(adata.obs["dose"].astype("float32"))
 n_bad = int(((~adata.obs["control"]) & adata.obs["dose"].isna()).sum())
 if n_bad:
     print(f"WARNING: {n_bad:,} perturbed cells have NaN dose (will form a bad group)")
@@ -65,10 +76,10 @@ dm  = DataManager(
     src_dist_keys=["cell_line"],
     tgt_dist_keys=["drug", "dose"],             # ← dose now defines the distribution
     rep_keys={
-        "cell_line": "cell_line_ccle_embeddings",  
-        "drug":      "drug_0_embeddings",      
+        "cell_line": "cell_line_ccle_embeddings",
+        "drug":      "drug_0_embeddings",
     },
-    data_location=adl.obsm["X_state"],          
+    data_location=adl.obsm[EMBEDDING_KEY],
     extra_rep_keys={"prophet": ("drug", "prophet_emb")},
 )
 

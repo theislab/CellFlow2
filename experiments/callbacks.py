@@ -1,4 +1,4 @@
-"""Validation/test callbacks and the r_squared_delta metric."""
+"""Validation/test callbacks and metrics."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
+from scipy.stats import pearsonr
 from tqdm import tqdm
 
 from scaleflow.training._callbacks import ComputationCallback
@@ -24,26 +25,77 @@ def r_squared_delta(y_true, y_pred, source) -> float:
     return float(compute_r_squared(np.asarray(y_true) - ctrl, np.asarray(y_pred) - ctrl))
 
 
-def _condition_metrics(y_true, y_pred, source) -> dict:
+def nn_displacement_corr(y_true, y_pred, source, debug: bool = False) -> float:
+    """Pearson r between per-cell displacement vectors (NN-matched true vs exact pred).
+
+    For each src[i], finds nearest true cell, computes disp_true[i] = true[nn_i] - src[i]
+    and disp_pred[i] = pred[i] - src[i], then returns Pearson r of all flattened vectors.
+    """
+    true = np.asarray(y_true)   # (n_tgt, d)
+    pred = np.asarray(y_pred)   # (n_src, d)
+    src  = np.asarray(source)   # (n_src, d)
+
+    src_sq  = (src  ** 2).sum(axis=1)
+    true_sq = (true ** 2).sum(axis=1)
+    cross   = src @ true.T
+    sq_dists = src_sq[:, None] + true_sq[None, :] - 2.0 * cross
+    nn_idx  = sq_dists.argmin(axis=1)
+
+    disp_true = true[nn_idx] - src
+    disp_pred = pred          - src
+
+    r, _ = pearsonr(disp_true.flatten(), disp_pred.flatten())
+
+    if debug:
+        unique_matched = len(np.unique(nn_idx))
+        disp_true_norm = np.linalg.norm(disp_true, axis=1)
+        disp_pred_norm = np.linalg.norm(disp_pred, axis=1)
+        print(f"[nn_disp debug] n_src={len(src)}  n_tgt={len(true)}  "
+              f"unique_true_matched={unique_matched}/{len(true)}  "
+              f"mean|disp_true|={disp_true_norm.mean():.4f}  "
+              f"mean|disp_pred|={disp_pred_norm.mean():.4f}  "
+              f"ratio={disp_pred_norm.mean()/disp_true_norm.mean():.4f}  "
+              f"r={r:.4f}", flush=True)
+
+    return float(r)
+
+
+def mean_nn_displacement_corr(valid_source_data, valid_true_data, valid_pred_data) -> float:
+    scores = []
+    for ds in valid_true_data:
+        for cond_key, true_arr in valid_true_data[ds].items():
+            pred_arr = valid_pred_data[ds].get(cond_key)
+            src_arr  = valid_source_data.get(ds, {}).get(cond_key)
+            if pred_arr is None or src_arr is None:
+                continue
+            scores.append(nn_displacement_corr(true_arr, pred_arr, src_arr))
+    if not scores:
+        return float("nan")
+    return float(np.nanmean(scores))
+
+
+def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
     yt, yp = np.asarray(y_true), np.asarray(y_pred)
     return {
         "r_squared":  float(compute_r_squared(yt, yp)),
         "e_distance": float(compute_e_distance_fast(yt, yp)),
         "mmd":        float(compute_scalar_mmd(yt, yp)),
         "r_squared_delta": r_squared_delta(yt, yp, source) if source is not None else float("nan"),
+        "nn_displacement_corr": nn_displacement_corr(yt, yp, source, debug=debug) if source is not None else float("nan"),
     }
 
 
 class ValMetricsLogger(ComputationCallback):
-    """Logs pooled val metrics to JSON + wandb; returns per-dataset r²Δ for monitoring."""
+    """Logs pooled val metrics to JSON + wandb; returns per-dataset nn_displacement_corr for monitoring."""
 
-    METRICS = ("r_squared", "e_distance", "mmd", "r_squared_delta")
+    METRICS = ("r_squared", "e_distance", "mmd", "r_squared_delta", "nn_displacement_corr")
 
-    def __init__(self, save_path: str, valid_freq: int, wandb_run=None):
+    def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False):
         self.save_path   = save_path
         self._valid_freq = valid_freq
         self._step       = 0
         self._wandb_run  = wandb_run
+        self._debug      = debug
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self._step = 0
@@ -56,7 +108,9 @@ class ValMetricsLogger(ComputationCallback):
                 if pred_arr is None:
                     continue
                 src_arr = valid_source_data.get(ds, {}).get(cond_key)
-                per_ds.setdefault(ds, []).append(_condition_metrics(true_arr, pred_arr, src_arr))
+                per_ds.setdefault(ds, []).append(
+                    _condition_metrics(true_arr, pred_arr, src_arr, debug=self._debug)
+                )
         return per_ds
 
     def _compute_and_save(self, valid_source_data, valid_true_data, valid_pred_data) -> dict:
@@ -78,11 +132,13 @@ class ValMetricsLogger(ComputationCallback):
             json.dump(entries, f, indent=2)
 
         print(f"    val  R²={entry['r_squared']:.4f}  ΔR²={entry['r_squared_delta']:.4f}  "
+              f"nn_disp_corr={entry['nn_displacement_corr']:.4f}  "
               f"E-dist={entry['e_distance']:.4f}  MMD={entry['mmd']:.4f}  (step {self._step})")
         if self._wandb_run is not None:
             self._wandb_run.log({f"val_{k}": entry[k] for k in self.METRICS})
+
         return {
-            f"{ds}_r_squared_delta_mean": float(np.nanmean([m["r_squared_delta"] for m in ms]))
+            f"{ds}_nn_displacement_corr": float(np.nanmean([m["nn_displacement_corr"] for m in ms]))
             for ds, ms in per_ds.items()
         }
 
@@ -97,43 +153,33 @@ class ValMetricsLogger(ComputationCallback):
 
 
 class BestModelCheckpoint(ComputationCallback):
-    """Save solver params with orbax whenever mean val R²Δ improves."""
+    """Save solver params with orbax whenever mean val nn_displacement_corr improves."""
 
     def __init__(self, save_path: str, wandb_run=None):
         # save_path is used as a directory for orbax (e.g. .../model_X_best_ckpt)
         self.save_path    = Path(save_path)
-        self.best_r2_delta = -np.inf
+        self.best_score   = -np.inf
         self._wandb_run   = wandb_run
         self._ckptr       = ocp.PyTreeCheckpointer()
 
     def on_train_begin(self, *args, **kwargs) -> None:
-        self.best_r2_delta = -np.inf
+        self.best_score = -np.inf
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
                          valid_pred_data, solver, **kwargs) -> dict:
-        scores = []
-        for ds in valid_true_data:
-            for cond_key, true_arr in valid_true_data[ds].items():
-                pred_arr = valid_pred_data[ds].get(cond_key)
-                if pred_arr is None:
-                    continue
-                src_arr = valid_source_data.get(ds, {}).get(cond_key)
-                if src_arr is None:
-                    continue
-                scores.append(r_squared_delta(true_arr, pred_arr, src_arr))
-        if not scores:
+        score = mean_nn_displacement_corr(valid_source_data, valid_true_data, valid_pred_data)
+        if np.isnan(score):
             return {}
-        mean_r2_delta = float(np.nanmean(scores))
-        if mean_r2_delta > self.best_r2_delta:
-            self.best_r2_delta = mean_r2_delta
+        if score > self.best_score:
+            self.best_score = score
             import shutil
             if self.save_path.exists():
                 shutil.rmtree(self.save_path)
             self._ckptr.save(self.save_path, solver.vf_state.params)
-            print(f"    ✓ checkpoint saved  (val R²Δ={mean_r2_delta:.4f})")
+            print(f"    ✓ checkpoint saved  (val nn_disp_corr={score:.4f})")
         if self._wandb_run is not None:
-            self._wandb_run.log({"best_val_r2_delta": self.best_r2_delta})
-        return {"best_val_r2_delta": self.best_r2_delta}
+            self._wandb_run.log({"best_val_nn_disp_corr": self.best_score})
+        return {"best_val_nn_disp_corr": self.best_score}
 
     def on_train_end(self, valid_source_data, valid_true_data,
                      valid_pred_data, solver, **kwargs) -> dict:
