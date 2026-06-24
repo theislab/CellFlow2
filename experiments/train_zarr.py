@@ -280,7 +280,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         print(f"  {k:<18} {v:.4f}")
 
     if wandb_run is not None:
-        wandb_run.finish(timeout=300)
+        wandb_run.finish()
 
     return {"solver": best_solver, "test_metrics": test_metrics}
 
