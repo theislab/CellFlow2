@@ -168,3 +168,4 @@ wandb/
 experiments/run_sweep.sbatch
 outputs/
 !experiments/config/wandb/
+analysis/
