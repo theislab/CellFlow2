@@ -1,0 +1,4 @@
+dataset,rows,cell_lines,drugs_by_name,drugs_by_smiles,pairs_cellline_x_smiles
+PRISM,2240925,567,4046,4043,2239268
+CTRP,387258,887,545,545,387258
+GDSC,235415,967,286,285,234703
