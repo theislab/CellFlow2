@@ -91,7 +91,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     run_tag    = wandb_run.id if wandb_run is not None else "local"
     name       = f"model_{mode}_{run_tag}"
-    ckpt_path  = output_dir / f"{name}_best_ckpt"   # orbax saves to a directory
+    ckpt_path  = output_dir / f"{name}_best_solver.pkl"
     transform  = utils.ConditionTransform(mode, seed=int(cfg.seed)) if mode != "prophet" else None
 
     print(f"\n{'='*64}")
@@ -203,7 +203,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             precision="bfloat16",
         ),
         callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
-        callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
+        callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),
         temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
     ]
 
@@ -225,6 +225,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         val_dataloader=val_samplers,
         num_iterations=int(cfg.training.num_iterations),
         valid_freq=int(cfg.training.valid_freq),
+        log_every=int(cfg.training.get("log_every", 1000)),
         callbacks=cbs,
         monitor_metrics=monitor_metrics,
     )
@@ -233,12 +234,8 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
 
     if ckpt_path.exists():
         print(f"Loading best checkpoint from {ckpt_path} …")
-        import orbax.checkpoint as ocp
-        params = ocp.PyTreeCheckpointer().restore(
-            ckpt_path, item=sf.solver.vf_state.params
-        )
-        best_solver = sf.solver
-        best_solver.vf_state = best_solver.vf_state.replace(params=params)
+        with open(ckpt_path, "rb") as f:
+            best_solver = cloudpickle.load(f)
     else:
         print("  no checkpoint found — using final iterate")
         best_solver = sf.solver

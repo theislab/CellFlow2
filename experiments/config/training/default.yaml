@@ -8,6 +8,8 @@ training:
   init_lr:           0.0
   grad_accumulation: 20
   valid_freq:        20000
-  n_val_conditions:  null    
+  n_val_conditions:  null
+  log_every:         1000    # how often (steps) to log train_loss to wandb
+  checkpoint_metric: nn_displacement_corr   # metric used by BestModelCheckpoint
   pool_fraction:     0.7
   replacement_prob:  0.5

@@ -130,6 +130,7 @@ class CellFlowTrainer:
         valid_loaders: dict[str, SamplerABC] | None = None,
         monitor_metrics: Sequence[str] = [],
         callbacks: Sequence[BaseCallback] = [],
+        log_every: int = 1000,
     ) -> _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching:
         """Trains the model.
 
@@ -177,7 +178,7 @@ class CellFlowTrainer:
             self.training_logs["loss"].append(float(loss))
             self.training_logs[f"loss_{task}"].append(float(loss))
 
-            if it % 1000 == 0:
+            if it % log_every == 0:
                 try:
                     import wandb
                     if wandb.run is not None:

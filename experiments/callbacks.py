@@ -5,9 +5,9 @@ import json
 import os
 from pathlib import Path
 
+import cloudpickle
 import jax
 import numpy as np
-import orbax.checkpoint as ocp
 from scipy.stats import pearsonr
 from tqdm import tqdm
 
@@ -152,34 +152,50 @@ class ValMetricsLogger(ComputationCallback):
         return self._compute_and_save(valid_source_data, valid_true_data, valid_pred_data)
 
 
-class BestModelCheckpoint(ComputationCallback):
-    """Save solver params with orbax whenever mean val nn_displacement_corr improves."""
+# Metrics where higher = better. All others (e_distance, mmd) → lower = better.
+_MAXIMIZE_METRICS = {"r_squared", "r_squared_delta", "nn_displacement_corr"}
 
-    def __init__(self, save_path: str, wandb_run=None):
-        # save_path is used as a directory for orbax (e.g. .../model_X_best_ckpt)
-        self.save_path    = Path(save_path)
-        self.best_score   = -np.inf
-        self._wandb_run   = wandb_run
-        self._ckptr       = ocp.PyTreeCheckpointer()
+
+class BestModelCheckpoint(ComputationCallback):
+    """Save solver with cloudpickle whenever the chosen val metric improves."""
+
+    def __init__(self, save_path: str, wandb_run=None, metric: str = "nn_displacement_corr"):
+        self.save_path   = Path(save_path)
+        self._metric     = metric
+        self._maximize   = metric in _MAXIMIZE_METRICS
+        self.best_score  = -np.inf if self._maximize else np.inf
+        self._wandb_run  = wandb_run
 
     def on_train_begin(self, *args, **kwargs) -> None:
-        self.best_score = -np.inf
+        self.best_score = -np.inf if self._maximize else np.inf
+
+    def _compute_score(self, valid_source_data, valid_true_data, valid_pred_data) -> float:
+        scores = []
+        for ds in valid_true_data:
+            for cond_key, true_arr in valid_true_data[ds].items():
+                pred_arr = valid_pred_data[ds].get(cond_key)
+                if pred_arr is None:
+                    continue
+                src_arr = valid_source_data.get(ds, {}).get(cond_key)
+                m = _condition_metrics(true_arr, pred_arr, src_arr)
+                scores.append(m[self._metric])
+        return float(np.nanmean(scores)) if scores else float("nan")
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
                          valid_pred_data, solver, **kwargs) -> dict:
-        score = mean_nn_displacement_corr(valid_source_data, valid_true_data, valid_pred_data)
+        score = self._compute_score(valid_source_data, valid_true_data, valid_pred_data)
         if np.isnan(score):
             return {}
-        if score > self.best_score:
+        is_better = score > self.best_score if self._maximize else score < self.best_score
+        if is_better:
             self.best_score = score
-            import shutil
-            if self.save_path.exists():
-                shutil.rmtree(self.save_path)
-            self._ckptr.save(self.save_path, solver.vf_state.params)
-            print(f"    ✓ checkpoint saved  (val nn_disp_corr={score:.4f})")
+            with open(self.save_path, "wb") as f:
+                cloudpickle.dump(solver, f)
+            print(f"    ✓ checkpoint saved  (val {self._metric}={score:.4f})")
+        wandb_key = f"best_val_{self._metric}"
         if self._wandb_run is not None:
-            self._wandb_run.log({"best_val_nn_disp_corr": self.best_score})
-        return {"best_val_nn_disp_corr": self.best_score}
+            self._wandb_run.log({wandb_key: self.best_score})
+        return {wandb_key: self.best_score}
 
     def on_train_end(self, valid_source_data, valid_true_data,
                      valid_pred_data, solver, **kwargs) -> dict:

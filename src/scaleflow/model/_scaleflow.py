@@ -612,6 +612,7 @@ class ScaleFlow:
         out_of_core_dataloading: bool = False,
         num_workers: int = 8,
         prefetch_factor: int = 4,
+        log_every: int = 1000,
     ) -> None:
         """Train the model.
 
@@ -666,6 +667,7 @@ class ScaleFlow:
             valid_loaders=val_dataloader,
             callbacks=callbacks,
             monitor_metrics=monitor_metrics,
+            log_every=log_every,
         )
 
     def predict(
