@@ -1,0 +1,56 @@
+# Config for experiments/recon_emb.py — train a reconstruction embedding/decoder, save weights.
+#
+#   python experiments/recon_emb.py                                   # AE mode (defaults)
+#   python experiments/recon_emb.py mode=pretrained pretrained_key=X_state
+#   python experiments/recon_emb.py --multirun latent_dim=10,32,128
+#
+# The train/val/test split is INHERITED from train_zarr.py via the same `split: drug` group
+# (held-out-drug split). The same yaml drives the later sbatch reconstruction step.
+defaults:
+  - split: drug                  # held-out-drug split: by=[drug] ratios=[0.7,0.2,0.1] rs=42
+  - _self_
+
+mode: ae                       # "ae" | "pretrained"
+
+data_path: /lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/filtered_data/sciplex3_prophet_filtered.h5ad
+
+# weights are saved OUTSIDE the repo, under weights_dir/<run_name>/ (params.msgpack + metadata.json)
+weights_dir: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights
+run_name: null                 # null -> AE_<latent_dim> (ae) or dec_<pretrained_key> (pretrained)
+
+# where to write the learned AE embedding (ae mode only): append obsm <run_name> into this
+# h5ad. Defaults to the recon_weights copy — NEVER the read-only source data_path.
+embedding_out: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights/sciplex3_with_emb.h5ad
+
+n_subsample: null              # null -> all cells; int for a quick subset (then set embedding_out!)
+
+preprocess:
+  target_sum: 10000.0
+  n_top_genes: 2000            # null -> all genes
+
+# ---- AE mode ----  (optimal small arch: wider decoders overfit / collapse to the mean)
+latent_dim: 128
+encoder_hidden: [512, 256]
+decoder_hidden: [256, 512]
+
+# ---- pretrained mode ----
+pretrained_key: X_state
+pretrained_decoder_hidden: [512, 512]
+
+dropout_rate: 0.1
+
+# ---- training ----
+n_iters: 100000
+batch_size: 256
+lr: 0.001
+seed: 42
+log_every: 5000
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${weights_dir}/_hydra/${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: ${weights_dir}/_hydra/multirun_${now:%Y%m%d_%H%M%S}
+    subdir: ${hydra.job.num}
