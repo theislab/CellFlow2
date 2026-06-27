@@ -13,3 +13,11 @@ training:
   checkpoint_metric: nn_displacement_corr   # metric used by BestModelCheckpoint
   pool_fraction:     0.7
   replacement_prob:  0.5
+
+recon:
+  decoder_path:       /storage/pancellflow/recon_weights/dec_X_scconcept
+  h5ad_path:          /storage/pancellflow/sciplex3_with_emb.h5ad
+  condition_obs_keys: [cell_line, drug, dose_value]   # obs cols matching cond_key tuple order
+  cell_line_obs_key:  cell_line   # which of the above is the cell line column
+  control_obs_key:    control
+  log_dose_obs_key:   dose_value  # raw dose in h5ad; cond key holds log1p(dose) → matched numerically

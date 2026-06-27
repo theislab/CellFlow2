@@ -91,7 +91,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     run_tag    = wandb_run.id if wandb_run is not None else "local"
     name       = f"model_{mode}_{run_tag}"
-    ckpt_path  = output_dir / f"{name}_best_solver.pkl"
+    ckpt_path  = output_dir / f"{name}_best_ckpt"
     transform  = utils.ConditionTransform(mode, seed=int(cfg.seed)) if mode != "prophet" else None
 
     print(f"\n{'='*64}")
@@ -207,6 +207,28 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
     ]
 
+    # ── optional gene-space reconstruction metrics ──
+    recon_cfg = cfg.get("recon", {})
+    dec_path  = recon_cfg.get("decoder_path")
+    h5ad_path = recon_cfg.get("h5ad_path")
+    if dec_path and h5ad_path:
+        import scanpy as sc
+        print(f"Loading ReconDecoder from {dec_path} …")
+        recon_dec = callbacks.load_recon_decoder(str(dec_path))
+        adata_recon = sc.read_h5ad(str(h5ad_path))
+        log_dose_key = recon_cfg.get("log_dose_obs_key", None)
+        cbs.append(callbacks.ReconMetricsLogger(
+            decoder=recon_dec,
+            adata=adata_recon,
+            condition_obs_keys=list(recon_cfg.condition_obs_keys),
+            cell_line_obs_key=str(recon_cfg.cell_line_obs_key),
+            control_obs_key=str(recon_cfg.get("control_obs_key", "control")),
+            log_dose_obs_key=str(log_dose_key) if log_dose_key else None,
+            valid_freq=int(cfg.training.valid_freq),
+            wandb_run=wandb_run,
+        ))
+        print(f"  recon metrics enabled: {recon_dec.input_key} → {len(recon_dec.var_names or [])} genes")
+
     monitor_metrics = ["loss"]
     for ds in val_samplers:
         monitor_metrics += [
@@ -216,6 +238,8 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             f"{ds}_nn_displacement_corr",
             f"{ds}_gap_closure_mean",
         ]
+    if dec_path and h5ad_path:
+        monitor_metrics += ["val_recon_r2_delta", "val_recon_pearson_r_delta"]
 
     print(f"Training {int(cfg.training.num_iterations)} iterations "
           f"(val every {int(cfg.training.valid_freq)} steps) …")
@@ -234,11 +258,13 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
 
     if ckpt_path.exists():
         print(f"Loading best checkpoint from {ckpt_path} …")
-        with open(ckpt_path, "rb") as f:
-            best_solver = cloudpickle.load(f)
+        import orbax.checkpoint as ocp
+        target      = callbacks._solver_params(sf.solver)
+        best_params = ocp.PyTreeCheckpointer().restore(str(ckpt_path), item=target)
+        callbacks.restore_solver_params(sf.solver, best_params)
     else:
         print("  no checkpoint found — using final iterate")
-        best_solver = sf.solver
+    best_solver = sf.solver
 
     print("Evaluating on test set …")
     test_metrics = callbacks.evaluate_test(best_solver, test_samplers)

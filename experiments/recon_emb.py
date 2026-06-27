@@ -35,7 +35,7 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import scanpy as sc
-from flax import serialization
+import orbax.checkpoint as ocp
 from omegaconf import DictConfig, OmegaConf
 
 import recon_metrics as rm
@@ -150,14 +150,17 @@ def batched_apply(module, params, arr, *, method=None, batch=16384) -> np.ndarra
 
 # ──────────────────────────────── io ──────────────────────────────────
 def save_run(weights_dir: Path, module, params, meta: dict, losses) -> None:
+    import shutil
     weights_dir.mkdir(parents=True, exist_ok=True)
-    # unified, self-contained, picklable model (ScaleFlow-style .pkl): module + params + metadata
-    ReconDecoder(module=module, params=jax.device_get(params), metadata=meta).save(str(weights_dir), overwrite=True)
+    ckpt_dir = weights_dir / "params"
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    ocp.PyTreeCheckpointer().save(str(ckpt_dir), jax.device_get(params))
     with open(weights_dir / "metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
     with open(weights_dir / "train_loss.json", "w") as f:
         json.dump([float(x) for x in losses], f)
-    print(f"  ReconDecoder.pkl + metadata -> {weights_dir}")
+    print(f"  orbax params + metadata -> {weights_dir}")
 
 
 def _h5ad_n_obs(f: "h5py.File") -> int:

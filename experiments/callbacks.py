@@ -5,9 +5,11 @@ import json
 import os
 from pathlib import Path
 
-import cloudpickle
+import shutil
+
 import jax
 import numpy as np
+import orbax.checkpoint as ocp
 from scipy.stats import pearsonr
 from tqdm import tqdm
 
@@ -23,6 +25,15 @@ def r_squared_delta(y_true, y_pred, source) -> float:
     """R² of the perturbation delta: R²(pred - control, gt - control)."""
     ctrl = np.asarray(source).mean(axis=0)
     return float(compute_r_squared(np.asarray(y_true) - ctrl, np.asarray(y_pred) - ctrl))
+
+
+def pearson_r_delta(y_true, y_pred, source) -> float:
+    """Pearson r between mean perturbation deltas: corr(mean(pred)-ctrl, mean(true)-ctrl)."""
+    ctrl = np.asarray(source).mean(axis=0)
+    delta_true = np.asarray(y_true).mean(axis=0) - ctrl
+    delta_pred = np.asarray(y_pred).mean(axis=0) - ctrl
+    r, _ = pearsonr(delta_true, delta_pred)
+    return float(r)
 
 
 def nn_displacement_corr(y_true, y_pred, source, debug: bool = False) -> float:
@@ -80,7 +91,8 @@ def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
         "r_squared":  float(compute_r_squared(yt, yp)),
         "e_distance": float(compute_e_distance_fast(yt, yp)),
         "mmd":        float(compute_scalar_mmd(yt, yp)),
-        "r_squared_delta": r_squared_delta(yt, yp, source) if source is not None else float("nan"),
+        "r_squared_delta":    r_squared_delta(yt, yp, source)    if source is not None else float("nan"),
+        "pearson_r_delta":    pearson_r_delta(yt, yp, source)    if source is not None else float("nan"),
         "nn_displacement_corr": nn_displacement_corr(yt, yp, source, debug=debug) if source is not None else float("nan"),
     }
 
@@ -88,7 +100,7 @@ def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
 class ValMetricsLogger(ComputationCallback):
     """Logs pooled val metrics to JSON + wandb; returns per-dataset nn_displacement_corr for monitoring."""
 
-    METRICS = ("r_squared", "e_distance", "mmd", "r_squared_delta", "nn_displacement_corr")
+    METRICS = ("r_squared", "e_distance", "mmd", "r_squared_delta", "pearson_r_delta", "nn_displacement_corr")
 
     def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False):
         self.save_path   = save_path
@@ -132,6 +144,7 @@ class ValMetricsLogger(ComputationCallback):
             json.dump(entries, f, indent=2)
 
         print(f"    val  R²={entry['r_squared']:.4f}  ΔR²={entry['r_squared_delta']:.4f}  "
+              f"Δr={entry['pearson_r_delta']:.4f}  "
               f"nn_disp_corr={entry['nn_displacement_corr']:.4f}  "
               f"E-dist={entry['e_distance']:.4f}  MMD={entry['mmd']:.4f}  (step {self._step})")
         if self._wandb_run is not None:
@@ -153,18 +166,38 @@ class ValMetricsLogger(ComputationCallback):
 
 
 # Metrics where higher = better. All others (e_distance, mmd) → lower = better.
-_MAXIMIZE_METRICS = {"r_squared", "r_squared_delta", "nn_displacement_corr"}
+_MAXIMIZE_METRICS = {"r_squared", "r_squared_delta", "pearson_r_delta", "nn_displacement_corr"}
+
+
+def _solver_params(solver) -> dict:
+    """Extract all inference-relevant params from a solver into a pytree dict."""
+    p = {
+        "vf_params":           solver.vf_state.params,
+        "vf_inference_params": solver.vf_state_inference.params,
+    }
+    if hasattr(solver, "phenotype_state") and solver.phenotype_state is not None:
+        p["phenotype_params"] = solver.phenotype_state.params
+    return p
+
+
+def restore_solver_params(solver, params: dict) -> None:
+    """Restore orbax-loaded params dict back into a solver in-place."""
+    solver.vf_state           = solver.vf_state.replace(params=params["vf_params"])
+    solver.vf_state_inference = solver.vf_state_inference.replace(params=params["vf_inference_params"])
+    if "phenotype_params" in params and hasattr(solver, "phenotype_state") and solver.phenotype_state is not None:
+        solver.phenotype_state = solver.phenotype_state.replace(params=params["phenotype_params"])
 
 
 class BestModelCheckpoint(ComputationCallback):
-    """Save solver with cloudpickle whenever the chosen val metric improves."""
+    """Save solver params with orbax whenever the chosen val metric improves."""
 
     def __init__(self, save_path: str, wandb_run=None, metric: str = "nn_displacement_corr"):
-        self.save_path   = Path(save_path)
-        self._metric     = metric
-        self._maximize   = metric in _MAXIMIZE_METRICS
-        self.best_score  = -np.inf if self._maximize else np.inf
-        self._wandb_run  = wandb_run
+        self.save_path  = Path(save_path)  # orbax writes a directory here
+        self._metric    = metric
+        self._maximize  = metric in _MAXIMIZE_METRICS
+        self.best_score = -np.inf if self._maximize else np.inf
+        self._wandb_run = wandb_run
+        self._ckptr     = ocp.PyTreeCheckpointer()
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self.best_score = -np.inf if self._maximize else np.inf
@@ -189,8 +222,9 @@ class BestModelCheckpoint(ComputationCallback):
         is_better = score > self.best_score if self._maximize else score < self.best_score
         if is_better:
             self.best_score = score
-            with open(self.save_path, "wb") as f:
-                cloudpickle.dump(solver, f)
+            if self.save_path.exists():
+                shutil.rmtree(self.save_path)
+            self._ckptr.save(str(self.save_path), _solver_params(solver))
             print(f"    ✓ checkpoint saved  (val {self._metric}={score:.4f})")
         wandb_key = f"best_val_{self._metric}"
         if self._wandb_run is not None:
@@ -229,6 +263,154 @@ def evaluate_test(solver, test_samplers: dict) -> dict:
 
     aggregated = {k: float(np.nanmean([v[k] for v in all_per_condition.values()])) for k in keys}
     return {"per_dataset": per_dataset, "per_condition": all_per_condition, "aggregated": aggregated}
+
+
+class ReconMetricsLogger(ComputationCallback):
+    """Gene-space R²δ and Pearson-rδ via a ReconDecoder.
+
+    Decodes predicted latent → genes, compares mean perturbation delta
+    (perturbed − ctrl) against ground truth from the raw h5ad.
+    Condition keys are tuples (*src_dist_keys, *tgt_dist_keys) as strings.
+    """
+
+    def __init__(
+        self,
+        decoder,
+        adata,
+        condition_obs_keys: list[str],
+        cell_line_obs_key: str,
+        control_obs_key: str = "control",
+        log_dose_obs_key: str | None = None,
+        valid_freq: int = 1,
+        wandb_run=None,
+    ):
+        self._decoder = decoder
+        self._adata = adata
+        self._cond_keys = condition_obs_keys
+        self._cl_key = cell_line_obs_key
+        self._ctrl_key = control_obs_key
+        # obs column whose condition-key value is log1p(raw): match numerically, not by string
+        self._log_dose_key = log_dose_obs_key
+        self._valid_freq = valid_freq
+        self._wandb_run = wandb_run
+        self._step = 0
+        self._ctrl_cache: dict[str, np.ndarray] = {}
+        # precompute column indices for decoder's var_names
+        var_names = decoder.var_names
+        if var_names is not None:
+            adata_vars = list(adata.var_names)
+            self._var_idx = np.array([adata_vars.index(v) for v in var_names], dtype=np.intp)
+        else:
+            self._var_idx = None
+
+    def on_train_begin(self, *args, **kwargs) -> None:
+        self._step = 0
+        self._ctrl_cache = {}
+
+    @staticmethod
+    def _to_dense(X) -> np.ndarray:
+        return np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float32)
+
+    def _get_true_genes(self, cond_key: tuple) -> np.ndarray | None:
+        obs = self._adata.obs
+        mask = np.ones(len(obs), dtype=bool)
+        for col, val in zip(self._cond_keys, cond_key):
+            if col == self._log_dose_key:
+                # condition key holds log1p(dose); h5ad stores raw dose → match numerically
+                mask &= np.isclose(
+                    np.log1p(obs[col].astype(float).values), float(val), atol=1e-4
+                )
+            else:
+                mask &= obs[col].astype(str) == str(val)
+        if mask.sum() == 0:
+            return None
+        X = self._to_dense(self._adata[mask].X)
+        return X[:, self._var_idx] if self._var_idx is not None else X
+
+    def _get_ctrl_genes(self, cond_key: tuple) -> np.ndarray | None:
+        cl_idx = self._cond_keys.index(self._cl_key)
+        cell_line = str(cond_key[cl_idx])
+        if cell_line not in self._ctrl_cache:
+            obs = self._adata.obs
+            mask = obs[self._ctrl_key].astype(bool) & (obs[self._cl_key].astype(str) == cell_line)
+            if mask.sum() == 0:
+                return None
+            X = self._to_dense(self._adata[mask].X)
+            self._ctrl_cache[cell_line] = X[:, self._var_idx] if self._var_idx is not None else X
+        return self._ctrl_cache[cell_line]
+
+    def _compute(self, valid_source_data, valid_true_data, valid_pred_data) -> dict:
+        r2_deltas, pearson_deltas = [], []
+        for ds in valid_pred_data:
+            for cond_key, pred_latent in valid_pred_data[ds].items():
+                true_genes = self._get_true_genes(cond_key)
+                ctrl_genes = self._get_ctrl_genes(cond_key)
+                if true_genes is None or ctrl_genes is None:
+                    continue
+                pred_genes = self._decoder.decode(np.asarray(pred_latent, dtype=np.float32))
+                ctrl_mean = ctrl_genes.mean(axis=0)
+                delta_true = true_genes.mean(axis=0) - ctrl_mean
+                delta_pred = pred_genes.mean(axis=0) - ctrl_mean
+                r, _ = pearsonr(delta_true, delta_pred)
+                r2_deltas.append(float(r ** 2))
+                pearson_deltas.append(float(r))
+
+        if not r2_deltas:
+            return {}
+
+        out = {
+            "val_recon_r2_delta":       float(np.nanmean(r2_deltas)),
+            "val_recon_pearson_r_delta": float(np.nanmean(pearson_deltas)),
+        }
+        print(f"    recon  R²δ={out['val_recon_r2_delta']:.4f}  "
+              f"rδ={out['val_recon_pearson_r_delta']:.4f}  (step {self._step})")
+        if self._wandb_run is not None:
+            self._wandb_run.log(out)
+        return out
+
+    def on_log_iteration(self, valid_source_data, valid_true_data,
+                         valid_pred_data, solver, **kwargs) -> dict:
+        self._step += self._valid_freq
+        return self._compute(valid_source_data, valid_true_data, valid_pred_data)
+
+    def on_train_end(self, valid_source_data, valid_true_data,
+                     valid_pred_data, solver, **kwargs) -> dict:
+        return self._compute(valid_source_data, valid_true_data, valid_pred_data)
+
+
+def load_recon_decoder(dir_path: str):
+    """Load a ReconDecoder from orbax params + metadata.json (JAX-version-independent)."""
+    from scaleflow.model._recon import Autoencoder, Decoder, ReconDecoder
+
+    dir_path = Path(dir_path)
+    with open(dir_path / "metadata.json") as f:
+        meta = json.load(f)
+
+    mode = meta.get("mode", "pretrained")
+    if mode == "ae":
+        module = Autoencoder(
+            gene_dim=int(meta["gene_dim"]),
+            latent_dim=int(meta["latent_dim"]),
+            encoder_hidden=tuple(int(x) for x in meta["encoder_hidden"]),
+            decoder_hidden=tuple(int(x) for x in meta["decoder_hidden"]),
+            dropout_rate=float(meta.get("dropout_rate", 0.0)),
+        )
+        input_dim = int(meta["gene_dim"])
+    else:
+        module = Decoder(
+            output_dim=int(meta["gene_dim"]),
+            hidden_dims=tuple(int(x) for x in meta["decoder_hidden"]),
+            dropout_rate=float(meta.get("dropout_rate", 0.0)),
+        )
+        input_dim = int(
+            meta.get("input_dim") or meta.get("pretrained_dim") or meta.get("latent_dim")
+        )
+
+    dummy = np.ones((1, input_dim), dtype=np.float32)
+    params_struct = module.init(jax.random.PRNGKey(0), dummy, training=False)["params"]
+    params = ocp.PyTreeCheckpointer().restore(str(dir_path / "params"), item=params_struct)
+    meta["input_dim"] = input_dim
+    return ReconDecoder(module=module, params=params, metadata=meta)
 
 
 def save_logs(name: str, logs: dict, output_dir: Path) -> None:
