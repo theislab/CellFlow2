@@ -447,20 +447,31 @@ class ScaleFlow:
             sample_conditions = next(iter(self.train_data.data.conditions.values()))
             self._data_dim = self._feature_dim(self._train_collection)
 
+        # The encoder is initialized from a single condition's key set (`sample_conditions`) and
+        # the per-condition sampler emits one condition dict per batch, so every condition MUST
+        # expose the same covariate keys -- otherwise a batch carrying a key the encoder was not
+        # built for fails at train time. This can happen with `extra_rep_keys` that are present
+        # for only some conditions (the embedding is silently skipped when absent). Fail fast
+        # with a clear message instead of a cryptic shape/param error during training.
+        train_data = getattr(self, "train_data", None)
+        if train_data is not None and train_data.data.conditions:
+            key_sets = {frozenset(c.keys()) for c in train_data.data.conditions.values()}
+            if len(key_sets) > 1:
+                raise ValueError(
+                    "Conditions expose heterogeneous covariate keys "
+                    f"({sorted(map(sorted, key_sets))}). The condition encoder requires every "
+                    "condition to have the same keys; ensure each extra embedding (extra_rep_keys) "
+                    "is available for all conditions or none."
+                )
+
         # Combination handling is data-driven: each covariate's set length is read from the
         # condition shapes (axis 1). A covariate with a set length > 1 is a perturbation
         # *combination* that the encoder pools; covariates with set length 1 cannot be
         # concatenated into a >1 pool, so they are encoded as not-pooled context covariates
         # (concatenated after pooling). max_combination_length is the data's true set width
-        # -- no padding is used; it only sizes the init dummy condition.
-        #
-        # Derive set sizes from ALL prepared conditions (max per key) when available, not a
-        # single arbitrary one, so a covariate that is absent from the first condition (e.g. a
-        # conditionally-present extra_rep_key) does not mis-size the encoder. When a caller
-        # passes ``sample_batch`` without ``prepare_data`` (manual-sampler scripts), fall back
-        # to just that sample.
+        # -- no padding is used; it only sizes the init dummy condition. Set sizes are taken as
+        # the max per key across all conditions (with uniform key sets enforced above).
         cond_dicts = [sample_conditions]
-        train_data = getattr(self, "train_data", None)
         if train_data is not None:
             cond_dicts.extend(train_data.data.conditions.values())
         set_sizes: dict[str, int] = {}
