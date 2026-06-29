@@ -362,6 +362,7 @@ class ReconMetricsLogger(ComputationCallback):
         r2_deltas, pearson_deltas = [], []
         n_total = n_unmatched = 0
         first_unmatched = None
+        pred_sigs, predgene_sigs = [], []  # diagnostic: do recon's inputs/outputs vary per validation?
         for ds in valid_pred_data:
             for cond_key, pred_latent in valid_pred_data[ds].items():
                 n_total += 1
@@ -372,13 +373,19 @@ class ReconMetricsLogger(ComputationCallback):
                     if first_unmatched is None:
                         first_unmatched = (cond_key, true_genes is None, ctrl_genes is None)
                     continue
-                pred_genes = self._decoder.decode(np.asarray(pred_latent, dtype=np.float32))
+                pred_arr = np.asarray(pred_latent, dtype=np.float32)
+                pred_genes = self._decoder.decode(pred_arr)
+                pred_sigs.append(float(pred_arr.mean()))
+                predgene_sigs.append(float(pred_genes.mean()))
                 ctrl_mean = ctrl_genes.mean(axis=0)
                 delta_true = true_genes.mean(axis=0) - ctrl_mean
                 delta_pred = pred_genes.mean(axis=0) - ctrl_mean
                 r, _ = pearsonr(delta_true, delta_pred)
                 r2_deltas.append(float(r ** 2))
                 pearson_deltas.append(float(r))
+        if pred_sigs:
+            print(f"    recon  [diag] pred_latent mean={np.mean(pred_sigs):.6f}  "
+                  f"decoded mean={np.mean(predgene_sigs):.6f}  (step {self._step})")
 
         # Always emit the keys (NaN when nothing matched) so monitor_metrics never KeyErrors.
         if not r2_deltas:
