@@ -12,6 +12,7 @@ import pytest
 
 from scaleflow.data import (
     AnnDataLocation,
+    CombinedSampler,
     DataManager,
     GroupedAnnbatchSampler,
     GroupedDistribution,
@@ -321,6 +322,50 @@ def test_write_sorted_collection_rejects_nonempty(tmp_path):
             adata, coll, dist_flag_key="control", src_dist_keys=["cell_line"],
             tgt_dist_keys={"drug": ["drug_1", "drug_2"]}, sorted_adata_path=str(tmp_path / "s2.zarr"),
         )
+
+
+def test_combined_sampler_with_combinations(tmp_path):
+    """CombinedSampler (multi-dataset training path) streams combination conditions + dataset_name."""
+    n = 8
+    rows = []
+    for cl in CELL_LINES:
+        rows += [{"cell_line": cl, "drug_1": "control", "drug_2": "control", "control": True}] * n
+        for d1, d2 in [("dA", "dB"), ("dB", "dC")]:
+            rows += [{"cell_line": cl, "drug_1": d1, "drug_2": d2, "control": False}] * n
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug_1", "drug_2"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 5).astype(np.float32), obs=obs)
+    cl_emb = {cl: np.eye(len(CELL_LINES), dtype=np.float32)[i] for i, cl in enumerate(CELL_LINES)}
+    drug_emb = {d: np.eye(len(DRUGS), dtype=np.float32)[i] for i, d in enumerate(DRUGS)}
+    coll = str(tmp_path / "coll.zarr")
+    write_sorted_collection(
+        adata, coll, dist_flag_key="control", src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]}, sorted_adata_path=str(tmp_path / "sorted.zarr"),
+    )
+    dm = DataManager(
+        dist_flag_key="control", src_dist_keys=["cell_line"], tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"},
+        data_location=AnnDataLocation().X,
+    )
+    gd = dm.prepare_data_from_collection(coll, rep_dict={"cell_line_embeddings": cl_emb, "drug_embeddings": drug_emb})
+
+    combined = CombinedSampler(
+        samplers={
+            "d1": GroupedAnnbatchSampler(coll, gd, batch_size=8, chunk_size=4, seed=0),
+            "d2": GroupedAnnbatchSampler(coll, gd, batch_size=8, chunk_size=4, seed=1),
+        },
+        rng=np.random.default_rng(0),
+    )
+    combined.init_sampler()
+    seen = set()
+    for _ in range(8):
+        b = combined.sample()
+        seen.add(b["dataset_name"])
+        assert b["dataset_name"] in {"d1", "d2"}
+        assert np.asarray(b["condition"]["drug"]).shape == (1, 2, len(DRUGS))
+        assert np.asarray(b["tgt_cell_data"]).shape == (8, 5)
+    assert seen == {"d1", "d2"}  # both datasets are drawn
 
 
 def test_grouped_conditions_zarr_roundtrip(tmp_path):
