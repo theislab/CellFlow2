@@ -75,3 +75,28 @@ dataset) that is a single compile.
   control-filled slots routine, so audit that real covariate embeddings are never all-zero.
 - The combination API (`tgt_dist_keys` grouped dict) maps to cellflow's `perturbation_covariates`
   dict; the key difference is no padding and a data-derived (not user-fixed) combination width.
+
+## Broader API surface (annbatch data layer) — for the port
+
+The combination feature itself is **additive**. The surrounding annbatch refactor (separate work)
+is what is **breaking** relative to the in-memory `CellFlow`/`adata` API, because cells are now
+streamed from a sorted `DatasetCollection` instead of held in memory:
+
+| Surface | Change | Type |
+|---|---|---|
+| `prepare_data` | `(collection, *, dist_flag_key, src_dist_keys, tgt_dist_keys, rep_keys, rep_path/rep_dict, …)` replaces `(adata, sample_rep, control_key, perturbation_covariates, …)` | breaking |
+| `train` | adds required `chunk_size` (when no `train_dataloader`) + `preload_nchunks`; removes `out_of_core_dataloading`/`num_workers`/`prefetch_factor`/`validation_batch_size` | breaking |
+| `predict` | `(data: GroupedDistribution, collection=…)` → `{cond_key: array}`; no `key_added_prefix`/obsm write-back | breaking |
+| `predict_covariates` | **new**: arbitrary-covariate prediction (the old `predict(adata, covariate_data, …)` use-case) | additive |
+| `prepare_validation_data` | `(name, val_data: GroupedDistribution, collection=…, …)`; was `(adata, name, …)` | breaking |
+| `make_dataloader` | **new**: builds a `GroupedAnnbatchSampler` | additive |
+| `ValidationSampler` / `PredictionSampler` | take `collection` as the first positional arg | breaking |
+| `tgt_dist_keys` grouped dict | combinations | **additive** |
+
+**Recommendation for minimal churn in cellflow:** keep cellflow's existing in-memory `adata` /
+`perturbation_covariates` API and add the collection/streaming path as **new methods**
+(`prepare_data_from_collection`, `make_dataloader`, `predict_covariates`, the annbatch samplers)
+*alongside* the current ones, rather than replacing them. The collection-path + dist-key model is
+fundamentally different from `adata` + `perturbation_covariates`, so a drop-in non-breaking swap is
+not achievable while replacing the data layer — but it can be made purely additive.
+

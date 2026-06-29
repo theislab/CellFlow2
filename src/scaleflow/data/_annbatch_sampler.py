@@ -193,6 +193,11 @@ class GroupedAnnbatchSampler(SamplerABC):
         order); uniform if ``None``. Non-negative; renormalized by ClassSampler.
     condition_transform
         Optional callable applied to each condition dict before it is returned.
+    n_batches_per_pass
+        Size of one internal ClassSampler pass (in batches); the iterator restarts on
+        exhaustion for an effectively infinite stream. This does not change the sampling
+        *distribution*, but the exact draw sequence for a given ``seed`` depends on it, so keep
+        it fixed for bit-reproducible runs.
 
     Yields the standard batch contract: ``{"src_cell_data", "tgt_cell_data", "condition"}``.
     """
