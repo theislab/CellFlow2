@@ -1,6 +1,7 @@
 """Validation/test callbacks and metrics."""
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -133,7 +134,9 @@ class ValMetricsLogger(ComputationCallback):
         flat = [m for ms in per_ds.values() for m in ms]
         entry = {"step": self._step, "n_conditions": len(flat)}
         for k in self.METRICS:
-            entry[k] = float(np.nanmean([m[k] for m in flat]))
+            vals = [m[k] for m in flat]
+            entry[k] = float(np.nanmean(vals))              # mean across conditions
+            entry[f"{k}_median"] = float(np.nanmedian(vals))  # median across conditions
 
         entries = []
         if os.path.exists(self.save_path):
@@ -148,7 +151,9 @@ class ValMetricsLogger(ComputationCallback):
               f"nn_disp_corr={entry['nn_displacement_corr']:.4f}  "
               f"E-dist={entry['e_distance']:.4f}  MMD={entry['mmd']:.4f}  (step {self._step})")
         if self._wandb_run is not None:
-            self._wandb_run.log({f"val_{k}": entry[k] for k in self.METRICS})
+            log = {f"val_{k}": entry[k] for k in self.METRICS}
+            log.update({f"val_{k}_median": entry[f"{k}_median"] for k in self.METRICS})
+            self._wandb_run.log(log)
 
         return {
             f"{ds}_nn_displacement_corr": float(np.nanmean([m["nn_displacement_corr"] for m in ms]))
@@ -311,7 +316,20 @@ class ReconMetricsLogger(ComputationCallback):
     def _to_dense(X) -> np.ndarray:
         return np.asarray(X.todense() if hasattr(X, "todense") else X, dtype=np.float32)
 
+    @staticmethod
+    def _normalize_key(cond_key: tuple) -> tuple:
+        """ValidationSampler yields keys as a 1-tuple holding the str(tuple), e.g.
+        ``("('A549', 'A-366', 2.39)",)`` — parse it back into ``('A549', 'A-366', 2.39)``.
+        Already-clean tuples pass through unchanged."""
+        if len(cond_key) == 1 and isinstance(cond_key[0], str) and cond_key[0].lstrip().startswith("("):
+            try:
+                return tuple(ast.literal_eval(cond_key[0]))
+            except (ValueError, SyntaxError):
+                pass
+        return cond_key
+
     def _get_true_genes(self, cond_key: tuple) -> np.ndarray | None:
+        cond_key = self._normalize_key(cond_key)
         obs = self._adata.obs
         mask = np.ones(len(obs), dtype=bool)
         for col, val in zip(self._cond_keys, cond_key):
@@ -328,6 +346,7 @@ class ReconMetricsLogger(ComputationCallback):
         return X[:, self._var_idx] if self._var_idx is not None else X
 
     def _get_ctrl_genes(self, cond_key: tuple) -> np.ndarray | None:
+        cond_key = self._normalize_key(cond_key)
         cl_idx = self._cond_keys.index(self._cl_key)
         cell_line = str(cond_key[cl_idx])
         if cell_line not in self._ctrl_cache:
@@ -341,11 +360,17 @@ class ReconMetricsLogger(ComputationCallback):
 
     def _compute(self, valid_source_data, valid_true_data, valid_pred_data) -> dict:
         r2_deltas, pearson_deltas = [], []
+        n_total = n_unmatched = 0
+        first_unmatched = None
         for ds in valid_pred_data:
             for cond_key, pred_latent in valid_pred_data[ds].items():
+                n_total += 1
                 true_genes = self._get_true_genes(cond_key)
                 ctrl_genes = self._get_ctrl_genes(cond_key)
                 if true_genes is None or ctrl_genes is None:
+                    n_unmatched += 1
+                    if first_unmatched is None:
+                        first_unmatched = (cond_key, true_genes is None, ctrl_genes is None)
                     continue
                 pred_genes = self._decoder.decode(np.asarray(pred_latent, dtype=np.float32))
                 ctrl_mean = ctrl_genes.mean(axis=0)
@@ -355,15 +380,33 @@ class ReconMetricsLogger(ComputationCallback):
                 r2_deltas.append(float(r ** 2))
                 pearson_deltas.append(float(r))
 
+        # Always emit the keys (NaN when nothing matched) so monitor_metrics never KeyErrors.
         if not r2_deltas:
-            return {}
+            ck, no_true, no_ctrl = (first_unmatched or (None, None, None))
+            print(f"    recon  WARNING: 0/{n_total} conditions matched the h5ad "
+                  f"(cond_keys={list(self._cond_keys)}, log_dose_key={self._log_dose_key}). "
+                  f"First unmatched cond_key={ck!r}  no_true={no_true} no_ctrl={no_ctrl}  (step {self._step})")
+            nan = float("nan")
+            out = {
+                "val_recon_r2_delta": nan, "val_recon_pearson_r_delta": nan,
+                "val_recon_r2_delta_median": nan, "val_recon_pearson_r_delta_median": nan,
+            }
+            if self._wandb_run is not None:
+                self._wandb_run.log(out)
+            return out
+        if n_unmatched:
+            print(f"    recon  note: {n_unmatched}/{n_total} conditions unmatched "
+                  f"(e.g. {first_unmatched[0]!r})")
 
         out = {
-            "val_recon_r2_delta":       float(np.nanmean(r2_deltas)),
-            "val_recon_pearson_r_delta": float(np.nanmean(pearson_deltas)),
+            "val_recon_r2_delta":              float(np.nanmean(r2_deltas)),
+            "val_recon_pearson_r_delta":       float(np.nanmean(pearson_deltas)),
+            "val_recon_r2_delta_median":        float(np.nanmedian(r2_deltas)),
+            "val_recon_pearson_r_delta_median": float(np.nanmedian(pearson_deltas)),
         }
-        print(f"    recon  R²δ={out['val_recon_r2_delta']:.4f}  "
-              f"rδ={out['val_recon_pearson_r_delta']:.4f}  (step {self._step})")
+        print(f"    recon  R²δ={out['val_recon_r2_delta']:.4f} (med {out['val_recon_r2_delta_median']:.4f})  "
+              f"rδ={out['val_recon_pearson_r_delta']:.4f} (med {out['val_recon_pearson_r_delta_median']:.4f})  "
+              f"(step {self._step})")
         if self._wandb_run is not None:
             self._wandb_run.log(out)
         return out

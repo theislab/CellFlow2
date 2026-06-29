@@ -1,0 +1,4 @@
+# @package _global_
+# Default no-op: keep the dataset path and recon decoder from their base configs.
+# Sweeps/CLI select `embedding=X_state` / `embedding=X_scconcept` to pick a zarr
+# together with its matching ReconDecoder (gene-space recon metrics use that latent).

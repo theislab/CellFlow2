@@ -166,5 +166,6 @@ scripts/logs
 data/*
 wandb/
 experiments/run_sweep.sbatch
+run_sweep.sbatch
 outputs/
 !experiments/config/wandb/
