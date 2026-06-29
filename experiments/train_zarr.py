@@ -208,6 +208,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     ]
 
     # ── optional gene-space reconstruction metrics ──
+    recon_cb  = None
     recon_cfg = cfg.get("recon", {})
     dec_path  = recon_cfg.get("decoder_path")
     h5ad_path = recon_cfg.get("h5ad_path")
@@ -217,7 +218,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         recon_dec = callbacks.load_recon_decoder(str(dec_path))
         adata_recon = sc.read_h5ad(str(h5ad_path))
         log_dose_key = recon_cfg.get("log_dose_obs_key", None)
-        cbs.append(callbacks.ReconMetricsLogger(
+        recon_cb = callbacks.ReconMetricsLogger(
             decoder=recon_dec,
             adata=adata_recon,
             condition_obs_keys=list(recon_cfg.condition_obs_keys),
@@ -226,7 +227,8 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             log_dose_obs_key=str(log_dose_key) if log_dose_key else None,
             valid_freq=int(cfg.training.valid_freq),
             wandb_run=wandb_run,
-        ))
+        )
+        cbs.append(recon_cb)
         print(f"  recon metrics enabled: {recon_dec.input_key} → {len(recon_dec.var_names or [])} genes")
 
     monitor_metrics = ["loss"]
@@ -269,9 +271,15 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     print("Evaluating on test set …")
     test_metrics = callbacks.evaluate_test(best_solver, test_samplers)
 
+    # ── gene-space recon metrics on the test set (test_recon_*) ──
+    test_recon = {}
+    if recon_cb is not None:
+        print("Evaluating gene-space recon on test set …")
+        test_recon = recon_cb.evaluate_test(best_solver, test_samplers)
+
     result_path = output_dir / f"{name}_results.pkl"
     with open(result_path, "wb") as f:
-        cloudpickle.dump(test_metrics, f)
+        cloudpickle.dump({**test_metrics, "recon": test_recon}, f)
     print(f"  test results saved → {result_path}")
 
     if wandb_run is not None:
@@ -279,6 +287,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         for dsname, dsres in test_metrics["per_dataset"].items():
             for k, v in dsres["aggregated"].items():
                 test_log[f"test_{dsname}_{k}"] = v
+        test_log.update(test_recon)  # test_recon_r2_delta / pearson (+ medians)
         wandb_run.log(test_log)
         for k, v in test_log.items():
             wandb_run.summary[k] = v

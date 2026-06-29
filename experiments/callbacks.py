@@ -358,13 +358,17 @@ class ReconMetricsLogger(ComputationCallback):
             self._ctrl_cache[cell_line] = X[:, self._var_idx] if self._var_idx is not None else X
         return self._ctrl_cache[cell_line]
 
-    def _compute(self, valid_source_data, valid_true_data, valid_pred_data) -> dict:
+    def _compute_recon(self, pred_data: dict, prefix: str, step_label: str) -> dict:
+        """Gene-space delta metrics over ``pred_data`` ({ds: {cond_key: pred_latent}}).
+
+        ``prefix`` selects the metric namespace (``"val"`` or ``"test"``).
+        """
         r2_deltas, pearson_deltas = [], []
         n_total = n_unmatched = 0
         first_unmatched = None
-        pred_sigs, predgene_sigs = [], []  # diagnostic: do recon's inputs/outputs vary per validation?
-        for ds in valid_pred_data:
-            for cond_key, pred_latent in valid_pred_data[ds].items():
+        pred_sigs, predgene_sigs = [], []  # diagnostic: do recon's inputs/outputs vary?
+        for ds in pred_data:
+            for cond_key, pred_latent in pred_data[ds].items():
                 n_total += 1
                 true_genes = self._get_true_genes(cond_key)
                 ctrl_genes = self._get_ctrl_genes(cond_key)
@@ -384,39 +388,51 @@ class ReconMetricsLogger(ComputationCallback):
                 r2_deltas.append(float(r ** 2))
                 pearson_deltas.append(float(r))
         if pred_sigs:
-            print(f"    recon  [diag] pred_latent mean={np.mean(pred_sigs):.6f}  "
-                  f"decoded mean={np.mean(predgene_sigs):.6f}  (step {self._step})")
+            print(f"    {prefix} recon  [diag] pred_latent mean={np.mean(pred_sigs):.6f}  "
+                  f"decoded mean={np.mean(predgene_sigs):.6f}  ({step_label})")
 
         # Always emit the keys (NaN when nothing matched) so monitor_metrics never KeyErrors.
         if not r2_deltas:
             ck, no_true, no_ctrl = (first_unmatched or (None, None, None))
-            print(f"    recon  WARNING: 0/{n_total} conditions matched the h5ad "
+            print(f"    {prefix} recon  WARNING: 0/{n_total} conditions matched the h5ad "
                   f"(cond_keys={list(self._cond_keys)}, log_dose_key={self._log_dose_key}). "
-                  f"First unmatched cond_key={ck!r}  no_true={no_true} no_ctrl={no_ctrl}  (step {self._step})")
+                  f"First unmatched cond_key={ck!r}  no_true={no_true} no_ctrl={no_ctrl}  ({step_label})")
             nan = float("nan")
             out = {
-                "val_recon_r2_delta": nan, "val_recon_pearson_r_delta": nan,
-                "val_recon_r2_delta_median": nan, "val_recon_pearson_r_delta_median": nan,
+                f"{prefix}_recon_r2_delta": nan, f"{prefix}_recon_pearson_r_delta": nan,
+                f"{prefix}_recon_r2_delta_median": nan, f"{prefix}_recon_pearson_r_delta_median": nan,
             }
             if self._wandb_run is not None:
                 self._wandb_run.log(out)
             return out
         if n_unmatched:
-            print(f"    recon  note: {n_unmatched}/{n_total} conditions unmatched "
+            print(f"    {prefix} recon  note: {n_unmatched}/{n_total} conditions unmatched "
                   f"(e.g. {first_unmatched[0]!r})")
 
         out = {
-            "val_recon_r2_delta":              float(np.nanmean(r2_deltas)),
-            "val_recon_pearson_r_delta":       float(np.nanmean(pearson_deltas)),
-            "val_recon_r2_delta_median":        float(np.nanmedian(r2_deltas)),
-            "val_recon_pearson_r_delta_median": float(np.nanmedian(pearson_deltas)),
+            f"{prefix}_recon_r2_delta":              float(np.nanmean(r2_deltas)),
+            f"{prefix}_recon_pearson_r_delta":       float(np.nanmean(pearson_deltas)),
+            f"{prefix}_recon_r2_delta_median":        float(np.nanmedian(r2_deltas)),
+            f"{prefix}_recon_pearson_r_delta_median": float(np.nanmedian(pearson_deltas)),
         }
-        print(f"    recon  R²δ={out['val_recon_r2_delta']:.4f} (med {out['val_recon_r2_delta_median']:.4f})  "
-              f"rδ={out['val_recon_pearson_r_delta']:.4f} (med {out['val_recon_pearson_r_delta_median']:.4f})  "
-              f"(step {self._step})")
+        print(f"    {prefix} recon  R²δ={out[f'{prefix}_recon_r2_delta']:.4f} "
+              f"(med {out[f'{prefix}_recon_r2_delta_median']:.4f})  "
+              f"rδ={out[f'{prefix}_recon_pearson_r_delta']:.4f} "
+              f"(med {out[f'{prefix}_recon_pearson_r_delta_median']:.4f})  ({step_label})")
         if self._wandb_run is not None:
             self._wandb_run.log(out)
         return out
+
+    def _compute(self, valid_source_data, valid_true_data, valid_pred_data) -> dict:
+        return self._compute_recon(valid_pred_data, "val", f"step {self._step}")
+
+    def evaluate_test(self, solver, test_samplers: dict) -> dict:
+        """Gene-space recon metrics on the held-out test set (logged as ``test_recon_*``)."""
+        pred_data = {}
+        for name, sampler in test_samplers.items():
+            batch = sampler.sample(mode="on_train_end")
+            pred_data[name] = jax.tree.map(solver.predict, batch["source"], batch["condition"])
+        return self._compute_recon(pred_data, "test", "test")
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
                          valid_pred_data, solver, **kwargs) -> dict:
