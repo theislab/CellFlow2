@@ -1,0 +1,107 @@
+"""Tests for perturbation combinations (grouped tgt_dist_keys) in DataManager.
+
+A combination is a multi-column target group whose columns are stacked into a set of
+length K = number of columns (no padding); single covariates stay length 1. The set is
+pooled at the model level (tested in tests/model/test_scaleflow.py).
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+import anndata as ad
+
+from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution
+
+CELL_LINES = ["cl0", "cl1"]
+DRUGS = ["control", "dA", "dB", "dC"]
+
+
+def _combo_adata(n=6):
+    """AnnData where each non-control condition is a 2-drug combination (drug_1, drug_2)."""
+    rows = []
+    for cl in CELL_LINES:
+        rows += [{"cell_line": cl, "drug_1": "control", "drug_2": "control", "control": True}] * n
+        for d1, d2 in [("dA", "dB"), ("dB", "dC")]:
+            rows += [{"cell_line": cl, "drug_1": d1, "drug_2": d2, "control": False}] * n
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug_1", "drug_2"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 5).astype(np.float32), obs=obs)
+    adata.uns["cell_line_embeddings"] = {cl: np.eye(len(CELL_LINES), dtype=np.float32)[i] for i, cl in enumerate(CELL_LINES)}
+    adata.uns["drug_embeddings"] = {d: np.eye(len(DRUGS), dtype=np.float32)[i] for i, d in enumerate(DRUGS)}
+    return adata
+
+
+def _dm(tgt_dist_keys):
+    rep_keys = {"cell_line": "cell_line_embeddings"}
+    # rep_keys is keyed by covariate name: a group name (grouped) or a column (flat)
+    if isinstance(tgt_dist_keys, dict):
+        rep_keys.update({g: "drug_embeddings" for g in tgt_dist_keys})
+    else:
+        rep_keys.update({c: "drug_embeddings" for c in tgt_dist_keys})
+    return DataManager(
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys=tgt_dist_keys,
+        rep_keys=rep_keys,
+        data_location=AnnDataLocation().X,
+    )
+
+
+def test_grouped_condition_is_a_stacked_set():
+    """A 2-column group → (1, 2, emb) with the columns stacked in order; src stays (1, 1, emb)."""
+    adata = _combo_adata()
+    dm = _dm({"drug": ["drug_1", "drug_2"]})
+    gd = dm.prepare_data(adata)
+
+    drug_emb = adata.uns["drug_embeddings"]
+    for t, cond in gd.data.conditions.items():
+        assert np.asarray(cond["cell_line"]).shape == (1, 1, len(CELL_LINES))
+        assert np.asarray(cond["drug"]).shape == (1, 2, len(DRUGS))  # K=2, no padding
+        # labels are (cell_line, drug_1, drug_2); the drug set stacks drug_1 then drug_2
+        _, d1, d2 = gd.annotation.tgt_dist_idx_to_labels[t]
+        np.testing.assert_array_equal(np.asarray(cond["drug"])[0, 0], drug_emb[d1])
+        np.testing.assert_array_equal(np.asarray(cond["drug"])[0, 1], drug_emb[d2])
+
+
+def test_flat_keys_stay_singletons():
+    """Flat tgt_dist_keys keep set length 1 (backward compatible)."""
+    adata = _combo_adata()
+    gd = _dm(["drug_1", "drug_2"]).prepare_data(adata)
+    cond = next(iter(gd.data.conditions.values()))
+    assert np.asarray(cond["drug_1"]).shape == (1, 1, len(DRUGS))
+    assert np.asarray(cond["drug_2"]).shape == (1, 1, len(DRUGS))
+    assert np.asarray(cond["cell_line"]).shape == (1, 1, len(CELL_LINES))
+
+
+def test_unequal_combination_widths_raise():
+    """Two multi-column groups with different widths is rejected at construction."""
+    with pytest.raises(ValueError, match="combination width"):
+        _dm({"drug": ["drug_1", "drug_2"], "gene": ["g1", "g2", "g3"]})
+
+
+def test_get_condition_data_grouped():
+    """get_condition_data (arbitrary covariates) also stacks grouped columns into a set."""
+    adata = _combo_adata()
+    dm = _dm({"drug": ["drug_1", "drug_2"]})
+    cov = pd.DataFrame({"cell_line": ["cl0"], "drug_1": ["dA"], "drug_2": ["dC"]})
+    conds = dm.get_condition_data(cov, rep_dict=adata.uns)
+    cond = next(iter(conds.values()))
+    assert np.asarray(cond["drug"]).shape == (1, 2, len(DRUGS))
+    np.testing.assert_array_equal(np.asarray(cond["drug"])[0, 0], adata.uns["drug_embeddings"]["dA"])
+    np.testing.assert_array_equal(np.asarray(cond["drug"])[0, 1], adata.uns["drug_embeddings"]["dC"])
+
+
+def test_grouped_conditions_zarr_roundtrip(tmp_path):
+    """(1, K, emb) condition sets round-trip through GroupedDistribution zarr IO."""
+    adata = _combo_adata()
+    gd = _dm({"drug": ["drug_1", "drug_2"]}).prepare_data(adata)
+    path = str(tmp_path / "gd.zarr")
+    gd.write_zarr(path, chunk_size=8, shard_size=64)
+    gd2 = GroupedDistribution.read_zarr(path)
+
+    assert set(gd2.data.conditions) == set(gd.data.conditions)
+    for t, cond in gd.data.conditions.items():
+        got = np.asarray(gd2.data.conditions[t]["drug"])
+        assert got.shape == (1, 2, len(DRUGS))
+        np.testing.assert_allclose(got, np.asarray(cond["drug"]))

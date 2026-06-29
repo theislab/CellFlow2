@@ -216,11 +216,20 @@ class ConditionEncoder(nn_utils.BaseModule):
         )
 
     def _get_masks(self, conditions: dict[str, ArrayLike]) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Get mask for padded conditions tensor."""
+        """Get mask for the pooled (set) conditions tensor.
+
+        The mask is derived only from the *pooled* covariates (those not in
+        :attr:`covariates_not_pooled`); not-pooled context covariates may have a different
+        (length-1) set axis and are excluded post-pool, so mixing them here would break the
+        stacking. With no padding the mask is all-ones (pooling reduces to a plain mean/attention).
+        """
+        # set masks only over pooled covariates (all share the same set length)
+        pooled = {k: c for k, c in conditions.items() if k not in self.covariates_not_pooled}
+        mask_conditions = pooled if pooled else conditions
         # mask of shape (batch_size, set_size)
         mask = 1 - jnp.all(
             jnp.array(
-                [jnp.all(c == self.mask_value, axis=-1) for c in conditions.values()],
+                [jnp.all(c == self.mask_value, axis=-1) for c in mask_conditions.values()],
             ),
             axis=0,
         )

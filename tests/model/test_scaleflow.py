@@ -150,6 +150,78 @@ def test_time_embedding_invalid_period(adata_test, tmp_path, time_max_period):
         _prepared_model(adata_test, tmp_path, "otfm", time_freqs=8, time_max_period=time_max_period)
 
 
+def _combo_adata(n=16):
+    """AnnData where each non-control condition is a 2-drug combination (drug_1, drug_2)."""
+    cell_lines, drugs = ["cl0", "cl1"], ["control", "dA", "dB", "dC"]
+    rows = []
+    for cl in cell_lines:
+        rows += [{"cell_line": cl, "drug_1": "control", "drug_2": "control", "control": True}] * n
+        for d1, d2 in [("dA", "dB"), ("dB", "dC")]:
+            rows += [{"cell_line": cl, "drug_1": d1, "drug_2": d2, "control": False}] * n
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug_1", "drug_2"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 12).astype(np.float32), obs=obs)
+    adata.uns["cell_line_embeddings"] = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
+    adata.uns["drug_embeddings"] = {d: np.eye(4, dtype=np.float32)[i] for i, d in enumerate(drugs)}
+    return adata
+
+
+@pytest.mark.slow
+def test_scaleflow_combination_trains(tmp_path):
+    """A multi-column tgt group is pooled at the model level (set length K=2), no padding.
+
+    max_combination_length is derived from the data (= 2) and the single covariate (cell_line)
+    is encoded as a not-pooled context covariate.
+    """
+    adata = _combo_adata()
+    rep_path = tmp_path / "uns.zarr"
+    g = zarr.open_group(str(rep_path), mode="w")
+    for k in ["cell_line_embeddings", "drug_embeddings"]:
+        ad.io.write_elem(g, k, adata.uns[k])
+
+    a = adata.copy()
+    a.uns = {}
+    coll_path = tmp_path / "coll.zarr"
+    write_sorted_collection(
+        a,
+        str(coll_path),
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        sorted_adata_path=str(tmp_path / "sorted.zarr"),
+    )
+
+    model = ScaleFlow(solver="otfm")
+    model.prepare_data(
+        str(coll_path),
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"},
+        rep_path=str(rep_path),
+    )
+    # condition carries a 2-element drug set, no padding
+    assert np.asarray(next(iter(model.train_data.data.conditions.values()))["drug"]).shape == (1, 2, 4)
+
+    model.prepare_model(
+        condition_embedding_dim=8, time_freqs=8, time_encoder_dims=(16,),
+        hidden_dims=(16,), decoder_dims=(16,), seed=0,
+    )
+    # max_combination_length was derived from the data (=2), not pinned to 1
+    assert model.vf.max_combination_length == 2
+
+    model.train(num_iterations=2, batch_size=16, chunk_size=4, valid_freq=1000)
+    assert model.solver.is_trained
+    assert all(np.isfinite(model.trainer.training_logs["loss"]))
+
+    cov = pd.DataFrame({"cell_line": ["cl0"], "drug_1": ["dA"], "drug_2": ["dB"]})
+    preds = model.predict_covariates(cov, rep_path=str(rep_path), max_steps=3, throw=False)
+    assert len(preds) == 1
+    arr = np.asarray(next(iter(preds.values())))
+    assert arr.ndim == 2 and arr.shape[1] == adata.n_vars and np.all(np.isfinite(arr))
+
+
 @pytest.mark.slow
 def test_scaleflow_with_validation(adata_test, tmp_path):
     """A registered validation split produces a logged validation metric during training."""

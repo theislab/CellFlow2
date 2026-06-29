@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 class DataManager:
     dist_flag_key: str
     src_dist_keys: list[str]
-    tgt_dist_keys: list[str]
+    # Target perturbation covariates. Either a flat ``list[str]`` (each column is its own
+    # single-value condition key) or a grouped ``dict[str, list[str]]`` mapping a covariate
+    # name to a list of obs columns that form a *combination* (a set of perturbations of that
+    # type, e.g. ``{"drug": ["drug_1", "drug_2"]}``). Grouped columns are stacked into a set
+    # of length K (= number of columns) and pooled at the model level; no padding is used.
+    tgt_dist_keys: list[str] | dict[str, list[str]]
     data_location: AnnDataLocation
     rep_keys: dict[str, str] | None = None
     # Optional extra embeddings keyed by a new condition name.
@@ -38,23 +43,44 @@ class DataManager:
         self,
     ):
         self._verify_dist_keys(self.src_dist_keys)
-        self._verify_dist_keys(self.tgt_dist_keys)
-        # they shouldn't overlap
-        if len(set(self.src_dist_keys) & set(self.tgt_dist_keys)) > 0:
+        # Normalize tgt_dist_keys to grouped form: {group_name: [obs_col, ...]}.
+        # A flat list maps each column to its own singleton group (length-1 set).
+        if isinstance(self.tgt_dist_keys, dict):
+            self._tgt_groups: dict[str, list[str]] = {g: list(cols) for g, cols in self.tgt_dist_keys.items()}
+        else:
+            self._tgt_groups = {c: [c] for c in self.tgt_dist_keys}
+        if len(self._tgt_groups) == 0:
+            raise ValueError("Number of distributions must be greater than 0.")
+        for group, cols in self._tgt_groups.items():
+            if len(cols) == 0:
+                raise ValueError(f"tgt_dist_keys group '{group}' must have at least one column.")
+        # flattened obs columns used for grouping cells into distributions
+        self._tgt_cols: list[str] = [c for cols in self._tgt_groups.values() for c in cols]
+        self._verify_dist_keys(self._tgt_cols)
+        # all multi-column (combination) groups must share the same width K (position-aligned)
+        pooled_lengths = {len(cols) for cols in self._tgt_groups.values() if len(cols) > 1}
+        if len(pooled_lengths) > 1:
+            raise ValueError(
+                f"All multi-column tgt_dist_keys groups must share the same combination width, got {pooled_lengths}."
+            )
+        # source columns and target columns must not overlap
+        if set(self.src_dist_keys) & set(self._tgt_cols):
             raise ValueError("Source and target distributions must not overlap.")
+        # rep_keys / extra_rep_keys are keyed by covariate *name*: a src column or a tgt group name
+        cond_keys = set(self.src_dist_keys) | set(self._tgt_groups.keys())
         if self.rep_keys is not None:
-            if not set(self.rep_keys.keys()).issubset(set(self.src_dist_keys) | set(self.tgt_dist_keys)):
+            if not set(self.rep_keys.keys()).issubset(cond_keys):
                 raise ValueError(
                     "Representation locations must be a subset of the source and target distribution keys."
                 )
         if self.extra_rep_keys is not None:
-            all_dist_keys = set(self.src_dist_keys) | set(self.tgt_dist_keys)
+            obs_cols = set(self.src_dist_keys) | set(self._tgt_cols)
             for new_key, (obs_col, _uns_key) in self.extra_rep_keys.items():
-                if obs_col not in all_dist_keys:
+                if obs_col not in obs_cols:
                     raise ValueError(
                         f"extra_rep_keys: obs_col '{obs_col}' must be in src_dist_keys or tgt_dist_keys."
                     )
-                if new_key in all_dist_keys:
+                if new_key in cond_keys:
                     raise ValueError(
                         f"extra_rep_keys: new_key '{new_key}' conflicts with existing dist key '{new_key}'."
                     )
@@ -82,8 +108,8 @@ class DataManager:
         """
         if obs_col in self.src_dist_keys:
             return src_label[self.src_dist_keys.index(obs_col)]
-        if obs_col in self.tgt_dist_keys:
-            return tgt_label[self.tgt_dist_keys.index(obs_col)]
+        if obs_col in self._tgt_cols:
+            return tgt_label[self._tgt_cols.index(obs_col)]
         return None
 
     def _prepare_annotation(
@@ -114,7 +140,9 @@ class DataManager:
         tgt_dist_labels
             Mapping from target distribution indices to their labels.
         """
-        src_tgt_dist_keys = [*self.src_dist_keys, *self.tgt_dist_keys]
+        # grouping/labels use the flattened target columns (a combination group contributes
+        # all of its columns); the grouped structure only matters when building embeddings.
+        src_tgt_dist_keys = [*self.src_dist_keys, *self._tgt_cols]
 
         cols = [self.dist_flag_key, *src_tgt_dist_keys]
         obs = obs_df[cols].copy()
@@ -141,7 +169,7 @@ class DataManager:
         src_tgt_dist_df.drop_duplicates(inplace=True)
 
         # prepare default_values
-        temp_df = obs.loc[obs[self.dist_flag_key]][self.tgt_dist_keys].drop_duplicates()
+        temp_df = obs.loc[obs[self.dist_flag_key]][self._tgt_cols].drop_duplicates()
         if len(temp_df) != 1:
             raise ValueError("There should be exactly one control value.")
         default_values = temp_df.iloc[0].to_dict()
@@ -164,10 +192,10 @@ class DataManager:
             zip(src_dist_labels.index, src_dist_labels.itertuples(index=False, name=None), strict=True)
         )
 
-        # prepare tgt_dist_labels — drug-only, used by _prepare_data for
-        # embedding lookups (must match tgt_dist_keys exactly).
+        # prepare tgt_dist_labels — one value per flattened target column, used by
+        # _prepare_data for embedding lookups (label order matches self._tgt_cols).
         tgt_dist_labels = (
-            obs.loc[~obs[self.dist_flag_key]][[*self.tgt_dist_keys, "tgt_dist_idx"]]
+            obs.loc[~obs[self.dist_flag_key]][[*self._tgt_cols, "tgt_dist_idx"]]
             .drop_duplicates()
             .set_index("tgt_dist_idx")
         )
@@ -192,7 +220,7 @@ class DataManager:
         annotation = GroupedDistributionAnnotation(
             src_tgt_dist_df=src_tgt_dist_df,
             old_obs_index=old_index_mapping,
-            tgt_dist_keys=self.tgt_dist_keys,
+            tgt_dist_keys=self._tgt_cols,
             src_dist_keys=self.src_dist_keys,
             dist_flag_key=self.dist_flag_key,
             src_dist_idx_to_labels=src_dist_labels,
@@ -334,7 +362,7 @@ class DataManager:
         GroupedDistribution containing metadata and annotation.
         """
         coll = self._open_collection(collection)
-        needed_cols = [self.dist_flag_key, *self.src_dist_keys, *self.tgt_dist_keys]
+        needed_cols = [self.dist_flag_key, *self.src_dist_keys, *self._tgt_cols]
         obs_df = coll.obs(columns=needed_cols)
         if rep_dict is None:
             if rep_path is None:
@@ -367,18 +395,25 @@ class DataManager:
         col_to_repr: dict[str, Any],
         rep_dict: Mapping[str, Any],
     ) -> dict[str, np.ndarray]:
-        """Build a single condition dict ``{col_name: (1, 1, emb_dim)}`` from labels.
+        """Build a single condition dict ``{key: (1, K, emb_dim)}`` from labels.
 
         Shared by ``_prepare_data`` (conditions from obs) and ``get_condition_data``
-        (conditions for arbitrary covariate combinations). The set axis is size 1.
+        (conditions for arbitrary covariate combinations).
+
+        Source covariates and single-column target groups have set length ``K = 1``
+        (``(1, 1, emb_dim)``); a multi-column target group is a *combination*: its columns'
+        embeddings are stacked into a set of length ``K = len(columns)`` (``(1, K, emb_dim)``)
+        and pooled at the model level. No padding is introduced -- ``K`` is the true number of
+        columns in the group. ``tgt_label`` is ordered to match :attr:`_tgt_cols`.
         """
         cond_dict: dict[str, np.ndarray] = {}
         for col, label in zip(self.src_dist_keys, src_label, strict=True):
             emb = DataManager._col_to_repr(col_to_repr, col, label)
             cond_dict[col] = emb[None, None, :]
-        for col, label in zip(self.tgt_dist_keys, tgt_label, strict=True):
-            emb = DataManager._col_to_repr(col_to_repr, col, label)
-            cond_dict[col] = emb[None, None, :]
+        label_by_col = dict(zip(self._tgt_cols, tgt_label, strict=True))
+        for group_name, cols in self._tgt_groups.items():
+            embs = [DataManager._col_to_repr(col_to_repr, group_name, label_by_col[c]) for c in cols]
+            cond_dict[group_name] = np.stack(embs, axis=0)[None, ...]  # (1, K, emb_dim)
         if self.extra_rep_keys is not None:
             for new_key, (obs_col, uns_key) in self.extra_rep_keys.items():
                 if uns_key not in rep_dict:
@@ -424,14 +459,14 @@ class DataManager:
         DataManager._verify_rep_keys_exists(self.rep_keys, rep_dict)
         col_to_repr = {key: rep_dict[self.rep_keys[key]] for key in self.rep_keys.keys()}
 
-        keys = [*self.src_dist_keys, *self.tgt_dist_keys]
+        keys = [*self.src_dist_keys, *self._tgt_cols]
         select = keys + ([condition_id_key] if condition_id_key is not None else [])
         df = covariate_data[select].drop_duplicates()
 
         conditions: dict[Any, dict[str, np.ndarray]] = {}
         for _, row in df.iterrows():
             src_label = tuple(row[k] for k in self.src_dist_keys)
-            tgt_label = tuple(row[k] for k in self.tgt_dist_keys)
+            tgt_label = tuple(row[k] for k in self._tgt_cols)
             cond_key = row[condition_id_key] if condition_id_key is not None else tuple(str(row[k]) for k in keys)
             conditions[cond_key] = self._build_condition(src_label, tgt_label, col_to_repr, rep_dict)
         return conditions

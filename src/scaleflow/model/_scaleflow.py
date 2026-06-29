@@ -84,7 +84,7 @@ class ScaleFlow:
         *,
         dist_flag_key: str,
         src_dist_keys: Sequence[str],
-        tgt_dist_keys: Sequence[str],
+        tgt_dist_keys: Sequence[str] | dict[str, Sequence[str]],
         rep_keys: dict[str, str] | None = None,
         rep_path: str | None = None,
         rep_dict: Mapping[str, Any] | None = None,
@@ -137,7 +137,12 @@ class ScaleFlow:
         self._dm = DataManager(
             dist_flag_key=dist_flag_key,
             src_dist_keys=list(src_dist_keys),
-            tgt_dist_keys=list(tgt_dist_keys),
+            # grouped combinations ({group: [cols]}) pass through; a flat sequence stays a list
+            tgt_dist_keys=(
+                {g: list(cols) for g, cols in tgt_dist_keys.items()}
+                if isinstance(tgt_dist_keys, dict)
+                else list(tgt_dist_keys)
+            ),
             rep_keys=dict(rep_keys) if rep_keys else {},
             data_location=data_location,
             extra_rep_keys=extra_rep_keys,
@@ -438,6 +443,19 @@ class ScaleFlow:
             sample_conditions = next(iter(self.train_data.data.conditions.values()))
             self._data_dim = self._feature_dim(self._train_collection)
 
+        # Combination handling is data-driven: each covariate's set length is read from the
+        # condition shapes (axis 1). A covariate with a set length > 1 is a perturbation
+        # *combination* that the encoder pools; covariates with set length 1 cannot be
+        # concatenated into a >1 pool, so they are encoded as not-pooled context covariates
+        # (concatenated after pooling). max_combination_length is the data's true set width
+        # -- no padding is used; it only sizes the init dummy condition.
+        set_sizes = {k: int(np.asarray(v).shape[1]) for k, v in sample_conditions.items()}
+        max_combination_length = max(set_sizes.values()) if set_sizes else 1
+        if max_combination_length > 1:
+            covariates_not_pooled = [k for k, s in set_sizes.items() if s == 1]
+        else:
+            covariates_not_pooled = []
+
         if condition_mode == "stochastic":
             if regularization == 0.0:
                 raise ValueError("Stochastic condition embeddings require `regularization`>0.")
@@ -456,7 +474,6 @@ class ScaleFlow:
                 assert "genot_source_dropout" in vf_kwargs
         else:
             vf_kwargs = {}
-        covariates_not_pooled = [] if pool_sample_covariates else self._dm.sample_covariates
         solver_kwargs = solver_kwargs or {}
         probability_path = probability_path or {"constant_noise": 0.0}
 

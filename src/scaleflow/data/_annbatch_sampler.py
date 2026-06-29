@@ -489,7 +489,7 @@ def write_sorted_collection(
     *,
     dist_flag_key: str,
     src_dist_keys: list[str],
-    tgt_dist_keys: list[str],
+    tgt_dist_keys: list[str] | dict[str, list[str]],
     sorted_adata_path: str | None = None,
     **add_adatas_kwargs: Any,
 ) -> str:
@@ -509,6 +509,8 @@ def write_sorted_collection(
         Path of the :class:`annbatch.DatasetCollection` to create/append to.
     dist_flag_key, src_dist_keys, tgt_dist_keys
         The distribution keys (must match the :class:`~scaleflow.data.DataManager` config).
+        ``tgt_dist_keys`` may be the grouped (combination) form ``{group: [cols]}``; it is
+        flattened to its columns for sorting.
     sorted_adata_path
         Where to write the intermediate sorted AnnData (a zarr store). Defaults to
         ``f"{collection_path}.sorted_adata.zarr"``.
@@ -522,7 +524,12 @@ def write_sorted_collection(
     """
     from annbatch import DatasetCollection
 
-    sort_cols = [dist_flag_key, *src_dist_keys, *tgt_dist_keys]
+    tgt_cols = (
+        [c for cols in tgt_dist_keys.values() for c in cols]
+        if isinstance(tgt_dist_keys, dict)
+        else list(tgt_dist_keys)
+    )
+    sort_cols = [dist_flag_key, *src_dist_keys, *tgt_cols]
     order = adata.obs.sort_values(sort_cols, kind="stable").index
     adata_sorted = adata[order].copy()
 
