@@ -271,3 +271,97 @@ def test_scaleflow_with_validation(adata_test, tmp_path):
     model.train(num_iterations=4, batch_size=32, chunk_size=CHUNK_SIZE, valid_freq=1, callbacks=[metrics_callback])
     assert model.solver.is_trained
     assert "val_r_squared_mean" in model.trainer.training_logs
+
+
+def _combo_collection_with_nulls(tmp_path, n=16):
+    """Sorted collection with mixed combos incl. a (dA, control) null slot; control -> 0 emb."""
+    cell_lines, drugs = ["cl0", "cl1"], ["control", "dA", "dB"]
+    rows = []
+    for cl in cell_lines:
+        rows += [{"cell_line": cl, "drug_1": "control", "drug_2": "control", "control": True}] * n
+        for d1, d2 in [("dA", "dB"), ("dA", "control")]:  # second condition has a null slot
+            rows += [{"cell_line": cl, "drug_1": d1, "drug_2": d2, "control": False}] * n
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug_1", "drug_2"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 12).astype(np.float32), obs=obs)
+    cl_emb = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
+    drug_emb = dict(zip(drugs, np.concatenate([np.zeros((1, 2), np.float32), np.eye(2, dtype=np.float32)], axis=0)))
+
+    rep_path = tmp_path / "uns.zarr"
+    g = zarr.open_group(str(rep_path), mode="w")
+    ad.io.write_elem(g, "cell_line_embeddings", cl_emb)
+    ad.io.write_elem(g, "drug_embeddings", drug_emb)
+
+    coll_path = tmp_path / "coll.zarr"
+    write_sorted_collection(
+        adata, str(coll_path), dist_flag_key="control", src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]}, sorted_adata_path=str(tmp_path / "sorted.zarr"),
+    )
+    return str(coll_path), str(rep_path), adata.n_vars
+
+
+@pytest.mark.slow
+def test_scaleflow_combination_null_slot_trains(tmp_path):
+    """A combo with a control (null/zero) slot is masked by the pooler; attention pooling must not NaN."""
+    coll_path, rep_path, n_vars = _combo_collection_with_nulls(tmp_path)
+    model = ScaleFlow(solver="otfm")
+    model.prepare_data(
+        coll_path, dist_flag_key="control", src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"}, rep_path=rep_path,
+    )
+    model.prepare_model(
+        condition_embedding_dim=8, time_freqs=8, time_encoder_dims=(16,),
+        hidden_dims=(16,), decoder_dims=(16,), pooling="attention_token", seed=0,
+    )
+    model.train(num_iterations=2, batch_size=16, chunk_size=4, valid_freq=1000)
+    assert model.solver.is_trained
+    assert all(np.isfinite(model.trainer.training_logs["loss"]))
+
+    # predict both a full combo and the null-slot combo; both must be finite
+    cov = pd.DataFrame({"cell_line": ["cl0", "cl0"], "drug_1": ["dA", "dA"], "drug_2": ["dB", "control"]})
+    preds = model.predict_covariates(cov, rep_path=rep_path, max_steps=3, throw=False)
+    assert len(preds) == 2
+    for arr in preds.values():
+        arr = np.asarray(arr)
+        assert arr.shape[1] == n_vars and np.all(np.isfinite(arr))
+
+
+@pytest.mark.slow
+def test_scaleflow_combination_mean_pooling_null_slot(tmp_path):
+    """Same as above but with mean pooling (the other masked-reduction path)."""
+    coll_path, rep_path, n_vars = _combo_collection_with_nulls(tmp_path)
+    model = ScaleFlow(solver="otfm")
+    model.prepare_data(
+        coll_path, dist_flag_key="control", src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"}, rep_path=rep_path,
+    )
+    model.prepare_model(
+        condition_embedding_dim=8, time_freqs=8, time_encoder_dims=(16,),
+        hidden_dims=(16,), decoder_dims=(16,), pooling="mean", seed=0,
+    )
+    model.train(num_iterations=2, batch_size=16, chunk_size=4, valid_freq=1000)
+    assert model.solver.is_trained and all(np.isfinite(model.trainer.training_logs["loss"]))
+
+
+@pytest.mark.slow
+def test_scaleflow_combination_stochastic(tmp_path):
+    """Stochastic condition embeddings + combinations train and give finite variance."""
+    coll_path, rep_path, n_vars = _combo_collection_with_nulls(tmp_path)
+    model = ScaleFlow(solver="otfm")
+    model.prepare_data(
+        coll_path, dist_flag_key="control", src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"}, rep_path=rep_path,
+    )
+    model.prepare_model(
+        condition_embedding_dim=8, time_freqs=8, time_encoder_dims=(16,),
+        hidden_dims=(16,), decoder_dims=(16,), condition_mode="stochastic", regularization=0.1, seed=0,
+    )
+    model.train(num_iterations=2, batch_size=16, chunk_size=4, valid_freq=1000)
+    assert model.solver.is_trained
+    cov = pd.DataFrame({"cell_line": ["cl0"], "drug_1": ["dA"], "drug_2": ["dB"]})
+    _, df_var = model.get_condition_embedding(cov, rep_path=rep_path)
+    assert np.all(np.isfinite(df_var.values))

@@ -92,6 +92,106 @@ def test_get_condition_data_grouped():
     np.testing.assert_array_equal(np.asarray(cond["drug"])[0, 1], adata.uns["drug_embeddings"]["dC"])
 
 
+def _adata_with_control_embedding(n=6):
+    """Combo adata where 'control' maps to a ZERO drug embedding (like the real fixtures).
+
+    Includes a (dA, control) condition so one set slot is the null/zero perturbation.
+    """
+    cell_lines, drugs = ["cl0", "cl1"], ["control", "dA", "dB"]
+    rows = []
+    for cl in cell_lines:
+        rows += [{"cell_line": cl, "drug_1": "control", "drug_2": "control", "control": True}] * n
+        for d1, d2 in [("dA", "dB"), ("dA", "control")]:
+            rows += [{"cell_line": cl, "drug_1": d1, "drug_2": d2, "control": False}] * n
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug_1", "drug_2"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 5).astype(np.float32), obs=obs)
+    adata.uns["cell_line_embeddings"] = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
+    # control -> zero row (null embedding), real drugs -> identity rows
+    drug_emb = np.concatenate([np.zeros((1, 2), dtype=np.float32), np.eye(2, dtype=np.float32)], axis=0)
+    adata.uns["drug_embeddings"] = dict(zip(drugs, drug_emb))
+    return adata
+
+
+def test_control_slot_is_null_embedding():
+    """A 'control' value in one combo slot yields a zero (maskable) embedding at that position."""
+    adata = _adata_with_control_embedding()
+    dm = DataManager(
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"},
+        data_location=AnnDataLocation().X,
+    )
+    gd = dm.prepare_data(adata)
+    found = False
+    for t, cond in gd.data.conditions.items():
+        _, d1, d2 = gd.annotation.tgt_dist_idx_to_labels[t]
+        drug = np.asarray(cond["drug"])
+        assert drug.shape == (1, 2, 2)
+        if (d1, d2) == ("dA", "control"):
+            found = True
+            np.testing.assert_array_equal(drug[0, 1], np.zeros(2))  # control slot -> null/zero
+            assert not np.all(drug[0, 0] == 0)  # real slot is non-null
+    assert found, "expected a (dA, control) condition"
+
+
+def test_numeric_dosage_combination():
+    """A combination of numeric columns (not in rep_keys) stacks scalars into (1, K, 1)."""
+    cell_lines = ["cl0", "cl1"]
+    rows = []
+    for cl in cell_lines:
+        rows += [{"cell_line": cl, "dose_1": 0.0, "dose_2": 0.0, "control": True}] * 6
+        for v1, v2 in [(10.0, 100.0), (100.0, 1000.0)]:
+            rows += [{"cell_line": cl, "dose_1": v1, "dose_2": v2, "control": False}] * 6
+    obs = pd.DataFrame(rows)
+    obs["cell_line"] = obs["cell_line"].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 4).astype(np.float32), obs=obs)
+    adata.uns["cell_line_embeddings"] = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
+    dm = DataManager(
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys={"dose": ["dose_1", "dose_2"]},  # numeric group, no rep_keys entry
+        rep_keys={"cell_line": "cell_line_embeddings"},
+        data_location=AnnDataLocation().X,
+    )
+    gd = dm.prepare_data(adata)
+    for t, cond in gd.data.conditions.items():
+        dose = np.asarray(cond["dose"])
+        assert dose.shape == (1, 2, 1)  # K=2 scalars stacked
+        _, v1, v2 = gd.annotation.tgt_dist_idx_to_labels[t]
+        np.testing.assert_allclose(dose[0, :, 0], [float(v1), float(v2)])
+
+
+def test_multiple_aligned_pooled_groups():
+    """Two equal-width pooled groups (drug + dosage) both become (1, K, emb), cellflow-style."""
+    cell_lines, drugs = ["cl0", "cl1"], ["control", "dA", "dB"]
+    rows = []
+    for cl in cell_lines:
+        rows += [{"cell_line": cl, "drug_1": "control", "drug_2": "control", "dose_1": 0.0, "dose_2": 0.0, "control": True}] * 6
+        for (a, b) in [("dA", "dB"), ("dB", "dA")]:
+            rows += [{"cell_line": cl, "drug_1": a, "drug_2": b, "dose_1": 10.0, "dose_2": 100.0, "control": False}] * 6
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug_1", "drug_2"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 4).astype(np.float32), obs=obs)
+    adata.uns["cell_line_embeddings"] = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
+    adata.uns["drug_embeddings"] = {d: np.eye(3, dtype=np.float32)[i] for i, d in enumerate(drugs)}
+    dm = DataManager(
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"], "dose": ["dose_1", "dose_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"},
+        data_location=AnnDataLocation().X,
+    )
+    gd = dm.prepare_data(adata)
+    cond = next(iter(gd.data.conditions.values()))
+    assert np.asarray(cond["drug"]).shape == (1, 2, 3)
+    assert np.asarray(cond["dose"]).shape == (1, 2, 1)
+    assert np.asarray(cond["cell_line"]).shape == (1, 1, 2)
+
+
 def test_grouped_conditions_zarr_roundtrip(tmp_path):
     """(1, K, emb) condition sets round-trip through GroupedDistribution zarr IO."""
     adata = _combo_adata()
