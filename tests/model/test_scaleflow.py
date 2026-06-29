@@ -150,6 +150,56 @@ def test_time_embedding_invalid_period(adata_test, tmp_path, time_max_period):
         _prepared_model(adata_test, tmp_path, "otfm", time_freqs=8, time_max_period=time_max_period)
 
 
+def test_prepare_model_rejects_heterogeneous_condition_keys(tmp_path):
+    """Partial extra_rep_keys coverage -> heterogeneous condition keys -> prepare_model raises.
+
+    Covers the fail-fast added to prepare_model: the encoder is built from one condition's key
+    set and the sampler emits one condition per batch, so all conditions must expose the same
+    keys. Here a 'prophet' embedding exists only for one drug, so its condition gains an extra
+    key the others lack.
+    """
+    cell_lines, drugs = ["cl0"], ["control", "dA", "dB"]
+    rows = []
+    for cl in cell_lines:
+        rows += [{"cell_line": cl, "drug": "control", "control": True}] * 6
+        for d in ["dA", "dB"]:
+            rows += [{"cell_line": cl, "drug": d, "control": False}] * 6
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 6).astype(np.float32), obs=obs)
+
+    rep_path = tmp_path / "uns.zarr"
+    g = zarr.open_group(str(rep_path), mode="w")
+    ad.io.write_elem(g, "cell_line_embeddings", {cl: np.eye(1, dtype=np.float32)[0] for cl in cell_lines})
+    ad.io.write_elem(g, "drug_embeddings", {d: np.eye(len(drugs), dtype=np.float32)[i] for i, d in enumerate(drugs)})
+    # prophet embedding present for ONLY one drug -> partial coverage
+    ad.io.write_elem(g, "prophet_emb", {"dA": np.ones(4, dtype=np.float32)})
+
+    coll_path = tmp_path / "coll.zarr"
+    a = adata.copy()
+    a.uns = {}
+    write_sorted_collection(
+        a, str(coll_path), dist_flag_key="control", src_dist_keys=["cell_line"], tgt_dist_keys=["drug"],
+        sorted_adata_path=str(tmp_path / "sorted.zarr"),
+    )
+
+    model = ScaleFlow(solver="otfm")
+    model.prepare_data(
+        str(coll_path), dist_flag_key="control", src_dist_keys=["cell_line"], tgt_dist_keys=["drug"],
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"},
+        extra_rep_keys={"prophet": ("drug", "prophet_emb")}, rep_path=str(rep_path),
+    )
+    # sanity: conditions really are heterogeneous (only dA carries 'prophet')
+    key_sets = {frozenset(c) for c in model.train_data.data.conditions.values()}
+    assert len(key_sets) > 1
+    with pytest.raises(ValueError, match="heterogeneous covariate keys"):
+        model.prepare_model(
+            condition_embedding_dim=8, time_freqs=8, time_encoder_dims=(16,),
+            hidden_dims=(16,), decoder_dims=(16,), seed=0,
+        )
+
+
 def _combo_adata(n=16):
     """AnnData where each non-control condition is a 2-drug combination (drug_1, drug_2)."""
     cell_lines, drugs = ["cl0", "cl1"], ["control", "dA", "dB", "dC"]
