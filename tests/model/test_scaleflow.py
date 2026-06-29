@@ -58,14 +58,14 @@ def _prepared_model(adata_test, tmp_path, solver, **prepare_model_kwargs):
         rep_keys=REP_KEYS,
         rep_path=str(rep_path),
     )
-    defaults = dict(
-        condition_embedding_dim=8,
-        time_freqs=8,
-        time_encoder_dims=(16,),
-        hidden_dims=(16,),
-        decoder_dims=(16,),
-        seed=0,
-    )
+    defaults = {
+        "condition_embedding_dim": 8,
+        "time_freqs": 8,
+        "time_encoder_dims": (16,),
+        "hidden_dims": (16,),
+        "decoder_dims": (16,),
+        "seed": 0,
+    }
     defaults.update(prepare_model_kwargs)
     model.prepare_model(**defaults)
     return model, str(coll_path), str(rep_path)
@@ -286,7 +286,7 @@ def _combo_collection_with_nulls(tmp_path, n=16):
         obs[c] = obs[c].astype("category")
     adata = ad.AnnData(X=np.random.randn(len(obs), 12).astype(np.float32), obs=obs)
     cl_emb = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
-    drug_emb = dict(zip(drugs, np.concatenate([np.zeros((1, 2), np.float32), np.eye(2, dtype=np.float32)], axis=0)))
+    drug_emb = dict(zip(drugs, np.concatenate([np.zeros((1, 2), np.float32), np.eye(2, dtype=np.float32)], axis=0), strict=False))
 
     rep_path = tmp_path / "uns.zarr"
     g = zarr.open_group(str(rep_path), mode="w")

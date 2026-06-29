@@ -449,7 +449,20 @@ class ScaleFlow:
         # concatenated into a >1 pool, so they are encoded as not-pooled context covariates
         # (concatenated after pooling). max_combination_length is the data's true set width
         # -- no padding is used; it only sizes the init dummy condition.
-        set_sizes = {k: int(np.asarray(v).shape[1]) for k, v in sample_conditions.items()}
+        #
+        # Derive set sizes from ALL prepared conditions (max per key) when available, not a
+        # single arbitrary one, so a covariate that is absent from the first condition (e.g. a
+        # conditionally-present extra_rep_key) does not mis-size the encoder. When a caller
+        # passes ``sample_batch`` without ``prepare_data`` (manual-sampler scripts), fall back
+        # to just that sample.
+        cond_dicts = [sample_conditions]
+        train_data = getattr(self, "train_data", None)
+        if train_data is not None:
+            cond_dicts.extend(train_data.data.conditions.values())
+        set_sizes: dict[str, int] = {}
+        for cond in cond_dicts:
+            for k, v in cond.items():
+                set_sizes[k] = max(set_sizes.get(k, 0), int(np.asarray(v).shape[1]))
         max_combination_length = max(set_sizes.values()) if set_sizes else 1
         if max_combination_length > 1:
             covariates_not_pooled = [k for k, s in set_sizes.items() if s == 1]

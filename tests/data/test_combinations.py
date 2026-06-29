@@ -5,10 +5,10 @@ length K = number of columns (no padding); single covariates stay length 1. The 
 pooled at the model level (tested in tests/model/test_scaleflow.py).
 """
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
-import anndata as ad
 
 from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution
 
@@ -36,9 +36,9 @@ def _dm(tgt_dist_keys):
     rep_keys = {"cell_line": "cell_line_embeddings"}
     # rep_keys is keyed by covariate name: a group name (grouped) or a column (flat)
     if isinstance(tgt_dist_keys, dict):
-        rep_keys.update({g: "drug_embeddings" for g in tgt_dist_keys})
+        rep_keys.update(dict.fromkeys(tgt_dist_keys, "drug_embeddings"))
     else:
-        rep_keys.update({c: "drug_embeddings" for c in tgt_dist_keys})
+        rep_keys.update(dict.fromkeys(tgt_dist_keys, "drug_embeddings"))
     return DataManager(
         dist_flag_key="control",
         src_dist_keys=["cell_line"],
@@ -46,6 +46,20 @@ def _dm(tgt_dist_keys):
         rep_keys=rep_keys,
         data_location=AnnDataLocation().X,
     )
+
+
+def test_col_to_repr_accepts_numpy_scalars():
+    """Numeric covariates: _col_to_repr accepts numpy scalars (predict path uses iterrows).
+
+    Regression: predict_covariates/get_condition_embedding iterate with DataFrame.iterrows(),
+    yielding np.float32/np.int64 for numeric columns; isinstance(label, float) used to reject them.
+    """
+    f = DataManager._col_to_repr
+    np.testing.assert_array_equal(f({}, "dose", np.float32(10.0)), np.array([10.0]))
+    np.testing.assert_array_equal(f({}, "dose", np.int64(5)), np.array([5.0]))
+    np.testing.assert_array_equal(f({}, "dose", 2.5), np.array([2.5]))
+    with pytest.raises(ValueError, match="not found in col_to_repr"):
+        f({}, "drug", "some_string_label")  # non-numeric, unknown store still raises
 
 
 def test_grouped_condition_is_a_stacked_set():
@@ -110,7 +124,7 @@ def _adata_with_control_embedding(n=6):
     adata.uns["cell_line_embeddings"] = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
     # control -> zero row (null embedding), real drugs -> identity rows
     drug_emb = np.concatenate([np.zeros((1, 2), dtype=np.float32), np.eye(2, dtype=np.float32)], axis=0)
-    adata.uns["drug_embeddings"] = dict(zip(drugs, drug_emb))
+    adata.uns["drug_embeddings"] = dict(zip(drugs, drug_emb, strict=False))
     return adata
 
 

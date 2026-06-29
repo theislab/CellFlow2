@@ -405,6 +405,19 @@ class DataManager:
         embeddings are stacked into a set of length ``K = len(columns)`` (``(1, K, emb_dim)``)
         and pooled at the model level. No padding is introduced -- ``K`` is the true number of
         columns in the group. ``tgt_label`` is ordered to match :attr:`_tgt_cols`.
+
+        Semantics / caveats:
+
+        - Stacking follows the declared column order, so columns are *position-aligned* across
+          groups (column ``i`` of every group forms set element ``i``). The combination is
+          pooled by a permutation-invariant set encoder, so element order does not change the
+          pooled embedding -- but distinct column orders are still distinct conditions on disk,
+          so canonicalize the column values (e.g. sort) upstream if order should not matter.
+        - An absent perturbation in a slot (e.g. a ``"control"`` value mapping to a zero
+          embedding) becomes a zero set element. The set encoder masks elements equal to its
+          ``mask_value`` (0.0 by default), so such a slot is ignored by pooling. The flip side
+          is the usual ``mask_value`` collision: a *real* covariate value whose embedding is
+          all-zero would also be masked -- avoid zero embeddings for real values.
         """
         cond_dict: dict[str, np.ndarray] = {}
         for col, label in zip(self.src_dist_keys, src_label, strict=True):
@@ -517,9 +530,11 @@ class DataManager:
     @staticmethod
     def _col_to_repr(col_to_repr: dict[str, dict[str, np.ndarray]], col: str, label: Any) -> np.ndarray:
         if col not in col_to_repr:
-            # for example in case of dosage, we have a float label
-            if isinstance(label, float):
-                return np.array([label])
+            # Numeric covariate (e.g. dosage) with no embedding store: use the scalar value
+            # itself. Accept numpy scalars too (predict_covariates iterates with DataFrame
+            # .iterrows(), which yields np.float32/np.int64 rather than Python float).
+            if isinstance(label, (float, int, np.floating, np.integer)) and not isinstance(label, bool):
+                return np.array([float(label)])
             raise ValueError(f"Column {col} not found in col_to_repr.")
         if label not in col_to_repr[col]:
             raise ValueError(f"Label {label} not found in col_to_repr[{col}].")
