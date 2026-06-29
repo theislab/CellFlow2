@@ -247,6 +247,21 @@ def test_sampler_emits_combination_condition(tmp_path):
         assert np.asarray(batch["tgt_cell_data"]).shape == (8, 5)
 
 
+def test_write_sorted_collection_rejects_nonempty(tmp_path):
+    """Appending to a non-empty collection would scatter rows; it must raise (contiguity guard)."""
+    adata = _combo_adata()
+    coll = str(tmp_path / "coll.zarr")
+    write_sorted_collection(
+        adata, coll, dist_flag_key="control", src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]}, sorted_adata_path=str(tmp_path / "s1.zarr"),
+    )
+    with pytest.raises(ValueError, match="not empty"):
+        write_sorted_collection(
+            adata, coll, dist_flag_key="control", src_dist_keys=["cell_line"],
+            tgt_dist_keys={"drug": ["drug_1", "drug_2"]}, sorted_adata_path=str(tmp_path / "s2.zarr"),
+        )
+
+
 def test_grouped_conditions_zarr_roundtrip(tmp_path):
     """(1, K, emb) condition sets round-trip through GroupedDistribution zarr IO."""
     adata = _combo_adata()

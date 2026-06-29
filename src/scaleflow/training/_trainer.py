@@ -79,7 +79,12 @@ class CellFlowTrainer:
             # Initialize sampler if not already initialized
             if hasattr(vdl, '_initialized') and not vdl._initialized:
                 vdl.init_sampler()
-            batch = vdl.sample()  # Samplers use internal rng
+            # Forward the validation mode so samplers can honor n_conditions_on_train_end
+            # vs n_conditions_on_log_iteration; fall back for samplers without a mode arg.
+            try:
+                batch = vdl.sample(mode=mode)
+            except TypeError:
+                batch = vdl.sample()  # Samplers use internal rng
 
             val_pbar.set_description(f"Validation ({val_key}) - extracting data")
             

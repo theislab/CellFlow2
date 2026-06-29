@@ -506,7 +506,9 @@ def write_sorted_collection(
     adata
         In-memory :class:`anndata.AnnData` to write.
     collection_path
-        Path of the :class:`annbatch.DatasetCollection` to create/append to.
+        Path of the :class:`annbatch.DatasetCollection` to create. Must not already exist /
+        be non-empty: only a single sorted write is supported (appending to an existing
+        collection scatters rows and breaks per-condition contiguity).
     dist_flag_key, src_dist_keys, tgt_dist_keys
         The distribution keys (must match the :class:`~scaleflow.data.DataManager` config).
         ``tgt_dist_keys`` may be the grouped (combination) form ``{group: [cols]}``; it is
@@ -538,5 +540,15 @@ def write_sorted_collection(
     adata_sorted.write_zarr(str(sorted_adata_path))
 
     coll = DatasetCollection(str(collection_path), mode="a")
+    # Appending to a NON-EMPTY collection distributes the incoming rows across the existing
+    # on-disk datasets (even with shuffle=False), which destroys the per-condition contiguity
+    # ClassSampler requires. Only a single sorted write is safe; to combine multiple AnnDatas,
+    # concatenate them first and write once.
+    if not coll.is_empty:
+        raise ValueError(
+            f"DatasetCollection at {collection_path!r} is not empty. write_sorted_collection only "
+            "supports a single sorted write (appending breaks per-condition contiguity). "
+            "Use a fresh path, or concatenate your AnnDatas and write once."
+        )
     coll.add_adatas(adata_paths=[str(sorted_adata_path)], **{"shuffle": False, **add_adatas_kwargs})
     return str(collection_path)

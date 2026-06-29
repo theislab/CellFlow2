@@ -70,6 +70,10 @@ class ScaleFlow:
         self._trainer: CellFlowTrainer | None = None
         self._validation_data: dict[str, GroupedDistribution] = {"predict_kwargs": {}}
         self._solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching | None = None
+        # set by prepare_data; initialized here so train_data/make_dataloader give a clear
+        # "call prepare_data first" error instead of AttributeError.
+        self._train_data: GroupedDistribution | None = None
+        self._train_collection: Any | None = None
         self._condition_dim: int | None = None
         self._vf: (
             _velocity_field.ConditionalVelocityField
@@ -887,8 +891,6 @@ class ScaleFlow:
 
         df_mean = pd.DataFrame.from_dict(means, orient="index")
         df_var = pd.DataFrame.from_dict(logvars, orient="index")
-        return df_mean, df_var
-
         return df_mean, df_var
 
     def save(
