@@ -247,6 +247,67 @@ def test_sampler_emits_combination_condition(tmp_path):
         assert np.asarray(batch["tgt_cell_data"]).shape == (8, 5)
 
 
+def test_three_way_combination():
+    """A 3-column group stacks into a (1, 3, emb) set (K generalizes beyond 2)."""
+    cell_lines, drugs = ["cl0", "cl1"], ["control", "dA", "dB", "dC", "dD"]
+    rows = []
+    for cl in cell_lines:
+        rows += [{"cell_line": cl, "d1": "control", "d2": "control", "d3": "control", "control": True}] * 6
+        for combo in [("dA", "dB", "dC"), ("dB", "dC", "dD")]:
+            rows += [{"cell_line": cl, "d1": combo[0], "d2": combo[1], "d3": combo[2], "control": False}] * 6
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "d1", "d2", "d3"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 5).astype(np.float32), obs=obs)
+    adata.uns["cell_line_embeddings"] = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
+    adata.uns["drug_embeddings"] = {d: np.eye(len(drugs), dtype=np.float32)[i] for i, d in enumerate(drugs)}
+    dm = DataManager(
+        dist_flag_key="control", src_dist_keys=["cell_line"], tgt_dist_keys={"drug": ["d1", "d2", "d3"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"},
+        data_location=AnnDataLocation().X,
+    )
+    gd = dm.prepare_data(adata)
+    cond = next(iter(gd.data.conditions.values()))
+    assert np.asarray(cond["drug"]).shape == (1, 3, len(drugs))
+
+
+def test_combination_with_split():
+    """GroupedDistributionSplitter partitions combination conditions; split GDs keep (1, K, emb)."""
+    from scaleflow.data._data_splitter import GroupedDistributionSplitter
+
+    cell_lines = ["cl0", "cl1"]
+    drugs = ["control", "dA", "dB", "dC", "dD", "dE"]
+    combos = [("dA", "dB"), ("dB", "dC"), ("dC", "dD"), ("dD", "dE"), ("dA", "dE")]
+    rows = []
+    for cl in cell_lines:
+        rows += [{"cell_line": cl, "drug_1": "control", "drug_2": "control", "control": True}] * 6
+        for d1, d2 in combos:
+            rows += [{"cell_line": cl, "drug_1": d1, "drug_2": d2, "control": False}] * 6
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug_1", "drug_2"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 5).astype(np.float32), obs=obs)
+    adata.uns["cell_line_embeddings"] = {cl: np.eye(2, dtype=np.float32)[i] for i, cl in enumerate(cell_lines)}
+    adata.uns["drug_embeddings"] = {d: np.eye(len(drugs), dtype=np.float32)[i] for i, d in enumerate(drugs)}
+    dm = DataManager(
+        dist_flag_key="control", src_dist_keys=["cell_line"], tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"},
+        data_location=AnnDataLocation().X,
+    )
+    gd = dm.prepare_data(adata)
+    splits = GroupedDistributionSplitter(
+        gd=gd, holdout_combinations=False, split_by=["drug_1", "drug_2"], split_key="split",
+        force_training_values={}, ratios=[0.6, 0.2, 0.2], random_state=0,
+    ).split()
+    assert set(splits) == {"train", "val", "test"}
+    tgt = {k: set(v.data.tgt_dist_to_rows) for k, v in splits.items()}
+    assert tgt["train"].isdisjoint(tgt["val"]) and tgt["train"].isdisjoint(tgt["test"])
+    # every split's conditions remain (1, K=2, emb) combinations
+    for v in splits.values():
+        for cond in v.data.conditions.values():
+            assert np.asarray(cond["drug"]).shape == (1, 2, len(drugs))
+
+
 def test_write_sorted_collection_rejects_nonempty(tmp_path):
     """Appending to a non-empty collection would scatter rows; it must raise (contiguity guard)."""
     adata = _combo_adata()

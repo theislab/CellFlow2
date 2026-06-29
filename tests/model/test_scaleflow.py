@@ -223,6 +223,29 @@ def test_scaleflow_combination_trains(tmp_path):
 
 
 @pytest.mark.slow
+def test_scaleflow_combination_genot(tmp_path):
+    """Combinations train + predict with the GENOT solver (different velocity field path)."""
+    coll_path, rep_path, n_vars = _combo_collection_with_nulls(tmp_path)
+    model = ScaleFlow(solver="genot")
+    model.prepare_data(
+        coll_path, dist_flag_key="control", src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"}, rep_path=rep_path,
+    )
+    model.prepare_model(
+        condition_embedding_dim=8, time_freqs=8, time_encoder_dims=(16,),
+        hidden_dims=(16,), decoder_dims=(16,),
+        vf_kwargs={"genot_source_dims": (16, 16), "genot_source_dropout": 0.1}, seed=0,
+    )
+    assert model.vf.max_combination_length == 2
+    model.train(num_iterations=2, batch_size=16, chunk_size=4, valid_freq=1000)
+    assert model.solver.is_trained and all(np.isfinite(model.trainer.training_logs["loss"]))
+    cov = pd.DataFrame({"cell_line": ["cl0"], "drug_1": ["dA"], "drug_2": ["dB"]})
+    preds = model.predict_covariates(cov, rep_path=rep_path, max_steps=3, throw=False)
+    assert np.all(np.isfinite(np.asarray(next(iter(preds.values())))))
+
+
+@pytest.mark.slow
 def test_scaleflow_with_validation(adata_test, tmp_path):
     """A registered validation split produces a logged validation metric during training."""
     rep_path = tmp_path / "uns.zarr"
