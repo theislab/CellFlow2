@@ -1,12 +1,26 @@
 """annbatch-backed training sampler for GroupedDistribution.
 
-Streams *target* (perturbed) cells from an :class:`annbatch.DatasetCollection`, one
-batch per step, while keeping the *source* (control) populations in an in-memory cache.
+Streams *target* (perturbed) cells from an :class:`annbatch.DatasetCollection` with
+annbatch's :class:`~annbatch.samplers.ClassSampler`, one class-coherent batch per step,
+while keeping the *source* (control) populations in an in-memory cache.
 
-Why asymmetric? Control populations are few and reused by every condition, so caching
-them is cheap and avoids re-reading them from disk every step; the many target
-conditions are streamed lazily. This also keeps a single annbatch ``Loader`` emitting
-exactly one batch per request (no src/tgt split-pairing).
+Each training step draws a target condition ``c_t ~ Categorical(weights)`` and reads a
+``chunk_size``-aligned batch of that condition's cells from disk via ``ClassSampler``;
+the matched source population (``tgt -> src`` via ``src_to_tgt_dist_map``) is sampled from
+the in-memory :class:`SourceCache`, and ``conditions[c_t]`` is attached. The condition of
+each emitted batch is recovered from its global row indices (``return_index=True``) through
+a row->tgt lookup -- ``ClassSampler`` batches are single-class, so any one row identifies
+the whole batch.
+
+ON-DISK REQUIREMENT: ``ClassSampler`` reads contiguous ``chunk_size`` slices within each
+class's run, so the collection must be laid out with **each condition's cells contiguous**
+(write it with :func:`write_sorted_collection`), and every *sampled* condition must have at
+least ``chunk_size`` cells -- otherwise construction raises (the run-length rule). Condition
+pairing itself is recovered from row indices and stays correct regardless of on-disk order;
+the sort only governs whether ``ClassSampler`` accepts the layout and read efficiency.
+
+Why asymmetric? Control populations are few and reused by every condition, so caching them
+is cheap and avoids re-reading them every step; the many target conditions are streamed.
 
 ASSUMPTION: all source/control cells fit in memory. There is intentionally no fallback;
 if they do not fit, this sampler is not the right tool.
@@ -18,16 +32,30 @@ is densified here). Densifying, if needed, is a model-boundary decision.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from annbatch import Loader
 from annbatch.abc import Sampler
+from annbatch.samplers import ClassSampler
 
 from scaleflow.data._data import GroupedDistribution
 from scaleflow.data._dataloader import SamplerABC
 
-__all__ = ["GroupedAnnbatchSampler", "PredictionSampler", "SourceCache", "ValidationSampler"]
+__all__ = [
+    "GroupedAnnbatchSampler",
+    "PredictionSampler",
+    "SourceCache",
+    "ValidationSampler",
+    "write_sorted_collection",
+]
+
+# Sentinel category for obs rows that are never sampled (controls + non-split targets).
+# It is assigned class weight 0, which ClassSampler excludes and exempts from the
+# run-length rule.
+_EXCLUDED_CLASS = "__excluded__"
 
 
 def _open_collection(collection: Any) -> Any:
@@ -127,13 +155,44 @@ class SourceCache:
 class GroupedAnnbatchSampler(SamplerABC):
     """Training sampler yielding matched (source, target, condition) batches.
 
-    Per step: a category RNG picks a target distribution (condition) ``c_t`` (uniform
-    over conditions by default); annbatch streams ``batch_size`` target cells for ``c_t``;
-    the corresponding source population (``tgt -> src`` via ``src_to_tgt_dist_map``) is
-    sampled from the in-memory :class:`SourceCache`; and ``conditions[c_t]`` is attached.
+    Target cells are streamed with annbatch's :class:`~annbatch.samplers.ClassSampler`:
+    each step it draws a target condition ``c_t ~ Categorical(weights)`` and reads a
+    ``chunk_size``-aligned batch of that condition's cells from disk. The matched source
+    population (``tgt -> src`` via ``src_to_tgt_dist_map``) is sampled from the in-memory
+    :class:`SourceCache`, and ``conditions[c_t]`` is attached. The condition of each emitted
+    batch is recovered from its global row indices (``return_index=True``) via a row->tgt
+    lookup; ClassSampler batches are single-class, so any one row identifies the batch.
 
-    The category, target-cell, and source-cell RNGs are independent streams spawned from
-    one seed, so the full (source, target) pairing sequence is reproducible.
+    The ClassSampler and source-cell RNGs are independent streams spawned from one seed, so
+    the full (source, target) pairing sequence is reproducible.
+
+    On-disk requirement: ClassSampler reads contiguous ``chunk_size`` slices within each
+    condition's run, so the collection must be laid out with each condition's cells
+    contiguous (use :func:`write_sorted_collection`) and every *sampled* condition must have
+    at least ``chunk_size`` cells -- otherwise construction raises.
+
+    Parameters
+    ----------
+    collection
+        An :class:`annbatch.DatasetCollection` or a path to one (cells sorted by condition).
+    grouped_distribution
+        The :class:`~scaleflow.data.GroupedDistribution` (or a split of one) describing the
+        sampleable target conditions and their source mapping / embeddings.
+    batch_size
+        Number of cells per emitted batch (source and target alike).
+    chunk_size
+        ClassSampler read-slice size. Must be <= every sampled condition's cell count and
+        ``chunk_size * preload_nchunks`` must be divisible by ``batch_size``.
+    preload_nchunks
+        Number of chunks loaded per ClassSampler window. ``None`` auto-picks a small valid
+        value (a multiple of ``batch_size // gcd(chunk_size, batch_size)``).
+    seed
+        Seed for the (independent) class-selection and source-cell RNG streams.
+    weights
+        Optional sampling weight per sampleable target condition (in ``_tgt_idx_order``
+        order); uniform if ``None``. Non-negative; renormalized by ClassSampler.
+    condition_transform
+        Optional callable applied to each condition dict before it is returned.
 
     Yields the standard batch contract: ``{"src_cell_data", "tgt_cell_data", "condition"}``.
     """
@@ -144,15 +203,21 @@ class GroupedAnnbatchSampler(SamplerABC):
         grouped_distribution: GroupedDistribution,
         *,
         batch_size: int = 1024,
+        chunk_size: int,
+        preload_nchunks: int | None = None,
         seed: int = 0,
         weights: np.ndarray | None = None,
         condition_transform=None,
+        n_batches_per_pass: int = 4096,
     ) -> None:
         self._collection = collection
         self._gd = grouped_distribution
         self.batch_size = batch_size
+        self._chunk_size = int(chunk_size)
+        self._preload_nchunks = preload_nchunks
         self._seed = seed
         self._condition_transform = condition_transform
+        self._n_batches_per_pass = int(n_batches_per_pass)
 
         data = grouped_distribution.data
         self._conditions = data.conditions
@@ -178,47 +243,89 @@ class GroupedAnnbatchSampler(SamplerABC):
             weights = np.asarray(weights, dtype=float)
             if weights.shape[0] != len(self._tgt_idx_order):
                 raise ValueError("weights must have one entry per sampleable target distribution.")
-            weights = weights / weights.sum()
+            if (weights < 0).any():
+                raise ValueError("weights must be non-negative.")
         self._weights = weights
 
         self._initialized = False
-        # the target sampler records the c_t it emitted, consumed in lockstep by sample()
-        self._schedule: list[int] = []
-        self._step = 0
+
+    def _resolve_preload_nchunks(self) -> int:
+        """Pick (or validate) a ``preload_nchunks`` that tiles ``batch_size`` cleanly."""
+        if self._preload_nchunks is not None:
+            return int(self._preload_nchunks)
+        # group_chunks = batch_size // gcd(chunk, batch); chunk*group_chunks == lcm, a clean
+        # multiple of batch_size. A few groups per window lets ClassSampler pack several
+        # classes into one read while keeping divisibility.
+        group_chunks = self.batch_size // math.gcd(self._chunk_size, self.batch_size)
+        return group_chunks * 4
 
     def init_sampler(self) -> None:
         if self._initialized:
             raise ValueError("Sampler already initialized. Call init_sampler() only once.")
         coll = _open_collection(self._collection)
 
-        # in-memory source cache
+        # in-memory source cache (one-time reads; scattered rows are fine here)
         self._source_cache = SourceCache(coll, self._src_dist_to_rows)
 
-        # independent reproducible rng streams: category, target cells, source cells
-        cat_ss, tgt_ss, src_ss = np.random.SeedSequence(self._seed).spawn(3)
-        self._cat_rng = np.random.default_rng(cat_ss)
-        self._tgt_cell_rng = np.random.default_rng(tgt_ss)
+        # independent reproducible rng streams: class selection (ClassSampler), source cells
+        cls_ss, src_ss = np.random.SeedSequence(self._seed).spawn(2)
         self._src_cell_rng = np.random.default_rng(src_ss)
 
-        tgt_idxs = np.asarray(self._tgt_idx_order)
-        bs = self.batch_size
+        # total obs in the collection. old_obs_index spans every collection row and is shared
+        # by all splits, so this is the loader's n_obs without touching the store.
+        n_obs = int(len(self._gd.annotation.old_obs_index))
 
-        def _requests():
-            # Infinite stream of target requests. The annbatch Loader processes requests
-            # sequentially (one split each), so the t-th yielded batch corresponds to the
-            # t-th c_t recorded here — sample() reads self._schedule in lockstep.
-            while True:
-                c_t = int(self._cat_rng.choice(tgt_idxs, p=self._weights))
-                rows = self._tgt_dist_to_rows[c_t]
-                sel = self._tgt_cell_rng.integers(0, rows.shape[0], size=bs)
-                self._schedule.append(c_t)
-                yield {"requests": np.asarray(rows[sel], dtype=np.int64), "splits": [np.arange(bs)]}
+        # hard-error: every *sampled* condition (positive weight) must hold at least one full
+        # chunk. Zero-weighted conditions are excluded by ClassSampler and exempt from the rule.
+        if self._weights is None:
+            sampled = set(self._tgt_idx_order)
+        else:
+            sampled = {t for t, w in zip(self._tgt_idx_order, self._weights, strict=True) if w > 0}
+        too_small = [
+            t for t in self._tgt_idx_order if t in sampled and len(self._tgt_dist_to_rows[t]) < self._chunk_size
+        ]
+        if too_small:
+            labels = "; ".join("(" + ", ".join(_cond_key(self._gd.annotation, t)) + ")" for t in too_small)
+            raise ValueError(
+                f"{len(too_small)} target condition(s) have fewer than chunk_size={self._chunk_size} cells, "
+                f"which annbatch.ClassSampler cannot sample (run-length rule): {labels}. "
+                "Lower chunk_size, or remove these conditions from the GroupedDistribution."
+            )
 
-        sampler = _ExplicitRequestSampler(_requests(), batch_size=bs, n_batches=2**31 - 1)
-        loader = Loader(batch_sampler=sampler, return_index=False, to_torch=False, preload_to_gpu=False)
-        loader = loader.use_collection(coll)
-        self._loader = loader
-        self._iter = iter(loader)
+        # classes over all obs: sampleable targets -> their own category, everything else
+        # (controls + non-split targets) -> the excluded sentinel (weight 0).
+        categories = [str(t) for t in self._tgt_idx_order] + [_EXCLUDED_CLASS]
+        excluded_code = len(self._tgt_idx_order)
+        codes = np.full(n_obs, excluded_code, dtype=np.int64)
+        self._row_to_tgt = np.full(n_obs, -1, dtype=np.int64)
+        for code, t in enumerate(self._tgt_idx_order):
+            rows = self._tgt_dist_to_rows[t]
+            codes[rows] = code
+            self._row_to_tgt[rows] = t
+        classes = pd.Categorical.from_codes(codes, categories=categories)
+
+        # class weights aligned to categories; sentinel -> 0 (excluded)
+        tgt_w = np.ones(len(self._tgt_idx_order), dtype=float) if self._weights is None else self._weights
+        class_weights = np.concatenate([np.asarray(tgt_w, dtype=float), [0.0]])
+
+        self._preload_nchunks = self._resolve_preload_nchunks()
+        # num_samples bounds each loader pass (ClassSampler precomputes ~num_samples/chunk_size
+        # eagerly). sample() restarts the iterator on exhaustion for an effectively infinite,
+        # reproducible stream; this is internal chunking and does not change the distribution.
+        num_samples = self._n_batches_per_pass * self.batch_size
+        class_sampler = ClassSampler(
+            chunk_size=self._chunk_size,
+            preload_nchunks=self._preload_nchunks,
+            batch_size=self.batch_size,
+            classes=classes,
+            num_samples=num_samples,
+            class_weights=class_weights,
+            drop_last=True,  # every emitted batch is exactly batch_size (matches source n)
+            rng=np.random.default_rng(cls_ss),
+        )
+        loader = Loader(batch_sampler=class_sampler, return_index=True, to_torch=False, preload_to_gpu=False)
+        self._loader = loader.use_collection(coll)
+        self._iter = iter(self._loader)
         self._initialized = True
 
     @property
@@ -231,11 +338,15 @@ class GroupedAnnbatchSampler(SamplerABC):
         # stays compatible (init only runs once).
         if not self._initialized:
             self.init_sampler()
-        batch = next(self._iter)
-        # lockstep with the target request stream (one batch per emitted request)
-        c_t = self._schedule[self._step]
-        self._step += 1
+        try:
+            batch = next(self._iter)
+        except StopIteration:
+            # one ClassSampler pass exhausted; restart for the next block of batches
+            self._iter = iter(self._loader)
+            batch = next(self._iter)
 
+        # ClassSampler batches are single-class: any row identifies the whole batch's condition
+        c_t = int(self._row_to_tgt[int(np.asarray(batch["index"])[0])])
         src_idx = self._tgt_to_src[c_t]
         src_batch = self._source_cache.sample(src_idx, self.batch_size, self._src_cell_rng)
         cond = self._conditions[c_t]
@@ -370,3 +481,55 @@ class PredictionSampler(SamplerABC):
     @property
     def data(self) -> GroupedDistribution:
         return self._data
+
+
+def write_sorted_collection(
+    adata: Any,
+    collection_path: str,
+    *,
+    dist_flag_key: str,
+    src_dist_keys: list[str],
+    tgt_dist_keys: list[str],
+    sorted_adata_path: str | None = None,
+    **add_adatas_kwargs: Any,
+) -> str:
+    """Write ``adata`` to an :class:`annbatch.DatasetCollection` sorted by condition.
+
+    Sorts ``adata`` by ``[dist_flag_key, *src_dist_keys, *tgt_dist_keys]`` (the same key
+    order :class:`~scaleflow.data.DataManager` uses to group cells into distributions) so
+    that every ``(src, tgt)`` condition becomes a single contiguous run on disk, then adds
+    it to the collection unshuffled. This is the layout
+    :class:`GroupedAnnbatchSampler` / :class:`annbatch.samplers.ClassSampler` require.
+
+    Parameters
+    ----------
+    adata
+        In-memory :class:`anndata.AnnData` to write.
+    collection_path
+        Path of the :class:`annbatch.DatasetCollection` to create/append to.
+    dist_flag_key, src_dist_keys, tgt_dist_keys
+        The distribution keys (must match the :class:`~scaleflow.data.DataManager` config).
+    sorted_adata_path
+        Where to write the intermediate sorted AnnData (a zarr store). Defaults to
+        ``f"{collection_path}.sorted_adata.zarr"``.
+    add_adatas_kwargs
+        Extra keyword arguments forwarded to
+        :meth:`annbatch.DatasetCollection.add_adatas` (``shuffle`` is forced to ``False``).
+
+    Returns
+    -------
+    The ``collection_path`` written to.
+    """
+    from annbatch import DatasetCollection
+
+    sort_cols = [dist_flag_key, *src_dist_keys, *tgt_dist_keys]
+    order = adata.obs.sort_values(sort_cols, kind="stable").index
+    adata_sorted = adata[order].copy()
+
+    if sorted_adata_path is None:
+        sorted_adata_path = f"{collection_path}.sorted_adata.zarr"
+    adata_sorted.write_zarr(str(sorted_adata_path))
+
+    coll = DatasetCollection(str(collection_path), mode="a")
+    coll.add_adatas(adata_paths=[str(sorted_adata_path)], **{"shuffle": False, **add_adatas_kwargs})
+    return str(collection_path)

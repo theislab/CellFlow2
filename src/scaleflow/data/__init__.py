@@ -3,6 +3,7 @@ from scaleflow.data._annbatch_sampler import (
     PredictionSampler,
     SourceCache,
     ValidationSampler,
+    write_sorted_collection,
 )
 from scaleflow.data._anndata_location import AnnDataLocation
 from scaleflow.data._batch_utils import (
@@ -28,6 +29,7 @@ __all__ = [
     "GroupedDistributionAnnotation",
     "GroupedAnnbatchSampler",
     "SourceCache",
+    "write_sorted_collection",
     "CombinedSampler",
     "PredictionSampler",
     "ValidationSampler",

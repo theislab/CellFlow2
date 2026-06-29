@@ -319,7 +319,7 @@ class ConditionalVelocityField(nn.Module):
         Returns
         -------
             Learnt mean and log-variance of the condition embedding.
-            If :attr:`scaleflow.model.CellFlow.condition_mode` is ``'deterministic'``, the log-variance
+            If :attr:`scaleflow.model.ScaleFlow.condition_mode` is ``'deterministic'``, the log-variance
             is set to zero.
         """
         condition_mean, condition_logvar = self.condition_encoder(condition, training=False)

@@ -38,7 +38,7 @@ def plot_condition_embedding(
         df
             A :class:`pandas.DataFrame` with embedding and metadata. Column names of
             embedding dimensions should be consecutive integers starting from 0,
-            e.g. as output from :meth:`~scaleflow.model.CellFlow.get_condition_embedding`, and
+            e.g. as output from :meth:`~scaleflow.model.ScaleFlow.get_condition_embedding`, and
             metadata should be in columns with strings.
         embedding
             Embedding to plot. Options are "raw_embedding", "UMAP", "PCA", "Kernel_PCA".

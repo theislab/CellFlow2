@@ -1,4 +1,6 @@
 # Registry of prebuilt zarr GroupedDistributions (selected via selected_datasets).
 tahoe:
   path: /storage/pancellflow/tahoe_updated.zarr
+  # Sorted DatasetCollection of cells; must be built sorted-by-condition via scaleflow.data.write_sorted_collection.
+  collection: /storage/pancellflow/tahoe_updated_collection.zarr
   seed: 42

@@ -1,4 +1,6 @@
 # Registry of prebuilt zarr GroupedDistributions (selected via selected_datasets).
 sciplex:
   path: /storage/pancellflow/sciplex3.zarr
+  # Sorted DatasetCollection of cells; must be built sorted-by-condition via scaleflow.data.write_sorted_collection.
+  collection: /storage/pancellflow/sciplex3_collection.zarr
   seed: 42

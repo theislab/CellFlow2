@@ -41,12 +41,15 @@ __all__ = ["ScaleFlow"]
 
 
 class ScaleFlow:
-    """CellFlow but with multiple datasets.
+    """Perturbation-prediction model (Flow Matching / Optimal Transport) over on-disk data.
+
+    Cells are streamed from an :class:`annbatch.DatasetCollection` via
+    :class:`~scaleflow.data.GroupedAnnbatchSampler` (annbatch ``ClassSampler``), so training
+    scales beyond memory and across multiple datasets. Use :meth:`prepare_data` (a collection
+    path), :meth:`prepare_model`, then :meth:`train`.
 
     Parameters
     ----------
-        adata
-            An :class:`~anndata.AnnData` object to extract the training data from.
         solver
             Solver to use for training. Either ``'otfm'``, ``'genot'`` or ``'eqm'``.
     """
@@ -146,12 +149,33 @@ class ScaleFlow:
             collection, rep_path=rep_path, rep_dict=rep_dict, verbose=verbose
         )
 
-    def make_dataloader(self, *, batch_size: int = 1024, seed: int = 0, **kwargs: Any) -> GroupedAnnbatchSampler:
-        """Build an annbatch-backed training sampler over the prepared collection."""
+    def make_dataloader(
+        self,
+        *,
+        batch_size: int = 1024,
+        chunk_size: int,
+        preload_nchunks: int | None = None,
+        seed: int = 0,
+        **kwargs: Any,
+    ) -> GroupedAnnbatchSampler:
+        """Build an annbatch-backed training sampler over the prepared collection.
+
+        ``chunk_size`` is the annbatch ``ClassSampler`` read-slice size; it must be <= every
+        trained condition's cell count and ``chunk_size * preload_nchunks`` must be divisible
+        by ``batch_size`` (see :class:`~scaleflow.data.GroupedAnnbatchSampler`). The collection
+        must be written sorted by condition (see
+        :func:`~scaleflow.data.write_sorted_collection`).
+        """
         if self.train_data is None or getattr(self, "_train_collection", None) is None:
             raise ValueError("Call `prepare_data` first.")
         return GroupedAnnbatchSampler(
-            self._train_collection, self.train_data, batch_size=batch_size, seed=seed, **kwargs
+            self._train_collection,
+            self.train_data,
+            batch_size=batch_size,
+            chunk_size=chunk_size,
+            preload_nchunks=preload_nchunks,
+            seed=seed,
+            **kwargs,
         )
 
     @staticmethod
@@ -395,11 +419,11 @@ class ScaleFlow:
         -------
         Updates the following fields:
 
-        - :attr:`scaleflow.model.CellFlow.velocity_field` - an instance of the
+        - :attr:`scaleflow.model.ScaleFlow.velocity_field` - an instance of the
           :class:`scaleflow.networks.ConditionalVelocityField`.
-        - :attr:`scaleflow.model.CellFlow.solver` - an instance of :class:`scaleflow.solvers.OTFlowMatching`
+        - :attr:`scaleflow.model.ScaleFlow.solver` - an instance of :class:`scaleflow.solvers.OTFlowMatching`
           or :class:`scaleflow.solvers.GENOT`.
-        - :attr:`scaleflow.model.CellFlow.trainer` - an instance of the
+        - :attr:`scaleflow.model.ScaleFlow.trainer` - an instance of the
           :class:`scaleflow.training.CellFlowTrainer`.
         """
 
@@ -572,15 +596,13 @@ class ScaleFlow:
         self,
         num_iterations: int,
         batch_size: int = 1024,
+        chunk_size: int | None = None,
+        preload_nchunks: int | None = None,
         valid_freq: int = 1000,
-        validation_batch_size: int | None = None,
         callbacks: Sequence[BaseCallback] = [],
         monitor_metrics: Sequence[str] = [],
         train_dataloader: SamplerABC | None = None,
         val_dataloader: SamplerABC | None = None,
-        out_of_core_dataloading: bool = False,
-        num_workers: int = 8,
-        prefetch_factor: int = 4,
     ) -> None:
         """Train the model.
 
@@ -598,6 +620,15 @@ class ScaleFlow:
             Number of iterations to train the model.
         batch_size
             Batch size.
+        chunk_size
+            annbatch ``ClassSampler`` read-slice size for the default training sampler.
+            Required when ``train_dataloader`` is not supplied. Must be <= every trained
+            condition's cell count and ``chunk_size * preload_nchunks`` must be divisible by
+            ``batch_size``. The collection must be written sorted by condition (see
+            :func:`~scaleflow.data.write_sorted_collection`).
+        preload_nchunks
+            Number of chunks loaded per ``ClassSampler`` window (``None`` auto-picks a valid
+            value).
         valid_freq
             Frequency of validation.
         callbacks
@@ -608,16 +639,20 @@ class ScaleFlow:
               e.g. :class:`~scaleflow.training.WandbLogger`.
         monitor_metrics
             Metrics to monitor.
-        out_of_core_dataloading
-            If :obj:`True`, use out-of-core dataloading. Uses the :class:`scaleflow.data.JaxOutOfCoreTrainSampler`
-            to load data that does not fit into GPU memory.
+        train_dataloader
+            Optional pre-built training sampler. If ``None``, a
+            :class:`~scaleflow.data.GroupedAnnbatchSampler` is built over the prepared
+            collection (``chunk_size`` is then required).
+        val_dataloader
+            Optional mapping of validation samplers. If ``None``, one
+            :class:`~scaleflow.data.ValidationSampler` is built per registered validation split.
 
         Returns
         -------
         Updates the following fields:
 
-        - :attr:`scaleflow.model.CellFlow.dataloader` - the training dataloader.
-        - :attr:`scaleflow.model.CellFlow.solver` - the trained solver.
+        - :attr:`scaleflow.model.ScaleFlow.dataloader` - the training dataloader.
+        - :attr:`scaleflow.model.ScaleFlow.solver` - the trained solver.
         """
 
         if self.trainer is None:
@@ -626,7 +661,19 @@ class ScaleFlow:
         # Build the annbatch-backed training sampler over the prepared collection if
         # the caller did not provide one.
         if train_dataloader is None:
-            train_dataloader = self.make_dataloader(batch_size=batch_size, seed=getattr(self, "_seed", 0))
+            if chunk_size is None:
+                raise ValueError(
+                    "`chunk_size` is required when training builds the default annbatch sampler. "
+                    "It is the ClassSampler read-slice size and must be <= every trained condition's "
+                    "cell count (see GroupedAnnbatchSampler). Pass `chunk_size=...` to `train`, or supply "
+                    "a `train_dataloader`."
+                )
+            train_dataloader = self.make_dataloader(
+                batch_size=batch_size,
+                chunk_size=chunk_size,
+                preload_nchunks=preload_nchunks,
+                seed=getattr(self, "_seed", 0),
+            )
         self._dataloader = train_dataloader
 
         # Build annbatch-backed validation samplers from registered validation splits.
@@ -823,7 +870,7 @@ class ScaleFlow:
         """
         Save the model.
 
-        Pickles the :class:`~scaleflow.model.CellFlow` object.
+        Pickles the :class:`~scaleflow.model.ScaleFlow` object.
 
         Parameters
         ----------
@@ -854,9 +901,9 @@ class ScaleFlow:
     def load(
         cls,
         filename: str,
-    ) -> "CellFlow":
+    ) -> "ScaleFlow":
         """
-        Load a :class:`~scaleflow.model.CellFlow` model from a saved instance.
+        Load a :class:`~scaleflow.model.ScaleFlow` model from a saved instance.
 
         Parameters
         ----------
@@ -904,7 +951,7 @@ class ScaleFlow:
 
     @property
     def data_manager(self) -> DataManager:
-        """The data manager, initialised with :attr:`scaleflow.model.CellFlow.adata`."""
+        """The data manager, initialised with :attr:`scaleflow.model.ScaleFlow.adata`."""
         return self._dm
 
     @property

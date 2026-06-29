@@ -51,8 +51,13 @@ import numpy as np
 import optax
 from tqdm import tqdm
 
-from scaleflow.data import GroupedDistribution, split_datasets
-from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
+from scaleflow.data import (
+    CombinedSampler,
+    GroupedAnnbatchSampler,
+    GroupedDistribution,
+    ValidationSampler,
+    split_datasets,
+)
 from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
 from scaleflow.training._callbacks import ComputationCallback
@@ -74,6 +79,12 @@ from scaleflow.metrics._metrics import (
 # ─────────────────────────────────────────────────────────────────────────────
 CONFIG_DIR       = Path(__file__).resolve().parent          # experiments/
 BASE_CONFIG_PATH = CONFIG_DIR / "base.yaml"
+
+# ── annbatch streaming ──────────────────────────────────────────────────────
+# ClassSampler read-slice size. Must be <= the smallest *trained* condition's
+# cell count (annbatch's run-length rule), and chunk_size * preload_nchunks must
+# be divisible by batch_size (preload_nchunks=None auto-picks a valid value).
+CHUNK_SIZE = 256
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -178,7 +189,7 @@ def _parse_cli_value(val: str) -> Any:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ConditionTransform — replaces wrapper sampler classes
-# Passed directly into ReservoirSampler and ValidationSampler.
+# Passed directly into GroupedAnnbatchSampler and ValidationSampler.
 # ─────────────────────────────────────────────────────────────────────────────
 class ConditionTransform:
     """Transforms condition dicts at sample time.
@@ -232,8 +243,10 @@ def print_dataset_stats(gd: GroupedDistribution, label: str = "Full dataset") ->
     ann  = gd.annotation
     data = gd.data
 
-    n_src = len(data.src_data)
-    n_tgt = len(data.tgt_data)
+    # GroupedDistribution is metadata-only now: per-condition row indices into the
+    # collection (cell matrices live in the DatasetCollection, not here).
+    n_src = len(data.src_dist_to_rows)
+    n_tgt = len(data.tgt_dist_to_rows)
 
     src_labels = list(ann.src_dist_idx_to_labels.values())
     tgt_labels = list(ann.tgt_dist_idx_to_labels.values())
@@ -248,8 +261,8 @@ def print_dataset_stats(gd: GroupedDistribution, label: str = "Full dataset") ->
         for lbl in tgt_labels
     })
 
-    src_sizes = [v.shape[0] for v in data.src_data.values()]
-    tgt_sizes = [v.shape[0] for v in data.tgt_data.values()]
+    src_sizes = [len(rows) for rows in data.src_dist_to_rows.values()]
+    tgt_sizes = [len(rows) for rows in data.tgt_dist_to_rows.values()]
     cond_keys = list(next(iter(data.conditions.values())).keys()) if data.conditions else []
 
     print(f"\n{'─'*60}")
@@ -290,11 +303,11 @@ def print_split_stats(train_gd, val_gd, test_gd, split_by: str) -> None:
 
     print(f"\n  Split (by {split_by})")
     print(f"    {'':8}  {'conditions':>10}  {'drugs':>6}  {'cell lines':>10}")
-    print(f"    {'Train':8}  {len(train_gd.data.tgt_data):>10}  {len(tr_drugs):>6}  "
+    print(f"    {'Train':8}  {len(train_gd.data.tgt_dist_to_rows):>10}  {len(tr_drugs):>6}  "
           f"{len(tr_cls):>10}  {sorted(tr_cls)}")
-    print(f"    {'Val':8}  {len(val_gd.data.tgt_data):>10}  {len(va_drugs):>6}  "
+    print(f"    {'Val':8}  {len(val_gd.data.tgt_dist_to_rows):>10}  {len(va_drugs):>6}  "
           f"{len(va_cls):>10}  {sorted(va_cls)}")
-    print(f"    {'Test':8}  {len(test_gd.data.tgt_data):>10}  {len(te_drugs):>6}  "
+    print(f"    {'Test':8}  {len(test_gd.data.tgt_dist_to_rows):>10}  {len(te_drugs):>6}  "
           f"{len(te_cls):>10}  {sorted(te_cls)}")
 
 
@@ -427,13 +440,30 @@ class BestModelCheckpoint(ComputationCallback):
 # ─────────────────────────────────────────────────────────────────────────────
 # Data helpers
 # ─────────────────────────────────────────────────────────────────────────────
-def _dataset_specs(cfg: dict) -> list[tuple[str, str, int, float]]:
-    """Return [(name, zarr_path, seed, weight), ...].
+def _collection_path_for(gd_path: str) -> str:
+    """Derive a dataset's sorted DatasetCollection path from its GD-metadata path.
 
-    Datasets are declared in cfg['datasets'] = {name: {path, seed?, weight?}}
+    The GroupedDistribution zarr now holds metadata only; cells are streamed from a
+    sorted ``annbatch.DatasetCollection`` (built via ``scaleflow.data.write_sorted_collection``)
+    that must live alongside the GD store. Mirroring the GD path, ``foo.zarr`` →
+    ``foo_collection.zarr`` in the same directory. Override per dataset with a
+    ``collection:`` key in the registry entry.
+    """
+    p = Path(gd_path)
+    return str(p.with_name(f"{p.stem}_collection{p.suffix}"))
+
+
+def _dataset_specs(cfg: dict) -> list[tuple[str, str, str, int, float]]:
+    """Return [(name, zarr_path, collection_path, seed, weight), ...].
+
+    Datasets are declared in cfg['datasets'] = {name: {path, collection?, seed?, weight?}}
     and chosen by name via cfg['selected_datasets'] = [name, ...]. This holds
     for both single- and multi-dataset training (single = one entry).
     A legacy single 'zarr_path' is still honoured as a last-resort fallback.
+
+    ``collection_path`` is the sorted DatasetCollection paired with the GD (cells are
+    streamed from it); it defaults to ``_collection_path_for(path)`` and may be overridden
+    per dataset via a ``collection:`` key.
     """
     sel = cfg.get("selected_datasets")
     if sel:
@@ -445,9 +475,11 @@ def _dataset_specs(cfg: dict) -> list[tuple[str, str, int, float]]:
                     f"cfg['datasets'] (have: {list((cfg.get('datasets') or {}).keys())})"
                 )
             info = cfg["datasets"][name]
+            gd_path = str(info["path"])
             specs.append((
                 str(name),
-                str(info["path"]),
+                gd_path,
+                str(info.get("collection", _collection_path_for(gd_path))),
                 int(info.get("seed", cfg["seed"])),
                 float(info.get("weight", 1.0)),
             ))
@@ -459,20 +491,21 @@ def _dataset_specs(cfg: dict) -> list[tuple[str, str, int, float]]:
             "No datasets configured. Set 'selected_datasets' (+ 'datasets' registry) "
             "in experiments/base.yaml, or provide a single 'zarr_path'."
         )
-    return [("gd", str(zarr_path), int(cfg["seed"]), 1.0)]
+    return [("gd", str(zarr_path), _collection_path_for(str(zarr_path)), int(cfg["seed"]), 1.0)]
 
 
 def make_split(cfg: dict) -> dict:
     """Read & split each selected dataset.
 
-    Returns {name: {"train": gd, "val": gd, "test": gd, "seed": int, "weight": float}}.
+    Returns {name: {"train": gd, "val": gd, "test": gd, "collection": path,
+                    "seed": int, "weight": float}}.
     """
     split_by = cfg["split"]["by"]
     ratios   = cfg["split"]["ratios"]
 
     out: dict = {}
-    for name, path, seed, weight in _dataset_specs(cfg):
-        print(f"  reading [{name}] ← {path}")
+    for name, path, collection, seed, weight in _dataset_specs(cfg):
+        print(f"  reading [{name}] ← {path}  (collection ← {collection})")
         gd = GroupedDistribution.read_zarr(Path(path))
         print_dataset_stats(gd, f"Full dataset [{name}]")
         splits = split_datasets(
@@ -488,7 +521,7 @@ def make_split(cfg: dict) -> dict:
         test_gd  = splits[name]["test"]
         print_split_stats(train_gd, val_gd, test_gd, split_by)
         out[name] = {"train": train_gd, "val": val_gd, "test": test_gd,
-                     "seed": seed, "weight": weight}
+                     "collection": collection, "seed": seed, "weight": weight}
     return out
 
 
@@ -501,11 +534,11 @@ def make_samplers(splits: dict, cfg: dict, transform: ConditionTransform | None)
     train_samplers: dict = {}
     weights: dict = {}
     for name, d in splits.items():
-        train_samplers[name] = ReservoirSampler(
-            d["train"], np.random.default_rng(d["seed"]),
+        train_samplers[name] = GroupedAnnbatchSampler(
+            d["collection"], d["train"],
             batch_size=tcfg["batch_size"],
-            pool_fraction=tcfg["pool_fraction"],
-            replacement_prob=tcfg["replacement_prob"],
+            chunk_size=CHUNK_SIZE,
+            seed=d["seed"],
             condition_transform=transform,
         )
         weights[name] = d["weight"]
@@ -514,6 +547,7 @@ def make_samplers(splits: dict, cfg: dict, transform: ConditionTransform | None)
 
     val_samplers = {
         name: ValidationSampler(
+            d["collection"],
             d["val"],
             n_conditions_on_log_iteration=n_val,
             n_conditions_on_train_end=n_val,
@@ -524,6 +558,7 @@ def make_samplers(splits: dict, cfg: dict, transform: ConditionTransform | None)
     }
     test_samplers = {
         name: ValidationSampler(
+            d["collection"],
             d["test"],
             n_conditions_on_log_iteration=None,
             n_conditions_on_train_end=None,

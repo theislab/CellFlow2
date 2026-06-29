@@ -8,6 +8,6 @@ training:
   init_lr:           0.0
   grad_accumulation: 20
   valid_freq:        20000
-  n_val_conditions:  null    
-  pool_fraction:     0.7
-  replacement_prob:  0.5
+  n_val_conditions:  null
+  # annbatch ClassSampler read-slice size; must be <= the smallest trained condition's cell count.
+  chunk_size:        256

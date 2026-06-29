@@ -1,10 +1,22 @@
 import numpy as np
 
-from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution, prepare_datasets, split_datasets
-from scaleflow.data._dataloader import CombinedSampler, InMemorySampler, ReservoirSampler, ValidationSampler
+from scaleflow.data import (
+    AnnDataLocation,
+    DataManager,
+    GroupedDistribution,
+    GroupedAnnbatchSampler,
+    CombinedSampler,
+    ValidationSampler,
+    write_sorted_collection,
+    split_datasets,
+)
 from scaleflow.datasets import sample_adata
 from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
+
+# ClassSampler chunk size; must be <= smallest trained condition's cell count.
+# Synthetic conditions are tiny, so keep this small.
+CHUNK_SIZE = 2
 
 # Create sample data
 print("Creating sample data...")
@@ -24,15 +36,22 @@ data_manager = DataManager(
     data_location=adl.obsm["X_pca"],
 )
 
-# Prepare data
+# Build sorted collections + grouped-distribution metadata from each synthetic adata
 print("Preparing data...")
-gd1_mem = data_manager.prepare_data(adata1)
-gd1_mem.write_zarr("data/gd1.zarr")
-gd1 = GroupedDistribution.read_zarr("data/gd1.zarr")
-del gd1_mem
+collections = {}
+gds = {}
+for i, adata in enumerate((adata1, adata2, adata3), start=1):
+    coll = write_sorted_collection(
+        adata,
+        f"data/coll{i}.zarr",
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys=["drug", "gene"],
+    )
+    collections[f"gd{i}"] = coll
+    gds[f"gd{i}"] = data_manager.prepare_data_from_collection(coll, rep_dict=adata.uns)
 
-gd2 = data_manager.prepare_data(adata2)
-gd3 = data_manager.prepare_data(adata3)
+gd1, gd2, gd3 = gds["gd1"], gds["gd2"], gds["gd3"]
 
 # Split datasets
 print("Splitting datasets...")
@@ -45,11 +64,15 @@ ds1, ds2, ds3 = train_splits["gd1"], train_splits["gd2"], train_splits["gd3"]
 print("Creating samplers...")
 sampler = CombinedSampler(
     samplers={
-        "gd1": ReservoirSampler(
-            gd1, np.random.default_rng(42), batch_size=8, pool_fraction=0.5, replacement_prob=0.1
+        "gd1": GroupedAnnbatchSampler(
+            collections["gd1"], train_splits["gd1"], batch_size=8, chunk_size=CHUNK_SIZE, seed=42
         ),
-        "gd2": InMemorySampler(gd2, np.random.default_rng(43), batch_size=8),
-        "gd3": InMemorySampler(gd3, np.random.default_rng(44), batch_size=8),
+        "gd2": GroupedAnnbatchSampler(
+            collections["gd2"], train_splits["gd2"], batch_size=8, chunk_size=CHUNK_SIZE, seed=43
+        ),
+        "gd3": GroupedAnnbatchSampler(
+            collections["gd3"], train_splits["gd3"], batch_size=8, chunk_size=CHUNK_SIZE, seed=44
+        ),
     },
     rng=np.random.default_rng(42),
 )
@@ -58,18 +81,24 @@ sampler = CombinedSampler(
 
 val_samplers = {
     "gd1": ValidationSampler(
+        collections["gd1"],
         val_splits["gd1"],  # Use one split for validation
-        n_conditions=5,  # Limit to 5 conditions for faster testing
+        n_conditions_on_log_iteration=5,  # Limit to 5 conditions for faster testing
+        n_conditions_on_train_end=5,
         seed=42,
     ),
     "gd2": ValidationSampler(
+        collections["gd2"],
         val_splits["gd2"],  # Use one split for validation
-        n_conditions=5,  # Limit to 5 conditions for faster testing
+        n_conditions_on_log_iteration=5,  # Limit to 5 conditions for faster testing
+        n_conditions_on_train_end=5,
         seed=42,
     ),
     "gd3": ValidationSampler(
+        collections["gd3"],
         val_splits["gd3"],  # Use one split for validation
-        n_conditions=5,  # Limit to 5 conditions for faster testing
+        n_conditions_on_log_iteration=5,  # Limit to 5 conditions for faster testing
+        n_conditions_on_train_end=5,
         seed=42,
     ),
 }

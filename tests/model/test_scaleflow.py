@@ -1,529 +1,201 @@
+"""Tests for the ScaleFlow model over an annbatch-backed (sorted) collection.
+
+ScaleFlow is the only model: cells are streamed from a DatasetCollection via
+GroupedAnnbatchSampler (annbatch ClassSampler), so these tests build a small collection
+sorted by condition and drive prepare_data -> prepare_model -> train -> predict.
+"""
+
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import zarr
 
 import scaleflow
-from scaleflow.networks import _velocity_field
+from scaleflow.data import AnnDataLocation, DataManager, write_sorted_collection
+from scaleflow.data._data_splitter import GroupedDistributionSplitter
+from scaleflow.model import ScaleFlow
 
-perturbation_covariate_comb_args = [
-    {"drug": ["drug1"]},
-    {"drug": ["drug1", "drug2"], "dosage": ["dosage_a", "dosage_b"]},
-    {
-        "drug": ["drug_a", "drug_b", "drug_c"],
-        "dosage": ["dosage_a", "dosage_b", "dosage_c"],
-    },
-]
+# Small read-slice size: <= every condition in adata_test (~27-81 cells per condition).
+CHUNK_SIZE = 8
+REP_KEYS = {"cell_line": "cell_line_embeddings", "drug": "drug_embeddings", "gene": "gene_embeddings"}
 
 
-class TestCellFlow:
-    @pytest.mark.slow
-    @pytest.mark.parametrize("solver", ["otfm", "genot", "eqm"])
-    @pytest.mark.parametrize("condition_mode", ["deterministic", "stochastic"])
-    @pytest.mark.parametrize("regularization", [0.0, 0.1])
-    @pytest.mark.parametrize("conditioning", ["concatenation", "film", "resnet"])
-    def test_scaleflow_solver(
-        self,
-        adata_perturbation,
-        solver,
-        condition_mode,
-        regularization,
-        conditioning,
-    ):
-        if solver in ["genot", "eqm"] and ((condition_mode == "stochastic") or (regularization > 0.0)):
-            return None
-        sample_rep = "X"
-        control_key = "control"
-        perturbation_covariates = {"drug": ["drug1", "drug2"]}
-        perturbation_covariate_reps = {"drug": "drug"}
-        condition_embedding_dim = 32
-        vf_kwargs = {"genot_source_dims": (32, 32), "genot_source_dropout": 0.1} if solver == "genot" else None
+def _write_rep_store(adata, path):
+    g = zarr.open_group(str(path), mode="w")
+    for k in ["cell_line_embeddings", "drug_embeddings", "gene_embeddings"]:
+        ad.io.write_elem(g, k, adata.uns[k])
 
-        cf = scaleflow.model.CellFlow(adata_perturbation, solver=solver)
-        cf.prepare_data(
-            sample_rep=sample_rep,
-            control_key=control_key,
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-        )
-        assert cf.train_data is not None
-        assert hasattr(cf, "_data_dim")
 
-        if regularization == 0.0 and condition_mode == "stochastic":
-            with pytest.raises(
-                ValueError,
-                match=r".*Stochastic condition embeddings require `regularization`>0*",
-            ):
-                cf.prepare_model(
-                    condition_mode=condition_mode,
-                    regularization=regularization,
-                    condition_embedding_dim=condition_embedding_dim,
-                    hidden_dims=(2, 2),
-                    decoder_dims=(2, 2),
-                    vf_kwargs=vf_kwargs,
-                    conditioning=conditioning,
-                )
-            return None
-        cf.prepare_model(
-            condition_mode=condition_mode,
-            regularization=regularization,
-            condition_embedding_dim=condition_embedding_dim,
-            hidden_dims=(2, 2),
-            decoder_dims=(2, 2),
-            vf_kwargs=vf_kwargs,
-            conditioning=conditioning,
-        )
-        assert cf._trainer is not None
-
-        cf.train(num_iterations=3)
-        assert cf._dataloader is not None
-
-        adata_perturbation_pred = adata_perturbation.copy()
-        adata_perturbation_pred.obs["control"] = True
-        predict_kwargs = {"max_steps": 3, "eta": 0.01} if solver == "eqm" else {"max_steps": 3, "throw": False}
-        pred = cf.predict(
-            adata_perturbation_pred,
-            sample_rep=sample_rep,
-            covariate_data=adata_perturbation_pred.obs,
-            **predict_kwargs,
-        )
-        assert isinstance(pred, dict)
-        key, out = next(iter(pred.items()))
-        assert out.shape[0] == adata_perturbation.n_obs
-        assert out.shape[1] == cf._data_dim
-
-        pred_stored = cf.predict(
-            adata_perturbation_pred,
-            sample_rep=sample_rep,
-            covariate_data=adata_perturbation_pred.obs,
-            key_added_prefix="MY_PREDICTION_",
-            **predict_kwargs,
-        )
-
-        assert pred_stored is None
-        if solver in ["otfm", "genot", "eqm"]:
-            assert "MY_PREDICTION_" + str(key) in adata_perturbation_pred.obsm
-
-        if solver == "genot":
-            pred2 = cf.predict(
-                adata_perturbation_pred,
-                sample_rep=sample_rep,
-                covariate_data=adata_perturbation_pred.obs,
-                max_steps=3,
-                throw=False,
-            )
-            assert isinstance(pred2, dict)
-            out = next(iter(pred2.values()))
-            assert out.shape[0] == adata_perturbation.n_obs
-            assert out.shape[1] == cf._data_dim
-
-        conds = adata_perturbation.obs.drop_duplicates(subset=["drug1", "drug2"])
-        cond_embed_mean, cond_embed_var = cf.get_condition_embedding(conds, rep_dict=adata_perturbation.uns)
-        assert isinstance(cond_embed_mean, pd.DataFrame)
-        assert isinstance(cond_embed_var, pd.DataFrame)
-        assert cond_embed_mean.shape[0] == conds.shape[0]
-        assert cond_embed_mean.shape[1] == condition_embedding_dim
-        assert cond_embed_var.shape[0] == conds.shape[0]
-        assert cond_embed_var.shape[1] == condition_embedding_dim
-        assert cond_embed_mean.shape[0] == conds.shape[0]
-        assert cond_embed_mean.shape[1] == condition_embedding_dim
-        assert cond_embed_var.shape[0] == conds.shape[0]
-        assert cond_embed_var.shape[1] == condition_embedding_dim
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("solver", ["otfm", "genot", "eqm"])
-    @pytest.mark.parametrize("perturbation_covariate_reps", [{}, {"drug": "drug"}])
-    def test_scaleflow_covar_reps(
-        self,
-        adata_perturbation,
-        perturbation_covariate_reps,
-        solver,
-    ):
-        sample_rep = "X"
-        control_key = "control"
-        perturbation_covariates = {"drug": ["drug1"]}
-        perturbation_covariate_reps = {"drug": "drug"}
-        condition_embedding_dim = 32
-        vf_kwargs = {"genot_source_dims": (32, 32), "genot_source_dropout": 0.1} if solver == "genot" else None
-
-        cf = scaleflow.model.CellFlow(adata_perturbation, solver=solver)
-        cf.prepare_data(
-            sample_rep=sample_rep,
-            control_key=control_key,
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-        )
-        assert cf.train_data is not None
-        assert hasattr(cf, "_data_dim")
-
-        cf.prepare_model(
-            condition_embedding_dim=condition_embedding_dim,
-            hidden_dims=(2, 2),
-            decoder_dims=(2, 2),
-            vf_kwargs=vf_kwargs,
-        )
-        assert cf._trainer is not None
-
-        if solver == "otfm":
-            vector_field_class = _velocity_field.ConditionalVelocityField
-        elif solver == "genot":
-            vector_field_class = _velocity_field.GENOTConditionalVelocityField
-        else:
-            vector_field_class = _velocity_field.EquilibriumVelocityField
-        assert cf._vf_class == vector_field_class
-        cf.train(num_iterations=3)
-        assert cf._dataloader is not None
-
-        adata_perturbation_pred = adata_perturbation.copy()
-        adata_perturbation_pred.obs["control"] = True
-        predict_kwargs = {"max_steps": 3, "eta": 0.01} if solver == "eqm" else {"max_steps": 3, "throw": False}
-        pred = cf.predict(
-            adata_perturbation_pred,
-            sample_rep=sample_rep,
-            covariate_data=adata_perturbation_pred.obs,
-            **predict_kwargs,
-        )
-        assert isinstance(pred, dict)
-        out = next(iter(pred.values()))
-        assert out.shape[0] == adata_perturbation.n_obs
-        assert out.shape[1] == cf._data_dim
-
-        covs = adata_perturbation.obs.drop_duplicates(subset=["drug1"])
-        out = cf.get_condition_embedding(covariate_data=covs, rep_dict=adata_perturbation.uns)
-        assert isinstance(out, tuple)
-        assert isinstance(out[0], pd.DataFrame)
-        assert isinstance(out[1], pd.DataFrame)
-        assert out[0].shape[0] == len(covs)
-        assert out[0].shape[1] == condition_embedding_dim
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("split_covariates", [[], ["cell_type"]])
-    @pytest.mark.parametrize("perturbation_covariates", perturbation_covariate_comb_args)
-    @pytest.mark.parametrize("n_conditions_on_log_iteration", [None, 0, 2])
-    @pytest.mark.parametrize("n_conditions_on_train_end", [None, 0, 2])
-    def test_scaleflow_val_data_loading(
-        self,
-        adata_perturbation,
-        split_covariates,
-        perturbation_covariates,
-        n_conditions_on_log_iteration,
-        n_conditions_on_train_end,
-    ):
-        cf = scaleflow.model.CellFlow(adata_perturbation)
-        cf.prepare_data(
-            sample_rep="X",
-            control_key="control",
-            split_covariates=split_covariates,
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps={"drug": "drug"},
-        )
-        assert cf.train_data is not None
-        assert hasattr(cf, "_data_dim")
-
-        for k in perturbation_covariates.keys():
-            assert k in cf.train_data.condition_data.keys()
-            assert cf.train_data.condition_data[k].ndim == 3
-            assert cf.train_data.condition_data[k].shape[1] == cf.train_data.max_combination_length
-            assert cf.train_data.condition_data[k].shape[0] == cf.train_data.n_perturbations
-
-        cf.prepare_validation_data(
-            adata_perturbation,
-            name="val",
-            n_conditions_on_log_iteration=n_conditions_on_log_iteration,
-            n_conditions_on_train_end=n_conditions_on_train_end,
-        )
-        assert isinstance(cf._validation_data, dict)
-        assert "val" in cf._validation_data
-        assert isinstance(cf._validation_data["val"].cell_data, np.ndarray)
-        assert isinstance(cf._validation_data["val"].condition_data, dict)
-
-        cond_data = cf._validation_data["val"].condition_data
-        assert cf._validation_data["val"].n_conditions_on_log_iteration == n_conditions_on_log_iteration
-        assert cf._validation_data["val"].n_conditions_on_train_end == n_conditions_on_train_end
-        for k in perturbation_covariates.keys():
-            assert k in cond_data.keys()
-            assert cond_data[k].ndim == 3
-            assert cond_data[k].shape[1] == cf.train_data.max_combination_length
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("solver", ["otfm", "genot", "eqm"])
-    @pytest.mark.parametrize("n_conditions_on_log_iteration", [None, 0, 1])
-    @pytest.mark.parametrize("n_conditions_on_train_end", [None, 0, 1])
-    def test_scaleflow_with_validation(
-        self,
-        adata_perturbation,
-        solver,
-        n_conditions_on_log_iteration,
-        n_conditions_on_train_end,
-    ):
-        vf_kwargs = {"genot_source_dims": (2, 2), "genot_source_dropout": 0.1} if solver == "genot" else None
-        predict_kwargs = {"max_steps": 3, "eta": 0.01} if solver == "eqm" else {"max_steps": 3, "throw": False}
-        cf = scaleflow.model.CellFlow(adata_perturbation, solver=solver)
-        cf.prepare_data(
-            sample_rep="X",
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-            perturbation_covariate_reps={"drug": "drug"},
-        )
-        assert cf.train_data is not None
-        assert hasattr(cf, "_data_dim")
-
-        cf.prepare_validation_data(
-            adata_perturbation,
-            name="val",
-            n_conditions_on_log_iteration=n_conditions_on_log_iteration,
-            n_conditions_on_train_end=n_conditions_on_train_end,
-            predict_kwargs=predict_kwargs,
-        )
-        assert isinstance(cf._validation_data, dict)
-        assert "val" in cf._validation_data
-        assert isinstance(cf._validation_data["val"].cell_data, np.ndarray)
-        assert isinstance(cf._validation_data["val"].condition_data, dict)
-        assert cf._validation_data["val"].max_combination_length == cf.train_data.max_combination_length
-        cond_data = cf._validation_data["val"].condition_data
-        assert "drug" in cond_data.keys()
-        assert cond_data["drug"].ndim == 3
-        assert cond_data["drug"].shape[1] == cf.train_data.max_combination_length
-
-        condition_encoder_kwargs = {}
-        if solver == "genot":
-            condition_encoder_kwargs["genot_source_layers"] = (({"dims": (32, 32)}),)
-            condition_encoder_kwargs["genot_source_dim"] = 32
-
-        cf.prepare_model(
-            condition_embedding_dim=2,
-            hidden_dims=(2, 2),
-            decoder_dims=(2, 2),
-            vf_kwargs=vf_kwargs,
-        )
-        assert cf._trainer is not None
-
-        metric_to_compute = "r_squared"
-        metrics_callback = scaleflow.training.Metrics(metrics=[metric_to_compute])
-
-        cf.train(num_iterations=3, callbacks=[metrics_callback], valid_freq=1)
-        assert cf._dataloader is not None
-        assert f"val_{metric_to_compute}_mean" in cf._trainer.training_logs
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize("solver", ["otfm", "genot", "eqm"])
-    @pytest.mark.parametrize("condition_mode", ["deterministic", "stochastic"])
-    @pytest.mark.parametrize("regularization", [0.0, 0.1])
-    def test_scaleflow_predict(
-        self,
-        adata_perturbation,
-        solver,
-        condition_mode,
-        regularization,
-    ):
-        if solver in ["genot", "eqm"] and ((condition_mode == "stochastic") or (regularization > 0.0)):
-            return None
-        cf = scaleflow.model.CellFlow(adata_perturbation, solver=solver)
-        cf.prepare_data(
-            sample_rep="X",
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"], "cell_type": ["cell_type"]},
-            perturbation_covariate_reps={"drug": "drug", "cell_type": "cell_type"},
-            split_covariates=["cell_type"],
-        )
-
-        vf_kwargs = {"genot_source_dims": (2, 2), "genot_source_dropout": 0.1} if solver == "genot" else None
-        if condition_mode == "stochastic" and regularization == 0.0:
-            with pytest.raises(
-                ValueError,
-                match=r".*Stochastic condition embeddings require `regularization`>0*",
-            ):
-                cf.prepare_model(
-                    condition_mode=condition_mode,
-                    regularization=regularization,
-                    hidden_dims=(2, 2),
-                    decoder_dims=(2, 2),
-                )
-            return None
-        cf.prepare_model(
-            condition_mode=condition_mode,
-            regularization=regularization,
-            condition_embedding_dim=2,
-            hidden_dims=(2, 2),
-            decoder_dims=(2, 2),
-            vf_kwargs=vf_kwargs,
-        )
-
-        cf.train(num_iterations=3)
-
-        adata_pred = adata_perturbation
-        adata_pred.obs["control"] = True
-        covariate_data = adata_perturbation.obs.iloc[:3]
-
-        predict_kwargs = {"max_steps": 3, "eta": 0.01} if solver == "eqm" else {"max_steps": 3, "throw": False}
-        pred = cf.predict(adata_pred, sample_rep="X", covariate_data=covariate_data, **predict_kwargs)
-
-        assert isinstance(pred, dict)
-        out = next(iter(pred.values()))
-        assert out.shape[1] == cf._data_dim
-
-        adata_pred.obs["control"].iloc[0:20] = False
-        with pytest.raises(
-            ValueError,
-            match=r".*If both `adata` and `covariate_data` are given, all samples in `adata` must be control samples*",
-        ):
-            cf.predict(adata_pred, sample_rep="X", covariate_data=covariate_data, **predict_kwargs)
-
-        with pytest.raises(ValueError, match="`covariate_data` is empty."):
-            empty_covariate_data = covariate_data.head(0)
-            cf.predict(adata_pred, sample_rep="X", covariate_data=empty_covariate_data, **predict_kwargs)
-
-        with pytest.raises(
-            ValueError,
-            match=r".*No cells found in `adata` for split covariates*",
-        ):
-            covariate_data_a = covariate_data.copy()
-            covariate_data_a["cell_type"][0] = "cell_line_a"
-            cov_data_cell_type_1 = covariate_data_a[covariate_data_a["cell_type"] == "cell_line_a"]
-            adata_pred_cell_type_2 = adata_pred[adata_pred.obs["cell_type"] == "cell_line_b"]
-            adata_pred_cell_type_2.obs["control"] = True
-            cf.predict(adata_pred_cell_type_2, sample_rep="X", covariate_data=cov_data_cell_type_1, **predict_kwargs)
-
-    def test_raise_otfm_vf_kwargs_passed(self, adata_perturbation):
-        vf_kwargs = {"genot_source_dims": (2, 2), "genot_source_dropouts": 0.1}
-        cf = scaleflow.model.CellFlow(adata_perturbation, solver="otfm")
-        cf.prepare_data(
-            sample_rep="X",
-            control_key="control",
-            perturbation_covariates={"drug": ["drug1"]},
-            perturbation_covariate_reps={"drug": "drug"},
-        )
-        with pytest.raises(
-            ValueError,
-            match=r".*For `solver='otfm'` or `solver='eqm'`, `vf_kwargs` must be `None`.*",
-        ):
-            cf.prepare_model(
-                condition_embedding_dim=2,
-                hidden_dims=(2, 2),
-                decoder_dims=(2, 2),
-                vf_kwargs=vf_kwargs,
-            )
-
-    @pytest.mark.slow
-    @pytest.mark.parametrize(
-        "sample_covariate_and_reps",
-        [(None, None), (["cell_type"], {"cell_type": "cell_type"})],
+def _build_collection(adata, tmp_path):
+    a = adata.copy()
+    a.X = np.asarray(a.X, dtype=np.float32)
+    a.uns = {}
+    coll_path = tmp_path / "coll.zarr"
+    write_sorted_collection(
+        a,
+        str(coll_path),
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys=["drug", "gene"],
+        sorted_adata_path=str(tmp_path / "adata_sorted.zarr"),
     )
-    @pytest.mark.parametrize("split_covariates", [None, ["cell_type"]])
-    @pytest.mark.parametrize("perturbation_covariates", perturbation_covariate_comb_args)
-    @pytest.mark.parametrize("condition_mode", ["deterministic", "stochastic"])
-    @pytest.mark.parametrize("regularization", [0.0, 0.1])
-    def test_scaleflow_get_condition_embedding(
-        self,
-        adata_perturbation,
-        sample_covariate_and_reps,
-        condition_mode,
-        regularization,
-        split_covariates,
-        perturbation_covariates,
-    ):
-        sample_rep = "X"
-        control_key = "control"
-        perturbation_covariate_reps = {"drug": "drug"}
-        sample_covariates = sample_covariate_and_reps[0]
-        sample_covariate_reps = sample_covariate_and_reps[1]
-        condition_embedding_dim = 2
-        solver = "otfm"
+    return coll_path
 
-        cf = scaleflow.model.CellFlow(adata_perturbation, solver=solver)
-        cf.prepare_data(
-            sample_rep=sample_rep,
-            control_key=control_key,
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-            sample_covariates=sample_covariates,
-            sample_covariate_reps=sample_covariate_reps,
+
+def _prepared_model(adata_test, tmp_path, solver, **prepare_model_kwargs):
+    """Build a prepared (data + model) ScaleFlow over a sorted collection."""
+    rep_path = tmp_path / "uns.zarr"
+    _write_rep_store(adata_test, rep_path)
+    coll_path = _build_collection(adata_test, tmp_path)
+
+    model = ScaleFlow(solver=solver)
+    model.prepare_data(
+        str(coll_path),
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys=["drug", "gene"],
+        rep_keys=REP_KEYS,
+        rep_path=str(rep_path),
+    )
+    defaults = dict(
+        condition_embedding_dim=8,
+        time_freqs=8,
+        time_encoder_dims=(16,),
+        hidden_dims=(16,),
+        decoder_dims=(16,),
+        seed=0,
+    )
+    defaults.update(prepare_model_kwargs)
+    model.prepare_model(**defaults)
+    return model, str(coll_path), str(rep_path)
+
+
+def _predict_kwargs(solver):
+    return {"max_steps": 3, "eta": 0.01} if solver == "eqm" else {"max_steps": 3, "throw": False}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("solver", ["otfm", "genot", "eqm"])
+def test_scaleflow_train_predict(adata_test, tmp_path, solver):
+    """prepare -> train -> predict_covariates + get_condition_embedding for each solver."""
+    vf_kwargs = {"genot_source_dims": (16, 16), "genot_source_dropout": 0.1} if solver == "genot" else None
+    model, coll_path, rep_path = _prepared_model(adata_test, tmp_path, solver, vf_kwargs=vf_kwargs)
+
+    model.train(num_iterations=2, batch_size=32, chunk_size=CHUNK_SIZE, valid_freq=1000)
+    assert model.solver is not None and model.solver.is_trained
+    assert model.dataloader is not None
+    losses = model.trainer.training_logs["loss"]
+    assert len(losses) == 2 and all(np.isfinite(losses))
+
+    cov = pd.DataFrame(
+        {"cell_line": ["cell_line_0", "cell_line_1"], "drug": ["drug_0", "drug_1"], "gene": ["gene_0", "control"]}
+    )
+    preds = model.predict_covariates(cov, rep_path=rep_path, **_predict_kwargs(solver))
+    assert len(preds) == 2
+    for arr in preds.values():
+        arr = np.asarray(arr)
+        assert arr.ndim == 2 and arr.shape[1] == adata_test.n_vars
+        assert np.all(np.isfinite(arr))
+
+    df_mean, df_var = model.get_condition_embedding(cov, rep_path=rep_path)
+    assert len(df_mean) == len(df_var) == 2
+    assert df_mean.shape[1] == 8
+    assert np.all(np.isfinite(df_mean.values)) and np.all(np.isfinite(df_var.values))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("conditioning", ["concatenation", "film", "resnet"])
+def test_scaleflow_conditioning_variants(adata_test, tmp_path, conditioning):
+    """The conditioning mechanisms all train and predict (otfm)."""
+    model, coll_path, rep_path = _prepared_model(adata_test, tmp_path, "otfm", conditioning=conditioning)
+    model.train(num_iterations=2, batch_size=32, chunk_size=CHUNK_SIZE, valid_freq=1000)
+    assert model.solver.is_trained
+    cov = pd.DataFrame({"cell_line": ["cell_line_0"], "drug": ["drug_0"], "gene": ["gene_0"]})
+    preds = model.predict_covariates(cov, rep_path=rep_path, max_steps=3, throw=False)
+    assert len(preds) == 1
+    assert np.all(np.isfinite(np.asarray(next(iter(preds.values())))))
+
+
+@pytest.mark.slow
+def test_scaleflow_stochastic_condition_embedding(adata_test, tmp_path):
+    """Stochastic condition embeddings train (with regularization>0) and give finite variance."""
+    model, _, rep_path = _prepared_model(
+        adata_test, tmp_path, "otfm", condition_mode="stochastic", regularization=0.1
+    )
+    model.train(num_iterations=2, batch_size=32, chunk_size=CHUNK_SIZE, valid_freq=1000)
+    cov = pd.DataFrame({"cell_line": ["cell_line_0"], "drug": ["drug_0"], "gene": ["gene_0"]})
+    _, df_var = model.get_condition_embedding(cov, rep_path=rep_path)
+    assert np.all(np.isfinite(df_var.values))
+
+
+def test_scaleflow_stochastic_requires_regularization(adata_test, tmp_path):
+    """Stochastic condition mode with regularization=0 raises at prepare_model."""
+    with pytest.raises(ValueError, match=r"[Ss]tochastic condition embeddings require"):
+        _prepared_model(adata_test, tmp_path, "otfm", condition_mode="stochastic", regularization=0.0)
+
+
+def test_raise_otfm_vf_kwargs_passed(adata_test, tmp_path):
+    """otfm with vf_kwargs is rejected at prepare_model."""
+    with pytest.raises(ValueError, match=r"vf_kwargs` must be `None`"):
+        _prepared_model(
+            adata_test, tmp_path, "otfm", vf_kwargs={"genot_source_dims": (2, 2), "genot_source_dropout": 0.1}
         )
-        assert cf.train_data is not None
-        assert isinstance(cf._dm.perturb_covar_keys, list)
-        assert hasattr(cf, "_data_dim")
 
-        if condition_mode == "stochastic" and regularization == 0.0:
-            with pytest.raises(
-                ValueError,
-                match=r".*Stochastic condition embeddings require `regularization`>0*",
-            ):
-                cf.prepare_model(
-                    condition_mode=condition_mode,
-                    regularization=regularization,
-                    condition_embedding_dim=condition_embedding_dim,
-                    hidden_dims=(2, 2),
-                    decoder_dims=(2, 2),
-                )
-            return None
-        cf.prepare_model(
-            condition_mode=condition_mode,
-            regularization=regularization,
-            condition_embedding_dim=condition_embedding_dim,
-            hidden_dims=(2, 2),
-            decoder_dims=(2, 2),
-        )
-        assert cf._trainer is not None
 
-        cf.train(num_iterations=1)
-        assert cf._dataloader is not None
+@pytest.mark.parametrize("time_max_period", [-3, 0])
+def test_time_embedding_invalid_period(adata_test, tmp_path, time_max_period):
+    """A non-positive time_max_period is rejected at prepare_model."""
+    with pytest.raises(ValueError):
+        _prepared_model(adata_test, tmp_path, "otfm", time_freqs=8, time_max_period=time_max_period)
 
-        conds = adata_perturbation.obs.drop_duplicates(subset=cf._dm.perturb_covar_keys)
-        out = cf.get_condition_embedding(conds, rep_dict=adata_perturbation.uns)
-        assert isinstance(out, tuple)
-        assert isinstance(out[0], pd.DataFrame)
-        assert isinstance(out[1], pd.DataFrame)
-        assert out[0].shape[0] == conds.shape[0]
-        assert out[0].shape[1] == condition_embedding_dim
 
-        # Test if condition_id_key works
-        condition_id_key = "condition_id"
-        conds[condition_id_key] = range(len(conds))
-        conds[condition_id_key] = "cond_" + conds[condition_id_key].astype(str)
-        out = cf.get_condition_embedding(conds, rep_dict=adata_perturbation.uns, condition_id_key=condition_id_key)
-        assert isinstance(out, tuple)
-        assert isinstance(out[0], pd.DataFrame)
-        assert out[0].shape[0] == out[0].shape[0]
-        assert out[0].index.name == condition_id_key
-        cond_id_vals = conds[condition_id_key].values
-        assert out[0].index.isin(cond_id_vals).all()
-        assert isinstance(out[1], pd.DataFrame)
-        assert out[1].shape[0] == out[1].shape[0]
-        assert out[1].index.name == condition_id_key
-        cond_id_vals = conds[condition_id_key].values
-        assert out[1].index.isin(cond_id_vals).all()
+@pytest.mark.slow
+def test_scaleflow_with_validation(adata_test, tmp_path):
+    """A registered validation split produces a logged validation metric during training."""
+    rep_path = tmp_path / "uns.zarr"
+    _write_rep_store(adata_test, rep_path)
+    coll_path = _build_collection(adata_test, tmp_path)
 
-    @pytest.mark.parametrize("time_max_period", [None, 10000, -3])
-    def test_time_embedding(
-        self,
-        adata_perturbation,
-        time_max_period,
-    ):
-        sample_rep = "X"
-        control_key = "control"
-        solver = "otfm"
-        time_freqs = 1024
+    dm = DataManager(
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys=["drug", "gene"],
+        rep_keys=REP_KEYS,
+        data_location=AnnDataLocation().X,
+    )
+    gd = dm.prepare_data_from_collection(str(coll_path), rep_path=str(rep_path))
+    splits = GroupedDistributionSplitter(
+        gd=gd,
+        holdout_combinations=False,
+        split_by=["drug", "gene"],
+        split_key="split",
+        force_training_values={},
+        ratios=[0.6, 0.2, 0.2],
+        random_state=0,
+    ).split()
 
-        cf = scaleflow.model.CellFlow(adata_perturbation, solver=solver)
-        cf.prepare_data(
-            sample_rep=sample_rep,
-            control_key=control_key,
-            perturbation_covariates={"drug": ["drug1"]},
-        )
-        assert cf.train_data is not None
-        assert isinstance(cf._dm.perturb_covar_keys, list)
-        assert hasattr(cf, "_data_dim")
+    model = ScaleFlow(solver="otfm")
+    model.prepare_data(
+        str(coll_path),
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys=["drug", "gene"],
+        rep_keys=REP_KEYS,
+        rep_path=str(rep_path),
+    )
+    model.train_data = splits["train"]
+    model.prepare_validation_data("val", splits["val"], collection=str(coll_path))
+    model.prepare_model(
+        condition_embedding_dim=8,
+        time_freqs=8,
+        time_encoder_dims=(16,),
+        hidden_dims=(16,),
+        decoder_dims=(16,),
+        seed=0,
+    )
 
-        if time_max_period is not None and time_max_period <= 0:
-            with pytest.raises(
-                ValueError,
-            ):
-                cf.prepare_model(
-                    time_freqs=time_freqs,
-                    time_max_period=time_max_period,
-                )
-            return None
-
-        cf.prepare_model(
-            time_freqs=time_freqs,
-            time_max_period=time_max_period,
-        )
+    metrics_callback = scaleflow.training.Metrics(metrics=["r_squared"])
+    model.train(num_iterations=4, batch_size=32, chunk_size=CHUNK_SIZE, valid_freq=1, callbacks=[metrics_callback])
+    assert model.solver.is_trained
+    assert "val_r_squared_mean" in model.trainer.training_logs

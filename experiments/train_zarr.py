@@ -23,7 +23,7 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
 from scaleflow.data import GroupedDistribution, split_datasets
-from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
+from scaleflow.data import CombinedSampler, GroupedAnnbatchSampler, ValidationSampler
 from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
 from scaleflow.utils import match_linear
@@ -32,7 +32,7 @@ import utils
 import callbacks
 
 
-def run(cfg: DictConfig, gds: dict) -> dict:
+def run(cfg: DictConfig, gds: dict, collections: dict) -> dict:
     # ── wandb sweep is dominant: init first, then overlay its params onto cfg ──
     # The agent sets WANDB_SWEEP_ID, so we init even if wandb.enabled wasn't set.
     # wandb.config (incl. sweep overrides) wins over the composed Hydra cfg, and
@@ -89,14 +89,15 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     train_samplers, val_samplers, test_samplers = {}, {}, {}
     for ds in gds:
         seed = int(cfg.datasets[ds].get("seed", cfg.seed))
-        train_samplers[ds] = ReservoirSampler(
-            data[ds]["train"], np.random.default_rng(seed),
+        train_samplers[ds] = GroupedAnnbatchSampler(
+            collections[ds], data[ds]["train"],
             batch_size=bs,
-            pool_fraction=float(cfg.training.pool_fraction),
-            replacement_prob=float(cfg.training.replacement_prob),
+            chunk_size=int(cfg.training.chunk_size),
+            seed=seed,
             condition_transform=transform,
         )
         val_samplers[ds] = ValidationSampler(
+            collections[ds],
             data[ds]["val"],
             n_conditions_on_log_iteration=n_val,
             n_conditions_on_train_end=n_val,
@@ -104,6 +105,7 @@ def run(cfg: DictConfig, gds: dict) -> dict:
             condition_transform=transform,
         )
         test_samplers[ds] = ValidationSampler(
+            collections[ds],
             data[ds]["test"],
             n_conditions_on_log_iteration=None,
             n_conditions_on_train_end=None,
@@ -239,11 +241,13 @@ def run(cfg: DictConfig, gds: dict) -> dict:
 @hydra.main(config_path="config", config_name="train_zarr", version_base=None)
 def main(cfg: DictConfig) -> None:
     gds = {}
+    colls = {}
     for name in cfg.selected_datasets:
         path = str(cfg.datasets[name].path)
         print(f"Reading [{name}] ← {path}")
         gds[name] = GroupedDistribution.read_zarr(Path(path))
-    run(cfg, gds)
+        colls[name] = str(cfg.datasets[name].collection)
+    run(cfg, gds, colls)
 
 
 if __name__ == "__main__":

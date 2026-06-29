@@ -42,8 +42,8 @@ class CombinedSampler(SamplerABC):
 
     Examples
     --------
-    >>> sampler1 = InMemorySampler(data1, rng1, batch_size=64)
-    >>> sampler2 = InMemorySampler(data2, rng2, batch_size=64)
+    >>> sampler1 = GroupedAnnbatchSampler(coll1, gd1, batch_size=64, chunk_size=256)
+    >>> sampler2 = GroupedAnnbatchSampler(coll2, gd2, batch_size=64, chunk_size=256)
     >>> combined = CombinedSampler(
     ...     samplers={"dataset1": sampler1, "dataset2": sampler2},
     ...     rng=np.random.default_rng(42),

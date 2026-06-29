@@ -2,9 +2,22 @@ import time
 
 import numpy as np
 
-from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution, split_datasets
-from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
+from scaleflow.data import (
+    AnnDataLocation,
+    DataManager,
+    GroupedDistribution,
+    GroupedAnnbatchSampler,
+    CombinedSampler,
+    ValidationSampler,
+    split_datasets,
+)
 from scaleflow.model import ScaleFlow
+
+# Sorted DatasetCollection of cells, built via scaleflow.data.write_sorted_collection.
+COLLECTION_PATH = "/data/tahoe_collection.zarr"
+
+# ClassSampler chunk size; must be <= smallest trained condition's cell count.
+CHUNK_SIZE = 256
 
 script_start = time.perf_counter()
 
@@ -35,11 +48,11 @@ t0 = time.perf_counter()
 rng = np.random.default_rng(42)
 sampler = CombinedSampler(
     samplers={
-        "gd1": ReservoirSampler(
-            ds1_train, rng, batch_size=1024, pool_fraction=0.7, replacement_prob=0.5
+        "gd1": GroupedAnnbatchSampler(
+            COLLECTION_PATH, ds1_train, batch_size=1024, chunk_size=CHUNK_SIZE, seed=42
         ),
-        "gd2": ReservoirSampler(
-            ds2_train, rng, batch_size=1024, pool_fraction=0.7, replacement_prob=0.5
+        "gd2": GroupedAnnbatchSampler(
+            COLLECTION_PATH, ds2_train, batch_size=1024, chunk_size=CHUNK_SIZE, seed=42
         ),
     },
     rng=rng,
@@ -49,12 +62,14 @@ sampler = CombinedSampler(
 
 val_samplers = {
     "gd1": ValidationSampler(
+        COLLECTION_PATH,
         ds1_val,  # Use one split for validation
         seed=42,
         n_conditions_on_train_end=10,
         n_conditions_on_log_iteration=10,
     ),
     "gd2": ValidationSampler(
+        COLLECTION_PATH,
         ds2_val,  # Use one split for validation
         n_conditions_on_train_end=100,
         n_conditions_on_log_iteration=100,

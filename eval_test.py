@@ -26,8 +26,7 @@ import jax
 import numpy as np
 from tqdm import tqdm
 
-from scaleflow.data import GroupedDistribution, split_datasets
-from scaleflow.data._dataloader import ValidationSampler
+from scaleflow.data import GroupedDistribution, split_datasets, ValidationSampler
 from scaleflow.metrics._metrics import (
     compute_r_squared,
     compute_e_distance_fast,
@@ -36,6 +35,8 @@ from scaleflow.metrics._metrics import (
 
 # ── Config — must match train_comparison.py exactly ──────────────────────────
 ZARR_PATH   = Path("/storage/pancellflow/tahoe.zarr")
+# Sorted DatasetCollection of cells, built via scaleflow.data.write_sorted_collection.
+COLLECTION_PATH = Path("/storage/pancellflow/tahoe_collection.zarr")
 OUTPUT_DIR  = Path("/storage/pancellflow/outputs/cell_line_div")
 SEED        = 42
 SPLIT_RATIOS = [5/7, 1/7, 1/7]   # train / val / test  (5 cell lines train, 1 val, 1 test)
@@ -116,10 +117,11 @@ test_gd = splits["gd"]["test"]
 
 src_labels = list(test_gd.annotation.src_dist_idx_to_labels.values())
 test_cell_lines = {str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl) for lbl in src_labels}
-print(f"  Test set : {len(test_gd.data.tgt_data)} conditions | cell lines: {', '.join(sorted(test_cell_lines))}")
+print(f"  Test set : {len(test_gd.data.tgt_dist_to_rows)} conditions | cell lines: {', '.join(sorted(test_cell_lines))}")
 
 # ── Build test sampler ────────────────────────────────────────────────────────
-raw_test = ValidationSampler(test_gd,
+raw_test = ValidationSampler(COLLECTION_PATH,
+                             test_gd,
                              n_conditions_on_log_iteration=None,
                              n_conditions_on_train_end=None,
                              seed=SEED)

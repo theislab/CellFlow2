@@ -25,14 +25,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from scaleflow.data import GroupedDistribution, split_datasets
-from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
+from scaleflow.data import GroupedDistribution, split_datasets, GroupedAnnbatchSampler, CombinedSampler, ValidationSampler
 from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
 
 ZARR   = Path("/storage/pancellflow/tahoe.zarr")
+# Sorted DatasetCollection of cells, built via scaleflow.data.write_sorted_collection.
+COLLECTION = Path("/storage/pancellflow/tahoe_collection.zarr")
 OUTPUT = Path("/storage/pancellflow/smoke_outputs")
 SEED   = 42
+
+# ClassSampler chunk size; must be <= smallest trained condition's cell count.
+CHUNK_SIZE = 256
 
 OUTPUT.mkdir(parents=True, exist_ok=True)
 
@@ -99,8 +103,8 @@ def print_dataset_stats(gd: GroupedDistribution, label: str = "Dataset") -> None
                     else str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
                     for lbl in tgt_labels})
 
-    src_sizes = [v.shape[0] for v in data.src_data.values()]
-    tgt_sizes = [v.shape[0] for v in data.tgt_data.values()]
+    src_sizes = [len(v) for v in data.src_dist_to_rows.values()]
+    tgt_sizes = [len(v) for v in data.tgt_dist_to_rows.values()]
     cond_keys = list(next(iter(data.conditions.values())).keys()) if data.conditions else []
 
     print(f"\n{'─'*60}")
@@ -108,7 +112,7 @@ def print_dataset_stats(gd: GroupedDistribution, label: str = "Dataset") -> None
     print(f"{'─'*60}")
     print(f"  Cell lines    : {len(cell_lines)}  →  {', '.join(cell_lines)}")
     print(f"  Drugs         : {len(drugs)}")
-    print(f"  Conditions    : {len(data.tgt_data)}  (cell_line × drug pairs)")
+    print(f"  Conditions    : {len(data.tgt_dist_to_rows)}  (cell_line × drug pairs)")
     print(f"  Control cells : {sum(src_sizes):,}  "
           f"(min={min(src_sizes):,}  max={max(src_sizes):,})")
     print(f"  Treated cells : {sum(tgt_sizes):,}  "
@@ -125,9 +129,9 @@ def print_split_stats(train_gd, val_gd, test_gd) -> None:
 
     tr, va, te = drug_set(train_gd), drug_set(val_gd), drug_set(test_gd)
     print(f"\n  Train/Val/Test split (by drug)")
-    print(f"    Train : {len(train_gd.data.tgt_data):>4} conditions  |  {len(tr):>3} drugs")
-    print(f"    Val   : {len(val_gd.data.tgt_data):>4} conditions  |  {len(va):>3} drugs")
-    print(f"    Test  : {len(test_gd.data.tgt_data):>4} conditions  |  {len(te):>3} drugs")
+    print(f"    Train : {len(train_gd.data.tgt_dist_to_rows):>4} conditions  |  {len(tr):>3} drugs")
+    print(f"    Val   : {len(val_gd.data.tgt_dist_to_rows):>4} conditions  |  {len(va):>3} drugs")
+    print(f"    Test  : {len(test_gd.data.tgt_dist_to_rows):>4} conditions  |  {len(te):>3} drugs")
     print(f"    Sample test drugs : {sorted(te)[:5]} ...")
 
 
@@ -162,13 +166,13 @@ print_split_stats(train_gd, val_gd, test_gd)
 
 rng = np.random.default_rng(SEED)
 raw_train = CombinedSampler(
-    samplers={"gd": ReservoirSampler(
-        train_gd, rng, batch_size=256, pool_fraction=0.7, replacement_prob=0.5,
+    samplers={"gd": GroupedAnnbatchSampler(
+        str(COLLECTION), train_gd, batch_size=256, chunk_size=CHUNK_SIZE, seed=SEED,
     )},
     rng=rng,
 )
-raw_val = ValidationSampler(val_gd, n_conditions_on_log_iteration=5,
-                             n_conditions_on_train_end=5, seed=SEED)
+raw_val = ValidationSampler(str(COLLECTION), val_gd, n_conditions_on_log_iteration=5,
+                            n_conditions_on_train_end=5, seed=SEED)
 
 if drop_keys:
     train_sampler = ConditionFilterSampler(raw_train, drop_keys)

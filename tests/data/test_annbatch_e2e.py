@@ -6,9 +6,12 @@ import pandas as pd
 import pytest
 import zarr
 
-from scaleflow.data import AnnDataLocation, DataManager, GroupedAnnbatchSampler
+from scaleflow.data import AnnDataLocation, DataManager, GroupedAnnbatchSampler, write_sorted_collection
 from scaleflow.data._data_splitter import GroupedDistributionSplitter
 from scaleflow.model._scaleflow import ScaleFlow
+
+# ClassSampler read-slice size; small so it stays <= every condition in adata_test (~27-81 cells)
+CHUNK_SIZE = 8
 
 
 def _write_rep_store(adata, path):
@@ -18,16 +21,20 @@ def _write_rep_store(adata, path):
 
 
 def _build_collection(adata, tmp_path):
-    from annbatch import DatasetCollection
-
+    # Write a collection sorted by condition so each condition's cells are contiguous on
+    # disk, as annbatch.ClassSampler (via GroupedAnnbatchSampler) requires.
     a = adata.copy()
     a.X = np.asarray(a.X, dtype=np.float32)
     a.uns = {}
-    adata_path = tmp_path / "adata.zarr"
-    a.write_zarr(str(adata_path))
     coll_path = tmp_path / "coll.zarr"
-    coll = DatasetCollection(str(coll_path), mode="a")
-    coll.add_adatas(adata_paths=[str(adata_path)], shuffle=False)
+    write_sorted_collection(
+        a,
+        str(coll_path),
+        dist_flag_key="control",
+        src_dist_keys=["cell_line"],
+        tgt_dist_keys=["drug", "gene"],
+        sorted_adata_path=str(tmp_path / "adata_sorted.zarr"),
+    )
     return coll_path
 
 
@@ -60,7 +67,7 @@ def test_end_to_end_training(tmp_path, adata_test):
     )
     assert model._data_dim == adata_test.n_vars
 
-    model.train(num_iterations=2, batch_size=32, valid_freq=1000)
+    model.train(num_iterations=2, batch_size=32, chunk_size=CHUNK_SIZE, valid_freq=1000)
 
     assert model.solver is not None and model.solver.is_trained
     losses = model.trainer.training_logs["loss"]
@@ -131,7 +138,9 @@ def test_end_to_end_training_with_split(tmp_path, adata_test):
     assert tgt["train"] | tgt["val"] | tgt["test"] == set(gd.data.tgt_dist_to_rows.keys())
 
     # a sampler over the train split only ever draws train-split conditions
-    train_sampler = GroupedAnnbatchSampler(str(coll_path), splits["train"], batch_size=16, seed=0)
+    train_sampler = GroupedAnnbatchSampler(
+        str(coll_path), splits["train"], batch_size=16, chunk_size=CHUNK_SIZE, seed=0
+    )
     assert set(train_sampler._tgt_idx_order).issubset(tgt["train"])
 
     # train on the train split end-to-end via ScaleFlow
@@ -156,7 +165,7 @@ def test_end_to_end_training_with_split(tmp_path, adata_test):
         seed=0,
     )
     # valid_freq=1 with >2 iters triggers in-loop validation (it>1) on the val split
-    model.train(num_iterations=4, batch_size=32, valid_freq=1)
+    model.train(num_iterations=4, batch_size=32, chunk_size=CHUNK_SIZE, valid_freq=1)
 
     assert model.solver is not None and model.solver.is_trained
     assert len(model.trainer.training_logs["loss"]) == 4
