@@ -10,7 +10,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution
+from scaleflow.data import (
+    AnnDataLocation,
+    DataManager,
+    GroupedAnnbatchSampler,
+    GroupedDistribution,
+    write_sorted_collection,
+)
 
 CELL_LINES = ["cl0", "cl1"]
 DRUGS = ["control", "dA", "dB", "dC"]
@@ -204,6 +210,41 @@ def test_multiple_aligned_pooled_groups():
     assert np.asarray(cond["drug"]).shape == (1, 2, 3)
     assert np.asarray(cond["dose"]).shape == (1, 2, 1)
     assert np.asarray(cond["cell_line"]).shape == (1, 1, 2)
+
+
+def test_sampler_emits_combination_condition(tmp_path):
+    """GroupedAnnbatchSampler streams a (1, K, emb) combination condition with the batch."""
+    n = 8
+    rows = []
+    for cl in CELL_LINES:
+        rows += [{"cell_line": cl, "drug_1": "control", "drug_2": "control", "control": True}] * n
+        for d1, d2 in [("dA", "dB"), ("dB", "dC")]:
+            rows += [{"cell_line": cl, "drug_1": d1, "drug_2": d2, "control": False}] * n
+    obs = pd.DataFrame(rows)
+    for c in ["cell_line", "drug_1", "drug_2"]:
+        obs[c] = obs[c].astype("category")
+    adata = ad.AnnData(X=np.random.randn(len(obs), 5).astype(np.float32), obs=obs)
+    cl_emb = {cl: np.eye(len(CELL_LINES), dtype=np.float32)[i] for i, cl in enumerate(CELL_LINES)}
+    drug_emb = {d: np.eye(len(DRUGS), dtype=np.float32)[i] for i, d in enumerate(DRUGS)}
+
+    coll = str(tmp_path / "coll.zarr")
+    write_sorted_collection(
+        adata, coll, dist_flag_key="control", src_dist_keys=["cell_line"],
+        tgt_dist_keys={"drug": ["drug_1", "drug_2"]}, sorted_adata_path=str(tmp_path / "sorted.zarr"),
+    )
+    dm = DataManager(
+        dist_flag_key="control", src_dist_keys=["cell_line"], tgt_dist_keys={"drug": ["drug_1", "drug_2"]},
+        rep_keys={"cell_line": "cell_line_embeddings", "drug": "drug_embeddings"},
+        data_location=AnnDataLocation().X,
+    )
+    gd = dm.prepare_data_from_collection(coll, rep_dict={"cell_line_embeddings": cl_emb, "drug_embeddings": drug_emb})
+
+    sampler = GroupedAnnbatchSampler(coll, gd, batch_size=8, chunk_size=4, seed=0)
+    for _ in range(5):
+        batch = sampler.sample()
+        assert np.asarray(batch["condition"]["drug"]).shape == (1, 2, len(DRUGS))   # pooled set
+        assert np.asarray(batch["condition"]["cell_line"]).shape == (1, 1, len(CELL_LINES))  # context
+        assert np.asarray(batch["tgt_cell_data"]).shape == (8, 5)
 
 
 def test_grouped_conditions_zarr_roundtrip(tmp_path):
