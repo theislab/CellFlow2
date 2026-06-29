@@ -80,10 +80,13 @@ class CellFlowTrainer:
             if hasattr(vdl, '_initialized') and not vdl._initialized:
                 vdl.init_sampler()
             # Forward the validation mode so samplers can honor n_conditions_on_train_end
-            # vs n_conditions_on_log_iteration; fall back for samplers without a mode arg.
-            try:
+            # vs n_conditions_on_log_iteration. Detect support via the signature (not
+            # try/except) so a real TypeError inside sample() is not masked.
+            import inspect
+
+            if "mode" in inspect.signature(vdl.sample).parameters:
                 batch = vdl.sample(mode=mode)
-            except TypeError:
+            else:
                 batch = vdl.sample()  # Samplers use internal rng
 
             val_pbar.set_description(f"Validation ({val_key}) - extracting data")
