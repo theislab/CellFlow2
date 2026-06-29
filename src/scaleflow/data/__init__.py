@@ -1,3 +1,9 @@
+from scaleflow.data._annbatch_sampler import (
+    GroupedAnnbatchSampler,
+    PredictionSampler,
+    SourceCache,
+    ValidationSampler,
+)
 from scaleflow.data._anndata_location import AnnDataLocation
 from scaleflow.data._batch_utils import (
     prepare_and_split_datasets,
@@ -10,7 +16,7 @@ from scaleflow.data._data import (
     GroupedDistributionData,
 )
 from scaleflow.data._dataloader import (
-    ReservoirSampler,
+    CombinedSampler,
     SamplerABC,
 )
 from scaleflow.data._datamanager import DataManager
@@ -20,7 +26,11 @@ __all__ = [
     "GroupedDistribution",
     "GroupedDistributionData",
     "GroupedDistributionAnnotation",
-    "ReservoirSampler",
+    "GroupedAnnbatchSampler",
+    "SourceCache",
+    "CombinedSampler",
+    "PredictionSampler",
+    "ValidationSampler",
     "DataManager",
     "SamplerABC",
     "prepare_datasets",

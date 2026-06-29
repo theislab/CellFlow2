@@ -1,7 +1,7 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import dask.array as da
 import numpy as np
 import pandas as pd
 
@@ -88,11 +88,18 @@ class DataManager:
 
     def _prepare_annotation(
         self,
-        adata: "anndata.AnnData",
+        obs_df: pd.DataFrame,
         verbose: bool = False,
     ) -> tuple[pd.DataFrame, GroupedDistributionAnnotation, dict[int, list[int]], dict[int, tuple], dict[int, tuple]]:
         """
-        Prepare annotation data from the AnnData object.
+        Prepare annotation data from an observation DataFrame.
+
+        Parameters
+        ----------
+        obs_df
+            The observation DataFrame (e.g. ``adata.obs`` or
+            :meth:`annbatch.DatasetCollection.obs`). The cell matrix is never needed
+            here; grouping into distributions is computed from obs alone.
 
         Returns
         -------
@@ -110,7 +117,7 @@ class DataManager:
         src_tgt_dist_keys = [*self.src_dist_keys, *self.tgt_dist_keys]
 
         cols = [self.dist_flag_key, *src_tgt_dist_keys]
-        obs = adata.obs[cols].copy()
+        obs = obs_df[cols].copy()
         old_index_mapping = obs.index.to_numpy()
         obs.reset_index(drop=True, inplace=True)
 
@@ -198,22 +205,24 @@ class DataManager:
 
     def _prepare_data(
         self,
-        adata: "anndata.AnnData",
         obs: pd.DataFrame,
+        rep_dict: Mapping[str, Any],
         src_to_tgt_dist_map: dict[int, list[int]],
         src_dist_labels: dict[int, tuple],
         tgt_dist_labels: dict[int, tuple],
         verbose: bool = False,
     ) -> GroupedDistributionData:
         """
-        Prepare the actual data arrays and conditions from the AnnData object.
+        Prepare the per-distribution row indices and conditions.
 
         Parameters
         ----------
-        adata
-            The AnnData object.
         obs
             Processed observation DataFrame with distribution indices.
+        rep_dict
+            Mapping of representation keys to embedding dictionaries, e.g.
+            ``adata.uns`` or a dict read from a separate ``uns`` store. Used only to
+            build the condition embeddings; the cell matrix is never read here.
         src_to_tgt_dist_map
             Mapping from source distribution indices to target distribution indices.
         src_dist_labels
@@ -228,7 +237,7 @@ class DataManager:
         GroupedDistributionData containing src_data, tgt_data, conditions, and the mapping.
         """
         # prepare conditions as nested dicts: {tgt_dist_idx: {col_name: array}}
-        col_to_repr = {key: adata.uns[self.rep_keys[key]] for key in self.rep_keys.keys()}
+        col_to_repr = {key: rep_dict[self.rep_keys[key]] for key in self.rep_keys.keys()}
 
         with timer("Getting conditions", verbose=verbose):
             conditions = {}
@@ -236,52 +245,24 @@ class DataManager:
                 src_label = src_dist_labels[src_dist_idx]
                 for tgt_dist_idx in tgt_dist_idxs:
                     tgt_label = tgt_dist_labels[tgt_dist_idx]
-                    cond_dict = {}
+                    conditions[tgt_dist_idx] = self._build_condition(src_label, tgt_label, col_to_repr, rep_dict)
 
-                    # In this implementaion max_combination_length is always set to 1
-                    # Add source distribution conditions (with set dimension for max_combination_length)
-                    for col, label in zip(self.src_dist_keys, src_label, strict=True):
-                        emb = DataManager._col_to_repr(col_to_repr, col, label)
-                        cond_dict[col] = emb[None, None, :]  # Shape: (1, 1, emb_dim) = (batch, set_size, emb_dim)
-
-                    # Add target distribution conditions (with set dimension for max_combination_length)
-                    for col, label in zip(self.tgt_dist_keys, tgt_label, strict=True):
-                        emb = DataManager._col_to_repr(col_to_repr, col, label)
-                        cond_dict[col] = emb[None, None, :]  # Shape: (1, 1, emb_dim) = (batch, set_size, emb_dim)
-
-                    # Optionally add extra representations (e.g. prophet_emb).
-                    # Each entry: new_condition_key -> (obs_col_for_lookup, adata_uns_key)
-                    # Silently skipped when the uns_key is absent so that the same
-                    # DataManager config works with or without the embedding.
-                    if self.extra_rep_keys is not None:
-                        for new_key, (obs_col, uns_key) in self.extra_rep_keys.items():
-                            if uns_key not in adata.uns:
-                                continue
-                            label = self._get_label_for_col(obs_col, src_label, tgt_label)
-                            if label is None:
-                                continue
-                            extra_repr = adata.uns[uns_key]
-                            if label in extra_repr:
-                                emb = np.array(extra_repr[label])
-                                cond_dict[new_key] = emb[None, None, :]  # Shape: (1, 1, emb_dim)
-
-                    conditions[tgt_dist_idx] = cond_dict
-
-        # prepare src_data and tgt_data
-        arr = self.data_location(adata)
-        if isinstance(arr, da.Array):
-            arr = arr.compute()
-        with timer("Getting source and target distribution data", verbose=verbose):
+        # prepare row indices per source/target distribution.
+        # We no longer materialize the cell matrix here: the actual ``X`` rows are
+        # streamed on demand by annbatch using ``annotation.data_location``. We only
+        # record the positional obs row indices (into ``adata``'s obs order) that make
+        # up each source/target distribution.
+        with timer("Getting source and target distribution row indices", verbose=verbose):
             src_dist_map = obs[obs[self.dist_flag_key]].groupby("src_dist_idx", observed=False).groups
             tgt_dist_map = obs[~obs[self.dist_flag_key]].groupby("tgt_dist_idx", observed=False).groups
 
-            tgt_data = {int(k): arr[v.to_numpy()] for k, v in tgt_dist_map.items()}
-            src_data = {int(k): arr[v.to_numpy()] for k, v in src_dist_map.items()}
+            tgt_dist_to_rows = {int(k): np.asarray(v.to_numpy()) for k, v in tgt_dist_map.items()}
+            src_dist_to_rows = {int(k): np.asarray(v.to_numpy()) for k, v in src_dist_map.items()}
 
         return GroupedDistributionData(
             src_to_tgt_dist_map=src_to_tgt_dist_map,
-            src_data=src_data,
-            tgt_data=tgt_data,
+            src_dist_to_rows=src_dist_to_rows,
+            tgt_dist_to_rows=tgt_dist_to_rows,
             conditions=conditions,
         )
 
@@ -291,11 +272,15 @@ class DataManager:
         verbose: bool = False,
     ) -> GroupedDistribution:
         """
-        Prepare grouped distribution data from an AnnData object.
+        Prepare grouped distribution metadata from an in-memory AnnData object.
+
+        Only ``adata.obs`` (for grouping into distributions) and ``adata.uns`` (for
+        condition embeddings) are read; the cell matrix is never materialized here.
+        The resulting :class:`GroupedDistribution` stores per-distribution obs row
+        indices, and the cells are streamed on demand (e.g. via annbatch).
 
         Distribution flag key must be a boolean column.
         The src and tgt distribution keys are recommended to be categorical columns otherwise sorting will be slow.
-        Resets the index of obs. saves new to old index.
 
         Parameters
         ----------
@@ -306,18 +291,179 @@ class DataManager:
 
         Returns
         -------
-        GroupedDistribution containing data and annotation.
+        GroupedDistribution containing metadata and annotation.
         """
-        DataManager._verify_rep_keys_exists(self.rep_keys, adata)
+        return self._prepare(obs_df=adata.obs, rep_dict=adata.uns, verbose=verbose)
+
+    def prepare_data_from_collection(
+        self,
+        collection: "Any",
+        *,
+        rep_path: str | None = None,
+        rep_dict: Mapping[str, Any] | None = None,
+        verbose: bool = False,
+    ) -> GroupedDistribution:
+        """Prepare grouped distribution metadata from an on-disk store, by path only.
+
+        No in-memory AnnData is required and the cell matrix ``X`` is never loaded:
+        only the obs columns needed for grouping are read from the collection, and the
+        condition embeddings are read from a *separate* ``uns`` store (since
+        :class:`annbatch.DatasetCollection` does not round-trip ``uns``).
+
+        The per-distribution row indices recorded here index into the collection's
+        global row order (the dataset-order concatenation), so they can be used
+        verbatim as ``annbatch`` ``LoadRequest`` indices.
+
+        Parameters
+        ----------
+        collection
+            An :class:`annbatch.DatasetCollection` or a path to one.
+        rep_path
+            Path to a zarr/h5 store whose top-level keys are the representation keys
+            referenced by ``rep_keys``/``extra_rep_keys`` (i.e. an ``uns``-shaped store
+            mapping each key to a ``{label: embedding}`` dict). Read lazily via
+            :func:`anndata.io.read_elem`. Ignored if ``rep_dict`` is given.
+        rep_dict
+            An already-loaded mapping of representations (same shape as ``adata.uns``),
+            as an alternative to ``rep_path``.
+        verbose
+            Whether to print timing information.
+
+        Returns
+        -------
+        GroupedDistribution containing metadata and annotation.
+        """
+        coll = self._open_collection(collection)
+        needed_cols = [self.dist_flag_key, *self.src_dist_keys, *self.tgt_dist_keys]
+        obs_df = coll.obs(columns=needed_cols)
+        if rep_dict is None:
+            if rep_path is None:
+                raise ValueError("Either `rep_path` or `rep_dict` must be provided when reading from a collection.")
+            rep_dict = self._load_rep_dict(rep_path)
+        return self._prepare(obs_df=obs_df, rep_dict=rep_dict, verbose=verbose)
+
+    def _prepare(
+        self,
+        obs_df: pd.DataFrame,
+        rep_dict: Mapping[str, Any],
+        verbose: bool = False,
+    ) -> GroupedDistribution:
+        """Shared preparation from an obs DataFrame and a representations mapping."""
+        DataManager._verify_rep_keys_exists(self.rep_keys, rep_dict)
 
         obs, annotation, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels = self._prepare_annotation(
-            adata, verbose=verbose
+            obs_df, verbose=verbose
         )
         data = self._prepare_data(
-            adata, obs, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels, verbose=verbose
+            obs, rep_dict, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels, verbose=verbose
         )
 
         return GroupedDistribution(data=data, annotation=annotation)
+
+    def _build_condition(
+        self,
+        src_label: tuple,
+        tgt_label: tuple,
+        col_to_repr: dict[str, Any],
+        rep_dict: Mapping[str, Any],
+    ) -> dict[str, np.ndarray]:
+        """Build a single condition dict ``{col_name: (1, 1, emb_dim)}`` from labels.
+
+        Shared by ``_prepare_data`` (conditions from obs) and ``get_condition_data``
+        (conditions for arbitrary covariate combinations). The set axis is size 1.
+        """
+        cond_dict: dict[str, np.ndarray] = {}
+        for col, label in zip(self.src_dist_keys, src_label, strict=True):
+            emb = DataManager._col_to_repr(col_to_repr, col, label)
+            cond_dict[col] = emb[None, None, :]
+        for col, label in zip(self.tgt_dist_keys, tgt_label, strict=True):
+            emb = DataManager._col_to_repr(col_to_repr, col, label)
+            cond_dict[col] = emb[None, None, :]
+        if self.extra_rep_keys is not None:
+            for new_key, (obs_col, uns_key) in self.extra_rep_keys.items():
+                if uns_key not in rep_dict:
+                    continue
+                label = self._get_label_for_col(obs_col, src_label, tgt_label)
+                if label is None:
+                    continue
+                extra_repr = rep_dict[uns_key]
+                if label in extra_repr:
+                    cond_dict[new_key] = np.array(extra_repr[label])[None, None, :]
+        return cond_dict
+
+    def get_condition_data(
+        self,
+        covariate_data: "pd.DataFrame",
+        *,
+        rep_dict: Mapping[str, Any] | None = None,
+        rep_path: str | None = None,
+        condition_id_key: str | None = None,
+    ) -> dict[Any, dict[str, np.ndarray]]:
+        """Build condition embeddings for arbitrary covariate combinations.
+
+        Unlike :meth:`prepare_data`, this does not require the combinations to appear in
+        any observed data — it builds a condition dict for each unique row of
+        ``covariate_data`` (over ``src_dist_keys + tgt_dist_keys``).
+
+        Parameters
+        ----------
+        covariate_data
+            DataFrame whose columns include ``src_dist_keys`` and ``tgt_dist_keys``.
+        rep_dict / rep_path
+            Representations (embeddings), as in :meth:`prepare_data_from_collection`.
+        condition_id_key
+            If given, use this column's value as the condition key; otherwise the key is
+            the tuple of label values ``(src_dist_keys + tgt_dist_keys)``.
+
+        Returns
+        -------
+        Mapping ``{condition_key: {col_name: (1, 1, emb_dim)}}``.
+        """
+        if rep_dict is None:
+            rep_dict = self._load_rep_dict(rep_path) if rep_path is not None else {}
+        DataManager._verify_rep_keys_exists(self.rep_keys, rep_dict)
+        col_to_repr = {key: rep_dict[self.rep_keys[key]] for key in self.rep_keys.keys()}
+
+        keys = [*self.src_dist_keys, *self.tgt_dist_keys]
+        select = keys + ([condition_id_key] if condition_id_key is not None else [])
+        df = covariate_data[select].drop_duplicates()
+
+        conditions: dict[Any, dict[str, np.ndarray]] = {}
+        for _, row in df.iterrows():
+            src_label = tuple(row[k] for k in self.src_dist_keys)
+            tgt_label = tuple(row[k] for k in self.tgt_dist_keys)
+            cond_key = row[condition_id_key] if condition_id_key is not None else tuple(str(row[k]) for k in keys)
+            conditions[cond_key] = self._build_condition(src_label, tgt_label, col_to_repr, rep_dict)
+        return conditions
+
+    @staticmethod
+    def _open_collection(collection: "Any") -> "Any":
+        """Return a read-mode :class:`annbatch.DatasetCollection` from a path or pass-through."""
+        from annbatch import DatasetCollection
+
+        if isinstance(collection, DatasetCollection):
+            return collection
+        return DatasetCollection(str(collection), mode="r")
+
+    @staticmethod
+    def _load_rep_dict(rep_path: str) -> dict[str, Any]:
+        """Read an ``uns``-shaped representation store (zarr or h5) into a dict.
+
+        The store's top-level keys are treated as the representation keys; each is read
+        with :func:`anndata.io.read_elem` (so a ``{label: embedding}`` dict round-trips).
+        """
+        import anndata as ad
+
+        path = str(rep_path)
+        if path.endswith((".h5", ".h5ad", ".hdf5")):
+            import h5py
+
+            with h5py.File(path, "r") as f:
+                return {k: ad.io.read_elem(f[k]) for k in f.keys()}
+        import zarr
+
+        group = zarr.open_group(path, mode="r")
+        return {k: ad.io.read_elem(group[k]) for k in group.keys()}
 
     @staticmethod
     def _verify_dist_keys(dist_keys: list[str]) -> None:
@@ -328,10 +474,10 @@ class DataManager:
             raise ValueError("Distributions must be unique.")
 
     @staticmethod
-    def _verify_rep_keys_exists(rep_keys: dict[str, str], adata: "anndata.AnnData") -> None:
+    def _verify_rep_keys_exists(rep_keys: dict[str, str], rep_dict: Mapping[str, Any]) -> None:
         for _, value in rep_keys.items():
-            if value not in adata.uns:
-                raise ValueError(f"Representation key {value} not found in adata.uns.")
+            if value not in rep_dict:
+                raise ValueError(f"Representation key {value} not found in the provided representations (`uns`).")
 
     @staticmethod
     def _col_to_repr(col_to_repr: dict[str, dict[str, np.ndarray]], col: str, label: Any) -> np.ndarray:

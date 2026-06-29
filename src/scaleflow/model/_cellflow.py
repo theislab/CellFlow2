@@ -17,7 +17,7 @@ from ott.neural.methods.flows import dynamics
 
 from scaleflow import _constants
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
-from scaleflow.data import DataManager, GroupedDistribution, ReservoirSampler, SamplerABC
+from scaleflow.data import DataManager, GroupedDistribution, SamplerABC
 from scaleflow.model._utils import _write_predictions
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
@@ -677,12 +677,9 @@ class CellFlow:
             pass
             # self._dataloader = TrainSampler(data=self.train_data, batch_size=batch_size)
 
-        validation_dataloaders = {}
-        for k, v in self._validation_data.items():
-            if k != "predict_kwargs":
-                val_sampler = ReservoirSampler(v, batch_size=validation_batch_size or batch_size)
-                val_sampler.init_sampler(np.random.default_rng(0))
-                validation_dataloaders[k] = val_sampler
+        # TODO: build annbatch-backed validation dataloaders (GroupedAnnbatchSampler).
+        # ReservoirSampler was removed; this legacy CellFlow.train path is not yet wired.
+        validation_dataloaders: dict[str, SamplerABC] = {}
 
         self._solver = self.trainer.train(
             dataloader=self._dataloader,

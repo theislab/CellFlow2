@@ -10,7 +10,7 @@ import pandas as pd
 import zarr
 
 from scaleflow.data._anndata_location import AnnDataLocation
-from scaleflow.data._utils import write_dist_data_threaded, write_nested_dist_data, write_sharded
+from scaleflow.data._utils import write_nested_dist_data, write_sharded
 from scaleflow.data.io import CSRLabelMapping
 
 __all__ = [
@@ -63,9 +63,18 @@ class BaseDataMixin:
 
 @dataclass
 class GroupedDistributionData:
+    """Metadata describing how cells are grouped into source/target distributions.
+
+    This container no longer stores the cell matrices themselves. Instead it keeps,
+    per distribution, the *global observation row indices* into the underlying AnnData
+    (or :class:`annbatch.DatasetCollection`). The actual ``X`` rows are streamed on
+    demand by annbatch using these indices and ``annotation.data_location`` to select
+    which array (``X``, an ``obsm`` key, a ``layers`` key, ...) is the cell representation.
+    """
+
     src_to_tgt_dist_map: dict[int, list[int]]  # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
-    src_data: dict[int, np.ndarray]  # (n_src_dists) → (n_cells_{src_dist_idx}, n_features)
-    tgt_data: dict[int, np.ndarray]  # (n_tgt_dists) → (n_cells_{tgt_dist_idx}, n_features)
+    src_dist_to_rows: dict[int, np.ndarray]  # (n_src_dists) → global obs row indices
+    tgt_dist_to_rows: dict[int, np.ndarray]  # (n_tgt_dists) → global obs row indices
     conditions: dict[int, dict[str, np.ndarray]]  # (n_tgt_dists) → {col_name: (n_rows, *dims)}
 
     @classmethod
@@ -75,20 +84,23 @@ class GroupedDistributionData:
         in_memory: bool = False,
     ) -> GroupedDistributionData:
         """
-        Read the grouped distribution data from a Zarr group.
+        Read the grouped distribution metadata from a Zarr group.
 
         Parameters
         ----------
         group
             Zarr group containing the data.
         in_memory
-            If True, load all arrays into memory as numpy arrays.
-            If False (default), keep arrays as lazy zarr arrays.
+            Accepted for backwards compatibility; ignored. Cell matrices are not
+            stored here (they are streamed by annbatch), and the row-index maps are
+            always small enough to load eagerly.
 
         Conditions are stored in CSR-like format:
         - Each column is a contiguous array (all dists concatenated)
         - Metadata contains dist_ids and indptr for each column
         """
+        del in_memory  # cells are streamed externally; nothing lazy to keep here
+
         # Read conditions from CSR-like structure (always in memory)
         conditions = {}
         if "conditions" in group:
@@ -116,57 +128,27 @@ class GroupedDistributionData:
                         end = indptr[i + 1]
                         conditions[dist_id][col_name] = concatenated[start:end]
 
-        # Read src_data and tgt_data (optionally load into memory)
-        if in_memory:
-            src_data = {int(k): group["src_data"][k][...] for k in group["src_data"].keys()}
-            tgt_data = {int(k): group["tgt_data"][k][...] for k in group["tgt_data"].keys()}
-        else:
-            src_data = {int(k): group["src_data"][k] for k in group["src_data"].keys()}
-            tgt_data = {int(k): group["tgt_data"][k] for k in group["tgt_data"].keys()}
-
         return cls(
             src_to_tgt_dist_map={
                 int(k): np.array(group["src_to_tgt_dist_map"][k]) for k in group["src_to_tgt_dist_map"].keys()
             },
-            src_data=src_data,
-            tgt_data=tgt_data,
+            src_dist_to_rows={int(k): np.asarray(group["src_dist_to_rows"][k]) for k in group["src_dist_to_rows"].keys()},
+            tgt_dist_to_rows={int(k): np.asarray(group["tgt_dist_to_rows"][k]) for k in group["tgt_dist_to_rows"].keys()},
             conditions=conditions,
         )
 
     @property
     def is_in_memory(self) -> bool:
-        """Check if all data is loaded in memory (numpy arrays) vs lazy (zarr arrays).
+        """Always :obj:`True`.
 
-        Returns True if all src_data and tgt_data arrays are numpy arrays.
-        Returns False if any are zarr arrays (lazy loading).
+        Kept for backwards compatibility. The cell matrices live in the external
+        AnnData/zarr store and are streamed by annbatch; only lightweight row-index
+        metadata is held here, which is always in memory.
         """
-        if not self.src_data and not self.tgt_data:
-            return True  # Empty data is considered in-memory
-
-        # Check first src_data array
-        if self.src_data:
-            first_src = next(iter(self.src_data.values()))
-            if isinstance(first_src, zarr.Array):
-                return False
-
-        # Check first tgt_data array
-        if self.tgt_data:
-            first_tgt = next(iter(self.tgt_data.values()))
-            if isinstance(first_tgt, zarr.Array):
-                return False
-
         return True
 
     def to_memory(self) -> None:
-        """Convert all lazy zarr arrays to in-memory numpy arrays (in-place).
-
-        Does nothing if data is already in memory.
-        """
-        if self.is_in_memory:
-            return None
-
-        self.src_data = {int(k): self.src_data[k][...] for k in self.src_data.keys()}
-        self.tgt_data = {int(k): self.tgt_data[k][...] for k in self.tgt_data.keys()}
+        """No-op, kept for backwards compatibility (cells are streamed externally)."""
         return None
 
     def write_zarr_group(
@@ -174,29 +156,27 @@ class GroupedDistributionData:
         group: zarr.Group,
         chunk_size: int,
         shard_size: int,
-        max_workers: int,
+        max_workers: int = 1,
     ) -> None:
-        """Write the grouped distribution data to a Zarr group."""
-        data = group.create_group("data")
-        write_sharded(
-            group=data,
-            name="src_to_tgt_dist_map",
-            data={str(k): np.array(v) for k, v in self.src_to_tgt_dist_map.items()},
-            chunk_size=chunk_size,
-            shard_size=shard_size,
-            compressors=None,
-        )
+        """Write the grouped distribution metadata to a Zarr group.
 
-        # Write src_data and tgt_data using simple writer
-        for key in ["src_data", "tgt_data"]:
-            sub_group = data.create_group(key)
-            value = getattr(self, key)
-            write_dist_data_threaded(
-                group=sub_group,
-                dist_data=value,
+        ``max_workers`` is accepted for backwards compatibility but unused: there are
+        no large cell matrices to write in parallel anymore.
+        """
+        del max_workers
+        data = group.create_group("data")
+        for name, dist_map in (
+            ("src_to_tgt_dist_map", self.src_to_tgt_dist_map),
+            ("src_dist_to_rows", self.src_dist_to_rows),
+            ("tgt_dist_to_rows", self.tgt_dist_to_rows),
+        ):
+            write_sharded(
+                group=data,
+                name=name,
+                data={str(k): np.asarray(v) for k, v in dist_map.items()},
                 chunk_size=chunk_size,
                 shard_size=shard_size,
-                max_workers=max_workers,
+                compressors=None,
             )
 
         conditions_group = data.create_group("conditions")

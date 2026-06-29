@@ -1,7 +1,7 @@
 import functools
 import os
 import types
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import field as dc_field
 from typing import Any, Literal
 
@@ -17,7 +17,16 @@ from ott.neural.methods.flows import dynamics
 
 from scaleflow import _constants
 from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
-from scaleflow.data import DataManager, GroupedDistribution, ReservoirSampler, SamplerABC
+from scaleflow.data import (
+    AnnDataLocation,
+    DataManager,
+    GroupedAnnbatchSampler,
+    GroupedDistribution,
+    PredictionSampler,
+    SamplerABC,
+    SourceCache,
+    ValidationSampler,
+)
 from scaleflow.model._utils import _write_predictions
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
@@ -68,196 +77,142 @@ class ScaleFlow:
 
     def prepare_data(
         self,
-        adata: ad.AnnData,
-        sample_rep: str,
-        control_key: str,
-        perturbation_covariates: dict[str, Sequence[str]],
-        perturbation_covariate_reps: dict[str, str] | None = None,
-        sample_covariates: Sequence[str] | None = None,
-        sample_covariate_reps: dict[str, str] | None = None,
-        split_covariates: Sequence[str] | None = None,
-        max_combination_length: int | None = None,
-        null_value: float = 0.0,
+        collection: Any,
+        *,
+        dist_flag_key: str,
+        src_dist_keys: Sequence[str],
+        tgt_dist_keys: Sequence[str],
+        rep_keys: dict[str, str] | None = None,
+        rep_path: str | None = None,
+        rep_dict: Mapping[str, Any] | None = None,
+        data_location: AnnDataLocation | None = None,
+        extra_rep_keys: dict[str, tuple[str, str]] | None = None,
+        verbose: bool = False,
     ) -> None:
-        """Prepare the dataloader for training from :attr:`~scaleflow.model.CellFlow.adata`.
+        """Prepare grouped-distribution training metadata from an on-disk store.
+
+        Cells are streamed on demand by annbatch from ``collection`` (an
+        :class:`annbatch.DatasetCollection` or a path to one); no in-memory AnnData is
+        required and ``X`` is never fully materialized. Source (control) and target
+        (perturbed) cells are grouped into distributions from the collection's ``obs``,
+        and condition embeddings are read from a separate ``uns`` store (``rep_path``)
+        or an in-memory mapping (``rep_dict``) — a :class:`annbatch.DatasetCollection`
+        does not round-trip ``uns``.
 
         Parameters
         ----------
-        sample_rep
-            Key in :attr:`~anndata.AnnData.obsm` of :attr:`scaleflow.model.CellFlow.adata` where
-            the sample representation is stored or ``'X'`` to use :attr:`~anndata.AnnData.X`.
-        control_key
-            Key of a boolean column in :attr:`~anndata.AnnData.obs` of
-            :attr:`scaleflow.model.CellFlow.adata` that defines the control samples.
-        perturbation_covariates
-            A dictionary where the keys indicate the name of the covariate group and the values are
-            keys in :attr:`~anndata.AnnData.obs` of :attr:`scaleflow.model.CellFlow.adata`. The
-            corresponding columns can be of the following types:
-
-            - categorial: The column contains categories whose representation is stored in
-              :attr:`~anndata.AnnData.uns`, see ``'perturbation_covariate_reps'``.
-            - boolean: The perturbation is present or absent.
-            - numeric: The perturbation is given as a numeric value, possibly linked to
-              a categorical perturbation, e.g. dosages for a drug.
-
-            If multiple groups are provided, the first is interpreted as the primary
-            perturbation and the others as covariates corresponding to these perturbations.
-        perturbation_covariate_reps
-            A :class:`dict` where the keys indicate the name of the covariate group and the values
-            are keys in :attr:`~anndata.AnnData.uns` storing a dictionary with the representation
-            of the covariates.
-        sample_covariates
-            Keys in :attr:`~anndata.AnnData.obs` indicating sample covariates. Sample covariates
-            are defined such that each cell has only one value for each sample covariate (in
-            constrast to ``'perturbation_covariates'`` which can have multiple values for each
-            cell). If :obj:`None`, no sample
-        sample_covariate_reps
-            A dictionary where the keys indicate the name of the covariate group and the values
-            are keys in :attr:`~anndata.AnnData.uns` storing a dictionary with the representation
-            of the covariates.
-        split_covariates
-            Covariates in :attr:`~anndata.AnnData.obs` to split all control cells into different
-            control populations. The perturbed cells are also split according to these columns,
-            but if any of the ``'split_covariates'`` has a representation which should be
-            incorporated by the model, the corresponding column should also be used in
-            ``'perturbation_covariates'``.
-        max_combination_length
-            Maximum number of combinations of primary ``'perturbation_covariates'``. If
-            :obj:`None`, the value is inferred from the provided ``'perturbation_covariates'``
-            as the maximal number of perturbations a cell has been treated with.
-        null_value
-            Value to use for padding to ``'max_combination_length'``.
+        collection
+            An :class:`annbatch.DatasetCollection` or a path to one.
+        dist_flag_key
+            Boolean ``obs`` column that is ``True`` for control (source) cells.
+        src_dist_keys
+            ``obs`` columns that define the source (control) populations.
+        tgt_dist_keys
+            ``obs`` columns that define the target (perturbation) conditions.
+        rep_keys
+            Mapping ``{covariate_column: rep_store_key}`` selecting the embedding for
+            each covariate. Columns without an entry are used numerically (e.g. dosage).
+        rep_path
+            Path to a zarr/h5 ``uns``-shaped store whose top-level keys are the
+            ``rep_keys`` values (each a ``{label: embedding}`` mapping).
+        rep_dict
+            Already-loaded representations, as an alternative to ``rep_path``.
+        data_location
+            Which array to stream as the cell representation. Defaults to ``X``.
+        extra_rep_keys
+            Optional extra embeddings keyed by a new condition name; see
+            :class:`~scaleflow.data.DataManager`.
+        verbose
+            Whether to print timing information.
 
         Returns
         -------
-        Updates the following fields:
-
-        - :attr:`scaleflow.model.CellFlow.data_manager` - the :class:`scaleflow.data.DataManager` object.
-        - :attr:`scaleflow.model.CellFlow.train_data` - the training data.
-
-        Example
-        -------
-            Consider the case where we have combinations of drugs along with dosages, saved in
-            :attr:`~anndata.AnnData.obs` as columns ``drug_1`` and ``drug_2`` with three different
-            drugs ``DrugA``, ``DrugB``, and ``DrugC``, and ``dose_1`` and ``dose_2`` for their
-            dosages, respectively. We store the embeddings of the drugs in
-            :attr:`~anndata.AnnData.uns` under the key ``drug_embeddings``, while the dosage
-            columns are numeric. Moreover, we have a covariate ``cell_type`` with values
-            ``cell_typeA`` and ``cell_typeB``, with embeddings stored in
-            :attr:`~anndata.AnnData.uns` under the key ``cell_type_embeddings``. Note that we then
-            also have to set ``'split_covariates'`` as we assume we have an unperturbed population
-            for each cell type.
-
-            .. code-block:: python
-
-                perturbation_covariates = {{"drug": ("drug_1", "drug_2"), "dose": ("dose_1", "dose_2")}}
-                perturbation_covariate_reps = {"drug": "drug_embeddings"}
-                adata.uns["drug_embeddings"] = {
-                    "drugA": np.array([0.1, 0.2, 0.3]),
-                    "drugB": np.array([0.4, 0.5, 0.6]),
-                    "drugC": np.array([-0.2, 0.3, 0.0]),
-                }
-
-                sample_covariates = {"cell_type": "cell_type_embeddings"}
-                adata.uns["cell_type_embeddings"] = {
-                    "cell_typeA": np.array([0.0, 1.0]),
-                    "cell_typeB": np.array([0.0, 2.0]),
-                }
-
-                split_covariates = ["cell_type"]
-
-                cf = CellFlow(adata)
-                cf = cf.prepare_data(
-                    sample_rep="X",
-                    control_key="control",
-                    perturbation_covariates=perturbation_covariates,
-                    perturbation_covariate_reps=perturbation_covariate_reps,
-                    sample_covariates=sample_covariates,
-                    sample_covariate_reps=sample_covariate_reps,
-                    split_covariates=split_covariates,
-                )
+        Updates :attr:`data_manager` and :attr:`train_data`.
         """
+        if data_location is None:
+            data_location = AnnDataLocation().X
         self._dm = DataManager(
-            self.adata,
-            sample_rep=sample_rep,
-            control_key=control_key,
-            perturbation_covariates=perturbation_covariates,
-            perturbation_covariate_reps=perturbation_covariate_reps,
-            sample_covariates=sample_covariates,
-            sample_covariate_reps=sample_covariate_reps,
-            split_covariates=split_covariates,
-            max_combination_length=max_combination_length,
-            null_value=null_value,
+            dist_flag_key=dist_flag_key,
+            src_dist_keys=list(src_dist_keys),
+            tgt_dist_keys=list(tgt_dist_keys),
+            rep_keys=dict(rep_keys) if rep_keys else {},
+            data_location=data_location,
+            extra_rep_keys=extra_rep_keys,
+        )
+        if rep_dict is None and rep_path is None:
+            rep_dict = {}
+        self._train_collection = collection
+        self.train_data = self._dm.prepare_data_from_collection(
+            collection, rep_path=rep_path, rep_dict=rep_dict, verbose=verbose
         )
 
-        self.train_data = self._dm.get_train_data(self.adata)
-        if hasattr(self.train_data, "data") and hasattr(self.train_data.data, "src_data"):
-            first_src_idx = next(iter(self.train_data.data.src_data.keys()))
-            self._data_dim = self.train_data.data.src_data[first_src_idx].shape[-1]
-        else:
-            self._data_dim = self.train_data.cell_data.shape[-1]  # type: ignore[union-attr]
+    def make_dataloader(self, *, batch_size: int = 1024, seed: int = 0, **kwargs: Any) -> GroupedAnnbatchSampler:
+        """Build an annbatch-backed training sampler over the prepared collection."""
+        if self.train_data is None or getattr(self, "_train_collection", None) is None:
+            raise ValueError("Call `prepare_data` first.")
+        return GroupedAnnbatchSampler(
+            self._train_collection, self.train_data, batch_size=batch_size, seed=seed, **kwargs
+        )
+
+    @staticmethod
+    def _feature_dim(collection: Any) -> int:
+        """Read the cell-feature dimension from a collection without loading X."""
+        import zarr
+
+        from scaleflow.data._annbatch_sampler import _open_collection
+
+        coll = _open_collection(collection)
+        g = next(iter(coll))
+        x = g["X"]
+        if isinstance(x, zarr.Array):
+            return int(x.shape[-1])
+        return int(ad.io.sparse_dataset(x).shape[-1])
 
     def prepare_validation_data(
         self,
-        adata: ad.AnnData,
         name: str,
+        val_data: GroupedDistribution,
+        collection: Any | None = None,
         n_conditions_on_log_iteration: int | None = None,
         n_conditions_on_train_end: int | None = None,
         predict_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Prepare the validation data.
+        """Register a validation split for use during training.
 
         Parameters
         ----------
-        adata
-            An :class:`~anndata.AnnData` object.
         name
-            Name of the validation data defining the key in
-            :attr:`scaleflow.model.CellFlow.validation_data`.
+            Key under which to store this validation set in :attr:`validation_data`.
+        val_data
+            A :class:`~scaleflow.data.GroupedDistribution` (e.g. a val/test split) whose
+            cells are streamed from ``collection``.
+        collection
+            The :class:`annbatch.DatasetCollection` (or path) backing ``val_data``.
+            Defaults to the training collection passed to :meth:`prepare_data`.
         n_conditions_on_log_iteration
-            Number of conditions to use for computation callbacks at each logged iteration.
-            If :obj:`None`, use all conditions.
+            Number of conditions to validate on at each logged iteration (all if None).
         n_conditions_on_train_end
-            Number of conditions to use for computation callbacks at the end of training.
-            If :obj:`None`, use all conditions.
+            Number of conditions to validate on at the end of training (all if None).
         predict_kwargs
-            Keyword arguments for the prediction function
-            :func:`scaleflow.solvers._otfm.OTFlowMatching.predict` or
-            :func:`scaleflow.solvers._genot.GENOT.predict` used during validation.
-
-        Returns
-        -------
-        :obj:`None`, and updates the following fields:
-
-        - :attr:`scaleflow.model.CellFlow.validation_data` - a dictionary with the validation data.
-
+            Keyword arguments forwarded to the solver's ``predict`` during validation.
         """
         if self.train_data is None:
-            raise ValueError(
-                "Dataloader not initialized. Training data needs to be set up before preparing validation data. Please call prepare_data first."
-            )
-        val_data = self._dm.get_validation_data(
-            adata,
-            n_conditions_on_log_iteration=n_conditions_on_log_iteration,
-            n_conditions_on_train_end=n_conditions_on_train_end,
-        )
-        self._validation_data[name] = val_data
-        # Batched prediction is not compatible with split covariates
-        # as all conditions need to be the same size
-        split_val = len(val_data.control_to_perturbation) > 1
-        predict_kwargs = predict_kwargs or {}
-        # Check if predict_kwargs is alreday provided from an earlier call
-        if "predict_kwargs" in self._validation_data and len(predict_kwargs):
+            raise ValueError("Call `prepare_data` before `prepare_validation_data`.")
+        if not isinstance(val_data, GroupedDistribution):
+            raise ValueError("`val_data` must be a `GroupedDistribution` (e.g. a split).")
+        self._validation_data[name] = {
+            "gd": val_data,
+            "collection": collection if collection is not None else getattr(self, "_train_collection", None),
+            "n_log": n_conditions_on_log_iteration,
+            "n_end": n_conditions_on_train_end,
+        }
+        self._validation_data.setdefault("predict_kwargs", {})
+        if predict_kwargs:
             self._validation_data["predict_kwargs"].update(predict_kwargs)
-            predict_kwargs = self._validation_data["predict_kwargs"]
-        # Set batched prediction to False if split_val is True
-        if split_val:
-            predict_kwargs["batched"] = False
-        self._validation_data["predict_kwargs"] = predict_kwargs
 
     def prepare_model(
         self,
-        sample_batch: dict[str, Any],
+        sample_batch: dict[str, Any] | None = None,
         max_combination_length: int = 1,
         condition_mode: Literal["deterministic", "stochastic"] = "deterministic",
         regularization: float = 0.0,
@@ -451,8 +406,13 @@ class ScaleFlow:
         # Store the seed for use in train method
         self._seed = seed
 
-        sample_conditions = sample_batch["condition"]
-        self._data_dim = sample_batch["src_cell_data"].shape[-1]
+        if sample_batch is not None:
+            sample_conditions = sample_batch["condition"]
+            self._data_dim = sample_batch["src_cell_data"].shape[-1]
+        else:
+            # derive sizing from the prepared data without streaming a batch
+            sample_conditions = next(iter(self.train_data.data.conditions.values()))
+            self._data_dim = self._feature_dim(self._train_collection)
 
         if condition_mode == "stochastic":
             if regularization == 0.0:
@@ -663,12 +623,25 @@ class ScaleFlow:
         if self.trainer is None:
             raise ValueError("Model not initialized. Please call `prepare_model` first.")
 
+        # Build the annbatch-backed training sampler over the prepared collection if
+        # the caller did not provide one.
+        if train_dataloader is None:
+            train_dataloader = self.make_dataloader(batch_size=batch_size, seed=getattr(self, "_seed", 0))
+        self._dataloader = train_dataloader
 
-        # validation_dataloaders = {}
-        # for k, v in self._validation_data.items():
-        #     if k != "predict_kwargs":
-        #         val_sampler = InMemorySampler()
-        #         validation_dataloaders[k] = val_sampler
+        # Build annbatch-backed validation samplers from registered validation splits.
+        if val_dataloader is None:
+            val_dataloader = {
+                name: ValidationSampler(
+                    info["collection"],
+                    info["gd"],
+                    n_conditions_on_log_iteration=info["n_log"],
+                    n_conditions_on_train_end=info["n_end"],
+                )
+                for name, info in self._validation_data.items()
+                if name != "predict_kwargs"
+            }
+        self._trainer.predict_kwargs = self._validation_data.get("predict_kwargs", {})
 
         self._solver = self.trainer.train(
             dataloader=train_dataloader,
@@ -681,175 +654,163 @@ class ScaleFlow:
 
     def predict(
         self,
-        adata: ad.AnnData,
-        covariate_data: pd.DataFrame,
-        sample_rep: str | None = None,
-        condition_id_key: str | None = None,
-        key_added_prefix: str | None = None,
+        data: GroupedDistribution,
+        collection: Any | None = None,
         rng: ArrayLike | None = None,
         **kwargs: Any,
-    ) -> dict[str, ArrayLike] | None:
-        """Predict perturbation responses.
+    ) -> dict[tuple[str, ...], ArrayLike]:
+        """Predict perturbation responses for the conditions of a GroupedDistribution.
+
+        Source (control) cells are streamed from ``collection`` and pushed forward under
+        each target condition's embedding. Prediction is per-condition (conditions may
+        have different numbers of source cells).
 
         Parameters
         ----------
-        adata
-            An :class:`~anndata.AnnData` object with the source representation.
-        covariate_data
-            Covariate data defining the condition to predict. This :class:`~pandas.DataFrame`
-            should have the same columns as :attr:`~anndata.AnnData.obs` of
-            :attr:`scaleflow.model.CellFlow.adata`, and as registered in
-            :attr:`scaleflow.model.CellFlow.data_manager`.
-        sample_rep
-            Key in :attr:`~anndata.AnnData.obsm` where the sample representation is stored or
-            ``'X'`` to use :attr:`~anndata.AnnData.X`. If :obj:`None`, the key is assumed to be
-            the same as for the training data.
-        condition_id_key
-            Key in ``'covariate_data'`` defining the condition name.
-        key_added_prefix
-            If not :obj:`None`, prefix to store the prediction in :attr:`~anndata.AnnData.obsm`.
-            If :obj:`None`, the predictions are not stored, and the predictions are returned as a
-            :class:`dict`.
+        data
+            A :class:`~scaleflow.data.GroupedDistribution` defining the conditions to
+            predict (e.g. a held-out test split).
+        collection
+            The :class:`annbatch.DatasetCollection` (or path) backing ``data``. Defaults
+            to the training collection passed to :meth:`prepare_data`.
         rng
-            Random number generator. If :obj:`None` and :attr:`scaleflow.model.CellFlow.conditino_mode`
-            is ``'stochastic'``, the condition vector will be the mean of the learnt distributions,
-            otherwise samples from the distribution.
+            Random number generator; only used in ``'stochastic'`` condition mode.
         kwargs
-            Keyword arguments for the predict function, i.e.
-            :meth:`scaleflow.solvers.OTFlowMatching.predict` or :meth:`scaleflow.solvers.GENOT.predict`.
+            Keyword arguments forwarded to the solver's ``predict``.
 
         Returns
         -------
-        If ``'key_added_prefix'`` is :obj:`None`, a :class:`dict` with the predicted sample
-        representation for each perturbation, otherwise stores the predictions in
-        :attr:`~anndata.AnnData.obsm` and returns :obj:`None`.
+        A :class:`dict` mapping each condition key (label tuple) to its predicted sample
+        representation.
         """
         if self.solver is None or not self.solver.is_trained:
             raise ValueError("Model not trained. Please call `train` first.")
 
-        if sample_rep is None:
-            sample_rep = self._dm.sample_rep
+        coll = collection if collection is not None else getattr(self, "_train_collection", None)
+        if coll is None:
+            raise ValueError("No collection available; pass `collection` or call `prepare_data` first.")
 
-        if adata is not None and covariate_data is not None:
-            if covariate_data.empty:
-                raise ValueError("`covariate_data` is empty.")
-            if self._dm.control_key not in adata.obs.columns:
-                raise ValueError(
-                    f"If both `adata` and `covariate_data` are given, the control key `{self._dm.control_key}` must be in `adata.obs`."
-                )
-            if not adata.obs[self._dm.control_key].all():
-                raise ValueError(
-                    f"If both `adata` and `covariate_data` are given, all samples in `adata` must be control samples, and thus `adata.obs[`{self._dm.control_key}`] must be set to `True` everywhere."
-                )
-        pred_data = self._dm.get_prediction_data(
-            adata,
-            sample_rep=sample_rep,  # type: ignore[arg-type]
-            covariate_data=covariate_data,
-            condition_id_key=condition_id_key,
-        )
-        # TODO
-        pred_loader = None
-        # pred_loader = PredictionSampler(pred_data)
+        pred_loader = PredictionSampler(coll, data)
         batch = pred_loader.sample()
         src = batch["source"]
-        condition = batch.get("condition", None)
-        # using jax.tree.map to batch the prediction
-        # because PredictionSampler can return a different number of cells for each condition
-        out = jax.tree.map(
+        condition = batch["condition"]
+        # per-condition prediction (jax.tree.map flattens up to `src`, so each condition
+        # dict is treated as a single leaf passed as `condition`).
+        return jax.tree.map(
             functools.partial(self.solver.predict, rng=rng, **kwargs),
             src,
-            condition,  # type: ignore[attr-defined]
+            condition,
         )
-        if key_added_prefix is None:
-            return out
-        if len(pred_data.control_to_perturbation) > 1:
-            raise ValueError(
-                f"When saving predictions to `adata`, all control cells must be from the same control \
-                                population, but found {len(pred_data.control_to_perturbation)} control populations."
-            )
-        out_np = {k: np.array(v) for k, v in out.items()}
-        _write_predictions(
-            adata=adata,
-            predictions=out_np,
-            key_added_prefix=key_added_prefix,
-        )
+
+    def predict_covariates(
+        self,
+        covariate_data: pd.DataFrame,
+        collection: Any | None = None,
+        rep_dict: dict[str, Any] | None = None,
+        rep_path: str | None = None,
+        rng: ArrayLike | None = None,
+        **kwargs: Any,
+    ) -> dict[tuple[str, ...], ArrayLike]:
+        """Predict responses for arbitrary (possibly unseen) covariate combinations.
+
+        Builds a condition embedding for each unique row of ``covariate_data`` and pushes
+        forward the matching trained control population (matched by ``src_dist_keys``
+        label, i.e. "set the perturbations to control to find the source").
+
+        Parameters
+        ----------
+        covariate_data
+            DataFrame whose columns include ``src_dist_keys`` and ``tgt_dist_keys``.
+        collection
+            Collection backing the control (source) populations; defaults to the training
+            collection.
+        rep_dict / rep_path
+            Representations (embeddings) for the covariates.
+        rng
+            Random number generator; only used in ``'stochastic'`` condition mode.
+        kwargs
+            Forwarded to the solver's ``predict``.
+
+        Returns
+        -------
+        Mapping ``{condition_key: prediction}`` where ``condition_key`` is the
+        ``(src_dist_keys + tgt_dist_keys)`` label tuple.
+        """
+        if self.solver is None or not self.solver.is_trained:
+            raise ValueError("Model not trained. Please call `train` first.")
+        if self.train_data is None:
+            raise ValueError("Call `prepare_data` first (control populations come from the training data).")
+        coll = collection if collection is not None else getattr(self, "_train_collection", None)
+        if coll is None:
+            raise ValueError("No collection available; pass `collection` or call `prepare_data` first.")
+
+        conditions = self._dm.get_condition_data(covariate_data, rep_dict=rep_dict, rep_path=rep_path)
+        source_cache = SourceCache(coll, self.train_data.data.src_dist_to_rows)
+        label_to_src = {
+            tuple(str(x) for x in lbl): int(idx)
+            for idx, lbl in self.train_data.annotation.src_dist_idx_to_labels.items()
+        }
+        n_src = len(self._dm.src_dist_keys)
+
+        predict_fn = functools.partial(self.solver.predict, rng=rng, **kwargs)
+        out: dict[tuple[str, ...], ArrayLike] = {}
+        for cond_key, cond_dict in conditions.items():
+            src_label = tuple(cond_key[:n_src])
+            if src_label not in label_to_src:
+                raise ValueError(f"No trained control population for source label {src_label}.")
+            src_cells = source_cache.cells(label_to_src[src_label])
+            out[cond_key] = predict_fn(src_cells, cond_dict)
+        return out
 
     def get_condition_embedding(
         self,
-        adata: ad.AnnData,
         covariate_data: pd.DataFrame,
-        rep_dict: dict[str, str] | None = None,
+        rep_dict: dict[str, Any] | None = None,
+        rep_path: str | None = None,
         condition_id_key: str | None = None,
-        key_added: str | None = _constants.CONDITION_EMBEDDING,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Get the embedding of the conditions.
+        """Get the learnt embedding (mean and log-variance) of conditions.
 
-        Outputs the mean and variance of the learnt embeddings
-        generated by the :class:`~scaleflow.networks.ConditionEncoder`.
+        Builds condition embeddings for arbitrary covariate combinations via
+        :meth:`~scaleflow.data.DataManager.get_condition_data` and encodes each with the
+        trained :class:`~scaleflow.networks.ConditionEncoder`.
 
         Parameters
         ----------
         covariate_data
-            Can be one of
-
-            - a :class:`~pandas.DataFrame` defining the conditions with the same columns as the
-              :class:`~anndata.AnnData` used for the initialisation of :class:`~scaleflow.model.CellFlow`.
-            - an instance of :class:`~scaleflow.data.ConditionData`.
-
-        rep_dict
-            Dictionary containing the representations of the perturbation covariates. Will be considered an
-            empty dictionary if :obj:`None`.
+            A :class:`~pandas.DataFrame` whose columns include the ``src_dist_keys`` and
+            ``tgt_dist_keys`` registered in :attr:`data_manager`.
+        rep_dict / rep_path
+            Representations (embeddings); a separate ``uns`` store path or an in-memory
+            mapping. If both are :obj:`None`, an empty mapping is used.
         condition_id_key
-            Key defining the name of the condition. Only available
-            if ``'covariate_data'`` is a :class:`~pandas.DataFrame`.
-        key_added
-            Key to store the condition embedding in :attr:`~anndata.AnnData.uns`.
+            Optional column in ``covariate_data`` to use as the condition key.
 
         Returns
         -------
-        A :class:`tuple` of :class:`~pandas.DataFrame` with the mean and variance of the condition embeddings.
+        A :class:`tuple` of :class:`~pandas.DataFrame` with the mean and log-variance of
+        the condition embeddings, indexed by condition key.
         """
         if self.solver is None or not self.solver.is_trained:
             raise ValueError("Model not trained. Please call `train` first.")
 
-        if hasattr(covariate_data, "condition_data"):
-            cond_data = covariate_data
-        elif isinstance(covariate_data, pd.DataFrame):
-            cond_data = self._dm.get_condition_data(
-                covariate_data=covariate_data,
-                rep_dict=rep_dict,
-                condition_id_key=condition_id_key,
-            )
-        else:
-            raise ValueError("Covariate data must be a `pandas.DataFrame` or an instance of `BaseData`.")
+        conditions = self._dm.get_condition_data(
+            covariate_data,
+            rep_dict=rep_dict,
+            rep_path=rep_path,
+            condition_id_key=condition_id_key,
+        )
 
-        condition_embeddings_mean: dict[str, ArrayLike] = {}
-        condition_embeddings_var: dict[str, ArrayLike] = {}
-        n_conditions = len(next(iter(cond_data.condition_data.values())))
-        for i in range(n_conditions):
-            condition = {k: v[[i], :] for k, v in cond_data.condition_data.items()}
-            if condition_id_key:
-                c_key = cond_data.perturbation_idx_to_id[i]
-            else:
-                cov_combination = cond_data.perturbation_idx_to_covariates[i]
-                c_key = tuple(cov_combination[i] for i in range(len(cov_combination)))
-            condition_embeddings_mean[c_key], condition_embeddings_var[c_key] = self.solver.get_condition_embedding(
-                condition
-            )
+        means: dict[Any, ArrayLike] = {}
+        logvars: dict[Any, ArrayLike] = {}
+        for cond_key, cond in conditions.items():
+            mean, logvar = self.solver.get_condition_embedding(cond)
+            means[cond_key] = np.asarray(mean)[0]
+            logvars[cond_key] = np.asarray(logvar)[0]
 
-        df_mean = pd.DataFrame.from_dict({k: v[0] for k, v in condition_embeddings_mean.items()}).T
-        df_var = pd.DataFrame.from_dict({k: v[0] for k, v in condition_embeddings_var.items()}).T
-
-        if condition_id_key:
-            df_mean.index.set_names([condition_id_key], inplace=True)
-            df_var.index.set_names([condition_id_key], inplace=True)
-        else:
-            df_mean.index.set_names(list(self._dm.perturb_covar_keys), inplace=True)
-            df_var.index.set_names(list(self._dm.perturb_covar_keys), inplace=True)
-
-        if key_added is not None:
-            _utils.set_plotting_vars(adata, key=key_added, value=df_mean)
-            _utils.set_plotting_vars(adata, key=key_added, value=df_var)
+        df_mean = pd.DataFrame.from_dict(means, orient="index")
+        df_var = pd.DataFrame.from_dict(logvars, orient="index")
+        return df_mean, df_var
 
         return df_mean, df_var
 

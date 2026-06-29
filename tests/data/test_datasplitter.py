@@ -1184,15 +1184,23 @@ class TestSplitReconstruction:
                 # Get the label for this tgt_dist_idx
                 tgt_label = split_annotation.tgt_dist_idx_to_labels[tgt_idx]
 
-                # The label should be a tuple of (drug, gene) values
-                assert len(tgt_label) == len(original_annotation.tgt_dist_keys), (
-                    f"Label {tgt_label} should have same length as tgt_dist_keys"
+                # The label is a tuple over (src_dist_keys + tgt_dist_keys) values, so that
+                # each (cell_line, drug, gene) target distribution gets a unique label.
+                expected_len = len(original_annotation.src_dist_keys) + len(original_annotation.tgt_dist_keys)
+                assert len(tgt_label) == expected_len, (
+                    f"Label {tgt_label} should match src_dist_keys + tgt_dist_keys"
                 )
 
                 # Verify the label exists in original adata
-                drug_val, gene_val = tgt_label
-                matching = adata_test.obs[(adata_test.obs["drug"] == drug_val) & (adata_test.obs["gene"] == gene_val)]
-                assert len(matching) > 0, f"Could not find cells with drug={drug_val}, gene={gene_val} in {split_name}"
+                cell_line_val, drug_val, gene_val = tgt_label
+                matching = adata_test.obs[
+                    (adata_test.obs["cell_line"] == cell_line_val)
+                    & (adata_test.obs["drug"] == drug_val)
+                    & (adata_test.obs["gene"] == gene_val)
+                ]
+                assert len(matching) > 0, (
+                    f"Could not find cells with cell_line={cell_line_val}, drug={drug_val}, gene={gene_val} in {split_name}"
+                )
 
     def test_split_src_tgt_df_rows_map_to_original(self, sample_grouped_distribution):
         """Test that all rows in split src_tgt_dist_df exist in original."""
@@ -1310,9 +1318,9 @@ class TestGroupedDistributionSplitterSplitData:
 
         result = splitter.split()
 
-        train_tgt_idxs = set(result["train"].data.tgt_data.keys())
-        val_tgt_idxs = set(result["val"].data.tgt_data.keys())
-        test_tgt_idxs = set(result["test"].data.tgt_data.keys())
+        train_tgt_idxs = set(result["train"].data.tgt_dist_to_rows.keys())
+        val_tgt_idxs = set(result["val"].data.tgt_dist_to_rows.keys())
+        test_tgt_idxs = set(result["test"].data.tgt_dist_to_rows.keys())
 
         # No overlap between any pair
         assert train_tgt_idxs.isdisjoint(val_tgt_idxs)
@@ -1333,18 +1341,18 @@ class TestGroupedDistributionSplitterSplitData:
 
         result = splitter.split()
 
-        original_tgt_idxs = set(sample_grouped_distribution.data.tgt_data.keys())
+        original_tgt_idxs = set(sample_grouped_distribution.data.tgt_dist_to_rows.keys())
 
         union_tgt_idxs = (
-            set(result["train"].data.tgt_data.keys())
-            | set(result["val"].data.tgt_data.keys())
-            | set(result["test"].data.tgt_data.keys())
+            set(result["train"].data.tgt_dist_to_rows.keys())
+            | set(result["val"].data.tgt_dist_to_rows.keys())
+            | set(result["test"].data.tgt_dist_to_rows.keys())
         )
 
         assert union_tgt_idxs == original_tgt_idxs
 
-    def test_split_tgt_data_values_match_original(self, sample_grouped_distribution):
-        """Test that tgt_data values in splits match the original."""
+    def test_split_tgt_dist_rows_match_original(self, sample_grouped_distribution):
+        """Test that tgt_dist_to_rows in splits match the original."""
         splitter = GroupedDistributionSplitter(
             gd=sample_grouped_distribution,
             holdout_combinations=False,
@@ -1358,10 +1366,10 @@ class TestGroupedDistributionSplitterSplitData:
         result = splitter.split()
 
         for split_name, split_gd in result.items():
-            for tgt_idx, tgt_data in split_gd.data.tgt_data.items():
-                original_data = sample_grouped_distribution.data.tgt_data[tgt_idx]
-                assert np.array_equal(tgt_data, original_data), (
-                    f"tgt_data[{tgt_idx}] in {split_name} should match original"
+            for tgt_idx, tgt_rows in split_gd.data.tgt_dist_to_rows.items():
+                original_rows = sample_grouped_distribution.data.tgt_dist_to_rows[tgt_idx]
+                assert np.array_equal(tgt_rows, original_rows), (
+                    f"tgt_dist_to_rows[{tgt_idx}] in {split_name} should match original"
                 )
 
     def test_split_conditions_match_original(self, sample_grouped_distribution):
@@ -1400,25 +1408,25 @@ class TestGroupedDistributionSplitterSplitData:
         result = splitter.split()
 
         for split_name, split_gd in result.items():
-            # All sources in the map should exist in src_data
+            # All sources in the map should exist in src_dist_to_rows
             for src_idx in split_gd.data.src_to_tgt_dist_map.keys():
-                assert src_idx in split_gd.data.src_data, (
-                    f"src_idx {src_idx} in map but not in src_data for {split_name}"
+                assert src_idx in split_gd.data.src_dist_to_rows, (
+                    f"src_idx {src_idx} in map but not in src_dist_to_rows for {split_name}"
                 )
 
-            # All targets in the map should exist in tgt_data
+            # All targets in the map should exist in tgt_dist_to_rows
             for _src_idx, tgt_idxs in split_gd.data.src_to_tgt_dist_map.items():
                 for tgt_idx in tgt_idxs:
-                    assert tgt_idx in split_gd.data.tgt_data, (
-                        f"tgt_idx {tgt_idx} in map but not in tgt_data for {split_name}"
+                    assert tgt_idx in split_gd.data.tgt_dist_to_rows, (
+                        f"tgt_idx {tgt_idx} in map but not in tgt_dist_to_rows for {split_name}"
                     )
 
 
 class TestRoundTripAdataToSplitAndBack:
     """Test round-trip: adata → GroupedDistribution → split → verify data integrity."""
 
-    def test_roundtrip_tgt_data_can_be_reconstructed(self, sample_grouped_distribution, adata_test):
-        """Test that all tgt_data can be traced back to original adata."""
+    def test_roundtrip_tgt_dist_rows_can_be_reconstructed(self, sample_grouped_distribution, adata_test):
+        """Test that all tgt_dist_to_rows can be reconstructed from splits."""
         splitter = GroupedDistributionSplitter(
             gd=sample_grouped_distribution,
             holdout_combinations=False,
@@ -1432,16 +1440,16 @@ class TestRoundTripAdataToSplitAndBack:
         result = splitter.split()
         original_gd = sample_grouped_distribution
 
-        # Reconstruct all tgt_data from splits
-        reconstructed_tgt_data = {}
+        # Reconstruct all tgt row indices from splits
+        reconstructed_tgt_rows = {}
         for split_gd in result.values():
-            reconstructed_tgt_data.update(split_gd.data.tgt_data)
+            reconstructed_tgt_rows.update(split_gd.data.tgt_dist_to_rows)
 
-        # Verify all original tgt_data is in reconstructed
-        for tgt_idx, original_data in original_gd.data.tgt_data.items():
-            assert tgt_idx in reconstructed_tgt_data, f"tgt_idx {tgt_idx} missing from reconstructed data"
-            assert np.array_equal(reconstructed_tgt_data[tgt_idx], original_data), (
-                f"tgt_data[{tgt_idx}] doesn't match original"
+        # Verify all original tgt row indices are in reconstructed
+        for tgt_idx, original_rows in original_gd.data.tgt_dist_to_rows.items():
+            assert tgt_idx in reconstructed_tgt_rows, f"tgt_idx {tgt_idx} missing from reconstructed data"
+            assert np.array_equal(reconstructed_tgt_rows[tgt_idx], original_rows), (
+                f"tgt_dist_to_rows[{tgt_idx}] doesn't match original"
             )
 
     def test_roundtrip_conditions_can_be_reconstructed(self, sample_grouped_distribution):
@@ -1518,13 +1526,20 @@ class TestRoundTripAdataToSplitAndBack:
         for split_name, split_gd in result.items():
             # For each target distribution, verify labels exist in adata
             for _tgt_idx, tgt_label in split_gd.annotation.tgt_dist_idx_to_labels.items():
-                drug_val, gene_val = tgt_label
+                # Labels are (src_dist_keys + tgt_dist_keys) = (cell_line, drug, gene).
+                cell_line_val, drug_val, gene_val = tgt_label
                 # Find matching rows in adata
-                matching = adata_test.obs[(adata_test.obs["drug"] == drug_val) & (adata_test.obs["gene"] == gene_val)]
-                assert len(matching) > 0, f"No cells found for drug={drug_val}, gene={gene_val} in {split_name}"
+                matching = adata_test.obs[
+                    (adata_test.obs["cell_line"] == cell_line_val)
+                    & (adata_test.obs["drug"] == drug_val)
+                    & (adata_test.obs["gene"] == gene_val)
+                ]
+                assert len(matching) > 0, (
+                    f"No cells found for cell_line={cell_line_val}, drug={drug_val}, gene={gene_val} in {split_name}"
+                )
 
-    def test_roundtrip_data_dimensions_preserved(self, sample_grouped_distribution):
-        """Test that data dimensions are preserved through split."""
+    def test_roundtrip_row_index_shapes_preserved(self, sample_grouped_distribution):
+        """Test that row-index array shapes are preserved through split."""
         splitter = GroupedDistributionSplitter(
             gd=sample_grouped_distribution,
             holdout_combinations=False,
@@ -1538,18 +1553,18 @@ class TestRoundTripAdataToSplitAndBack:
         result = splitter.split()
         original_gd = sample_grouped_distribution
 
-        # Check that feature dimensions are preserved
+        # Check that row-index array shapes are preserved
         for split_gd in result.values():
-            for tgt_idx, tgt_data in split_gd.data.tgt_data.items():
-                original_data = original_gd.data.tgt_data[tgt_idx]
-                assert tgt_data.shape == original_data.shape, f"Shape mismatch for tgt_idx {tgt_idx}"
+            for tgt_idx, tgt_rows in split_gd.data.tgt_dist_to_rows.items():
+                original_rows = original_gd.data.tgt_dist_to_rows[tgt_idx]
+                assert tgt_rows.shape == original_rows.shape, f"Shape mismatch for tgt_idx {tgt_idx}"
 
-            for src_idx, src_data in split_gd.data.src_data.items():
-                original_data = original_gd.data.src_data[src_idx]
-                assert src_data.shape == original_data.shape, f"Shape mismatch for src_idx {src_idx}"
+            for src_idx, src_rows in split_gd.data.src_dist_to_rows.items():
+                original_rows = original_gd.data.src_dist_to_rows[src_idx]
+                assert src_rows.shape == original_rows.shape, f"Shape mismatch for src_idx {src_idx}"
 
-    def test_total_cells_preserved_in_tgt_data(self, sample_grouped_distribution):
-        """Test that total number of cells in tgt_data is preserved."""
+    def test_total_cells_preserved_in_tgt_dist_rows(self, sample_grouped_distribution):
+        """Test that total number of cell row indices in tgt_dist_to_rows is preserved."""
         splitter = GroupedDistributionSplitter(
             gd=sample_grouped_distribution,
             holdout_combinations=False,
@@ -1563,12 +1578,12 @@ class TestRoundTripAdataToSplitAndBack:
         result = splitter.split()
         original_gd = sample_grouped_distribution
 
-        # Count total cells in original tgt_data
-        original_total_cells = sum(data.shape[0] for data in original_gd.data.tgt_data.values())
+        # Count total cell row indices in original tgt_dist_to_rows
+        original_total_cells = sum(rows.shape[0] for rows in original_gd.data.tgt_dist_to_rows.values())
 
-        # Count total cells in split tgt_data
+        # Count total cell row indices in split tgt_dist_to_rows
         split_total_cells = sum(
-            data.shape[0] for split_gd in result.values() for data in split_gd.data.tgt_data.values()
+            rows.shape[0] for split_gd in result.values() for rows in split_gd.data.tgt_dist_to_rows.values()
         )
 
         assert split_total_cells == original_total_cells, (

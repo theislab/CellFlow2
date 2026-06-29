@@ -96,8 +96,8 @@ class TestPrepareDatasets:
 
         for _name, gd in result.items():
             assert isinstance(gd, GroupedDistribution)
-            assert len(gd.data.src_data) > 0
-            assert len(gd.data.tgt_data) > 0
+            assert len(gd.data.src_dist_to_rows) > 0
+            assert len(gd.data.tgt_dist_to_rows) > 0
 
     def test_empty_dict(self, sample_data_manager):
         """Test with empty datasets dict."""

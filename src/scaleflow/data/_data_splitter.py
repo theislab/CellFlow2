@@ -305,11 +305,13 @@ class GroupedDistributionSplitter:
             split_tgt_idxs = set(split_annotation.src_tgt_dist_df["tgt_dist_idx"].unique())
             split_src_idxs = set(split_annotation.src_tgt_dist_df["src_dist_idx"].unique())
 
-            # Filter tgt_data, conditions to only include relevant tgt_dist_idx
-            filtered_tgt_data = {
-                tgt_idx: self.gd.data.tgt_data[tgt_idx]
+            # Filter row-index maps + conditions to only the relevant tgt_dist_idx.
+            # Splits are metadata-only: all splits reference the same underlying
+            # collection, each restricted to its own subset of distributions (rows).
+            filtered_tgt_rows = {
+                tgt_idx: self.gd.data.tgt_dist_to_rows[tgt_idx]
                 for tgt_idx in split_tgt_idxs
-                if tgt_idx in self.gd.data.tgt_data
+                if tgt_idx in self.gd.data.tgt_dist_to_rows
             }
             filtered_conditions = {
                 tgt_idx: self.gd.data.conditions[tgt_idx]
@@ -317,11 +319,11 @@ class GroupedDistributionSplitter:
                 if tgt_idx in self.gd.data.conditions
             }
 
-            # Filter src_data to only include relevant src_dist_idx
-            filtered_src_data = {
-                src_idx: self.gd.data.src_data[src_idx]
+            # Filter src row-index map to only include relevant src_dist_idx
+            filtered_src_rows = {
+                src_idx: self.gd.data.src_dist_to_rows[src_idx]
                 for src_idx in split_src_idxs
-                if src_idx in self.gd.data.src_data
+                if src_idx in self.gd.data.src_dist_to_rows
             }
 
             # Build filtered src_to_tgt_dist_map
@@ -339,8 +341,8 @@ class GroupedDistributionSplitter:
             # Create the filtered GroupedDistributionData
             filtered_data = GroupedDistributionData(
                 src_to_tgt_dist_map=filtered_src_to_tgt_map,
-                src_data=filtered_src_data,
-                tgt_data=filtered_tgt_data,
+                src_dist_to_rows=filtered_src_rows,
+                tgt_dist_to_rows=filtered_tgt_rows,
                 conditions=filtered_conditions,
             )
 
