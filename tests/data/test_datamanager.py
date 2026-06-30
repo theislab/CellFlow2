@@ -2,12 +2,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 
-from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution, GroupedDistributionData
-
-
-def _as_rows(r):
-    """Normalize a rows_for value (slice for contiguous runs, else array) to an index array."""
-    return np.arange(r.start, r.stop) if isinstance(r, slice) else np.asarray(r)
+from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution
 
 
 # hardcoded adata for testing the DataManager
@@ -164,10 +159,8 @@ class TestDataManagerBasic:
             1: {8, 9, 10, 11, 12, 13, 14, 15},
         }
 
-        src_dist_to_rows = GroupedDistributionData.rows_for(gd.data.row_src_dist_idx)
-        tgt_dist_to_rows = GroupedDistributionData.rows_for(gd.data.row_tgt_dist_idx)
-        assert len(src_dist_to_rows) == len(expected_src_data)
-        assert len(tgt_dist_to_rows) == len(expected_tgt_data)
+        assert len(gd.data.src_dist_to_rows) == len(expected_src_data)
+        assert len(gd.data.tgt_dist_to_rows) == len(expected_tgt_data)
 
         # Test target mapping correctness
         # Verify that src_to_tgt_dist_map exists for each source
@@ -181,7 +174,7 @@ class TestDataManagerBasic:
             assert len(tgt_indices) > 0, f"Source {src_idx} has no targets"
             # All target indices should exist in tgt_dist_to_rows
             for tgt_idx in tgt_indices:
-                assert tgt_idx in tgt_dist_to_rows, f"Target {tgt_idx} not in tgt_dist_to_rows"
+                assert tgt_idx in gd.data.tgt_dist_to_rows, f"Target {tgt_idx} not in tgt_dist_to_rows"
 
         # Verify that targets are correctly mapped to their source cell_lines
         # using the src_tgt_dist_df
@@ -294,12 +287,11 @@ class TestDataManagerSplitIntegration:
 
         split_result = splitter.split_annotation()
 
-        tgt_dist_to_rows = GroupedDistributionData.rows_for(gd.data.row_tgt_dist_idx)
         # Verify that for each split, the tgt_dist_idx in the annotation
         # corresponds to valid keys in gd.data.tgt_data
         for split_name, split_annotation in split_result.items():
             for tgt_idx in split_annotation.src_tgt_dist_df["tgt_dist_idx"].unique():
-                assert tgt_idx in tgt_dist_to_rows, (
+                assert tgt_idx in gd.data.tgt_dist_to_rows, (
                     f"tgt_dist_idx {tgt_idx} from {split_name} should exist in gd.data.tgt_dist_to_rows"
                 )
                 assert tgt_idx in gd.data.conditions, (
@@ -339,12 +331,11 @@ class TestDataManagerSplitIntegration:
 
         split_result = splitter.split_annotation()
 
-        src_dist_to_rows = GroupedDistributionData.rows_for(gd.data.row_src_dist_idx)
         # Verify that for each split, the src_dist_idx in the annotation
         # corresponds to valid keys in gd.data.src_data
         for split_name, split_annotation in split_result.items():
             for src_idx in split_annotation.src_tgt_dist_df["src_dist_idx"].unique():
-                assert src_idx in src_dist_to_rows, (
+                assert src_idx in gd.data.src_dist_to_rows, (
                     f"src_dist_idx {src_idx} from {split_name} should exist in gd.data.src_dist_to_rows"
                 )
 
@@ -425,17 +416,16 @@ class TestFullRoundTrip:
         split_result = splitter.split()
 
         # Verify we can reconstruct all tgt row indices
-        gd_tgt_rows = GroupedDistributionData.rows_for(gd.data.row_tgt_dist_idx)
         reconstructed_tgt_rows = {}
         for split_gd in split_result.values():
-            reconstructed_tgt_rows.update(GroupedDistributionData.rows_for(split_gd.data.row_tgt_dist_idx))
+            reconstructed_tgt_rows.update(split_gd.data.tgt_dist_to_rows)
 
         # All original tgt distributions should be present
-        assert set(reconstructed_tgt_rows.keys()) == set(gd_tgt_rows.keys())
+        assert set(reconstructed_tgt_rows.keys()) == set(gd.data.tgt_dist_to_rows.keys())
 
         # Row indices should match exactly
-        for tgt_idx in gd_tgt_rows:
-            assert np.array_equal(_as_rows(reconstructed_tgt_rows[tgt_idx]), _as_rows(gd_tgt_rows[tgt_idx]))
+        for tgt_idx in gd.data.tgt_dist_to_rows:
+            assert np.array_equal(reconstructed_tgt_rows[tgt_idx], gd.data.tgt_dist_to_rows[tgt_idx])
 
     def test_split_gd_can_access_original_adata_cells(self):
         """Test that split GD can trace cells back to original adata."""
@@ -627,12 +617,10 @@ class TestShuffleReconstructionWithSplit:
         split_result = splitter.split()
 
         # For each split, verify tgt_dist_to_rows matches original gd's tgt_dist_to_rows
-        gd_tgt_rows = GroupedDistributionData.rows_for(gd.data.row_tgt_dist_idx)
         for split_name, split_gd in split_result.items():
-            for tgt_idx, tgt_rows in GroupedDistributionData.rows_for(split_gd.data.row_tgt_dist_idx).items():
-                tgt_rows = _as_rows(tgt_rows)
+            for tgt_idx, tgt_rows in split_gd.data.tgt_dist_to_rows.items():
                 # tgt_dist_to_rows should match original gd's tgt_dist_to_rows
-                assert np.array_equal(tgt_rows, _as_rows(gd_tgt_rows[tgt_idx])), (
+                assert np.array_equal(tgt_rows, gd.data.tgt_dist_to_rows[tgt_idx]), (
                     f"tgt_dist_to_rows[{tgt_idx}] in {split_name} doesn't match original"
                 )
 
@@ -687,12 +675,10 @@ class TestShuffleReconstructionWithSplit:
         split_result = splitter.split()
 
         # For each split, verify src_dist_to_rows matches original gd's src_dist_to_rows
-        gd_src_rows = GroupedDistributionData.rows_for(gd.data.row_src_dist_idx)
         for split_name, split_gd in split_result.items():
-            for src_idx, src_rows in GroupedDistributionData.rows_for(split_gd.data.row_src_dist_idx).items():
-                src_rows = _as_rows(src_rows)
+            for src_idx, src_rows in split_gd.data.src_dist_to_rows.items():
                 # src_dist_to_rows should match original gd's src_dist_to_rows
-                assert np.array_equal(src_rows, _as_rows(gd_src_rows[src_idx])), (
+                assert np.array_equal(src_rows, gd.data.src_dist_to_rows[src_idx]), (
                     f"src_dist_to_rows[{src_idx}] in {split_name} doesn't match original"
                 )
 
@@ -751,16 +737,16 @@ class TestShuffleReconstructionWithSplit:
         # Collect all cell IDs from tgt row indices across all splits
         reconstructed_tgt_cell_ids = set()
         for split_gd in split_result.values():
-            for tgt_rows in GroupedDistributionData.rows_for(split_gd.data.row_tgt_dist_idx).values():
-                cell_ids = set(adata_shuffled.obsm["X_pca"][_as_rows(tgt_rows), 0].astype(int))
+            for tgt_rows in split_gd.data.tgt_dist_to_rows.values():
+                cell_ids = set(adata_shuffled.obsm["X_pca"][tgt_rows, 0].astype(int))
                 reconstructed_tgt_cell_ids.update(cell_ids)
 
         # Collect all cell IDs from src row indices across all splits
         # (src rows may overlap across splits since same source can have multiple targets)
         reconstructed_src_cell_ids = set()
         for split_gd in split_result.values():
-            for src_rows in GroupedDistributionData.rows_for(split_gd.data.row_src_dist_idx).values():
-                cell_ids = set(adata_shuffled.obsm["X_pca"][_as_rows(src_rows), 0].astype(int))
+            for src_rows in split_gd.data.src_dist_to_rows.values():
+                cell_ids = set(adata_shuffled.obsm["X_pca"][src_rows, 0].astype(int))
                 reconstructed_src_cell_ids.update(cell_ids)
 
         # All reconstructed cell IDs should be subset of original
@@ -829,6 +815,6 @@ class TestShuffleReconstructionWithSplit:
 
         # Both should have the same tgt_dist_idx in each split
         for split_name in ["train", "val", "test"]:
-            tgt_idxs1 = set(GroupedDistributionData.rows_for(split1[split_name].data.row_tgt_dist_idx))
-            tgt_idxs2 = set(GroupedDistributionData.rows_for(split2[split_name].data.row_tgt_dist_idx))
+            tgt_idxs1 = set(split1[split_name].data.tgt_dist_to_rows.keys())
+            tgt_idxs2 = set(split2[split_name].data.tgt_dist_to_rows.keys())
             assert tgt_idxs1 == tgt_idxs2, f"Same random_state should produce same tgt_dist_idx in {split_name}"

@@ -4,13 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scaleflow.data import GroupedDistributionData
 from scaleflow.data._data_splitter import GroupedDistributionSplitter
-
-
-def _as_rows(r):
-    """Normalize a rows_for value (slice for contiguous runs, else array) to an index array."""
-    return np.arange(r.start, r.stop) if isinstance(r, slice) else np.asarray(r)
 
 
 class TestGroupedDistributionSplitterInit:
@@ -1324,9 +1318,9 @@ class TestGroupedDistributionSplitterSplitData:
 
         result = splitter.split()
 
-        train_tgt_idxs = set(GroupedDistributionData.rows_for(result["train"].data.row_tgt_dist_idx))
-        val_tgt_idxs = set(GroupedDistributionData.rows_for(result["val"].data.row_tgt_dist_idx))
-        test_tgt_idxs = set(GroupedDistributionData.rows_for(result["test"].data.row_tgt_dist_idx))
+        train_tgt_idxs = set(result["train"].data.tgt_dist_to_rows.keys())
+        val_tgt_idxs = set(result["val"].data.tgt_dist_to_rows.keys())
+        test_tgt_idxs = set(result["test"].data.tgt_dist_to_rows.keys())
 
         # No overlap between any pair
         assert train_tgt_idxs.isdisjoint(val_tgt_idxs)
@@ -1347,12 +1341,12 @@ class TestGroupedDistributionSplitterSplitData:
 
         result = splitter.split()
 
-        original_tgt_idxs = set(GroupedDistributionData.rows_for(sample_grouped_distribution.data.row_tgt_dist_idx))
+        original_tgt_idxs = set(sample_grouped_distribution.data.tgt_dist_to_rows.keys())
 
         union_tgt_idxs = (
-            set(GroupedDistributionData.rows_for(result["train"].data.row_tgt_dist_idx))
-            | set(GroupedDistributionData.rows_for(result["val"].data.row_tgt_dist_idx))
-            | set(GroupedDistributionData.rows_for(result["test"].data.row_tgt_dist_idx))
+            set(result["train"].data.tgt_dist_to_rows.keys())
+            | set(result["val"].data.tgt_dist_to_rows.keys())
+            | set(result["test"].data.tgt_dist_to_rows.keys())
         )
 
         assert union_tgt_idxs == original_tgt_idxs
@@ -1371,11 +1365,10 @@ class TestGroupedDistributionSplitterSplitData:
 
         result = splitter.split()
 
-        original_tgt_rows = GroupedDistributionData.rows_for(sample_grouped_distribution.data.row_tgt_dist_idx)
         for split_name, split_gd in result.items():
-            for tgt_idx, tgt_rows in GroupedDistributionData.rows_for(split_gd.data.row_tgt_dist_idx).items():
-                original_rows = original_tgt_rows[tgt_idx]
-                assert np.array_equal(_as_rows(tgt_rows), _as_rows(original_rows)), (
+            for tgt_idx, tgt_rows in split_gd.data.tgt_dist_to_rows.items():
+                original_rows = sample_grouped_distribution.data.tgt_dist_to_rows[tgt_idx]
+                assert np.array_equal(tgt_rows, original_rows), (
                     f"tgt_dist_to_rows[{tgt_idx}] in {split_name} should match original"
                 )
 
@@ -1415,18 +1408,16 @@ class TestGroupedDistributionSplitterSplitData:
         result = splitter.split()
 
         for split_name, split_gd in result.items():
-            src_dist_to_rows = GroupedDistributionData.rows_for(split_gd.data.row_src_dist_idx)
-            tgt_dist_to_rows = GroupedDistributionData.rows_for(split_gd.data.row_tgt_dist_idx)
             # All sources in the map should exist in src_dist_to_rows
             for src_idx in split_gd.data.src_to_tgt_dist_map.keys():
-                assert src_idx in src_dist_to_rows, (
+                assert src_idx in split_gd.data.src_dist_to_rows, (
                     f"src_idx {src_idx} in map but not in src_dist_to_rows for {split_name}"
                 )
 
             # All targets in the map should exist in tgt_dist_to_rows
             for _src_idx, tgt_idxs in split_gd.data.src_to_tgt_dist_map.items():
                 for tgt_idx in tgt_idxs:
-                    assert tgt_idx in tgt_dist_to_rows, (
+                    assert tgt_idx in split_gd.data.tgt_dist_to_rows, (
                         f"tgt_idx {tgt_idx} in map but not in tgt_dist_to_rows for {split_name}"
                     )
 
@@ -1452,12 +1443,12 @@ class TestRoundTripAdataToSplitAndBack:
         # Reconstruct all tgt row indices from splits
         reconstructed_tgt_rows = {}
         for split_gd in result.values():
-            reconstructed_tgt_rows.update(GroupedDistributionData.rows_for(split_gd.data.row_tgt_dist_idx))
+            reconstructed_tgt_rows.update(split_gd.data.tgt_dist_to_rows)
 
         # Verify all original tgt row indices are in reconstructed
-        for tgt_idx, original_rows in GroupedDistributionData.rows_for(original_gd.data.row_tgt_dist_idx).items():
+        for tgt_idx, original_rows in original_gd.data.tgt_dist_to_rows.items():
             assert tgt_idx in reconstructed_tgt_rows, f"tgt_idx {tgt_idx} missing from reconstructed data"
-            assert np.array_equal(_as_rows(reconstructed_tgt_rows[tgt_idx]), _as_rows(original_rows)), (
+            assert np.array_equal(reconstructed_tgt_rows[tgt_idx], original_rows), (
                 f"tgt_dist_to_rows[{tgt_idx}] doesn't match original"
             )
 
@@ -1563,16 +1554,14 @@ class TestRoundTripAdataToSplitAndBack:
         original_gd = sample_grouped_distribution
 
         # Check that row-index array shapes are preserved
-        original_tgt_rows = GroupedDistributionData.rows_for(original_gd.data.row_tgt_dist_idx)
-        original_src_rows = GroupedDistributionData.rows_for(original_gd.data.row_src_dist_idx)
         for split_gd in result.values():
-            for tgt_idx, tgt_rows in GroupedDistributionData.rows_for(split_gd.data.row_tgt_dist_idx).items():
-                original_rows = original_tgt_rows[tgt_idx]
-                assert _as_rows(tgt_rows).shape == _as_rows(original_rows).shape, f"Shape mismatch for tgt_idx {tgt_idx}"
+            for tgt_idx, tgt_rows in split_gd.data.tgt_dist_to_rows.items():
+                original_rows = original_gd.data.tgt_dist_to_rows[tgt_idx]
+                assert tgt_rows.shape == original_rows.shape, f"Shape mismatch for tgt_idx {tgt_idx}"
 
-            for src_idx, src_rows in GroupedDistributionData.rows_for(split_gd.data.row_src_dist_idx).items():
-                original_rows = original_src_rows[src_idx]
-                assert _as_rows(src_rows).shape == _as_rows(original_rows).shape, f"Shape mismatch for src_idx {src_idx}"
+            for src_idx, src_rows in split_gd.data.src_dist_to_rows.items():
+                original_rows = original_gd.data.src_dist_to_rows[src_idx]
+                assert src_rows.shape == original_rows.shape, f"Shape mismatch for src_idx {src_idx}"
 
     def test_total_cells_preserved_in_tgt_dist_rows(self, sample_grouped_distribution):
         """Test that total number of cell row indices in tgt_dist_to_rows is preserved."""
@@ -1590,16 +1579,11 @@ class TestRoundTripAdataToSplitAndBack:
         original_gd = sample_grouped_distribution
 
         # Count total cell row indices in original tgt_dist_to_rows
-        original_total_cells = sum(
-            _as_rows(rows).shape[0]
-            for rows in GroupedDistributionData.rows_for(original_gd.data.row_tgt_dist_idx).values()
-        )
+        original_total_cells = sum(rows.shape[0] for rows in original_gd.data.tgt_dist_to_rows.values())
 
         # Count total cell row indices in split tgt_dist_to_rows
         split_total_cells = sum(
-            _as_rows(rows).shape[0]
-            for split_gd in result.values()
-            for rows in GroupedDistributionData.rows_for(split_gd.data.row_tgt_dist_idx).values()
+            rows.shape[0] for split_gd in result.values() for rows in split_gd.data.tgt_dist_to_rows.values()
         )
 
         assert split_total_cells == original_total_cells, (

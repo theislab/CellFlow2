@@ -305,20 +305,25 @@ class GroupedDistributionSplitter:
             split_tgt_idxs = set(split_annotation.src_tgt_dist_df["tgt_dist_idx"].unique())
             split_src_idxs = set(split_annotation.src_tgt_dist_df["src_dist_idx"].unique())
 
-            # Restrict the per-row dist-id columns to this split's distributions; rows of
-            # other splits become -1 (excluded). Splits are metadata-only: all splits share
-            # the same underlying collection (positional row space), each restricted to its
-            # own subset of distributions.
-            filtered_row_tgt = np.where(
-                np.isin(self.gd.data.row_tgt_dist_idx, list(split_tgt_idxs)), self.gd.data.row_tgt_dist_idx, -1
-            ).astype(self.gd.data.row_tgt_dist_idx.dtype)
-            filtered_row_src = np.where(
-                np.isin(self.gd.data.row_src_dist_idx, list(split_src_idxs)), self.gd.data.row_src_dist_idx, -1
-            ).astype(self.gd.data.row_src_dist_idx.dtype)
+            # Filter row-index maps + conditions to only the relevant tgt_dist_idx.
+            # Splits are metadata-only: all splits reference the same underlying
+            # collection, each restricted to its own subset of distributions (rows).
+            filtered_tgt_rows = {
+                tgt_idx: self.gd.data.tgt_dist_to_rows[tgt_idx]
+                for tgt_idx in split_tgt_idxs
+                if tgt_idx in self.gd.data.tgt_dist_to_rows
+            }
             filtered_conditions = {
                 tgt_idx: self.gd.data.conditions[tgt_idx]
                 for tgt_idx in split_tgt_idxs
                 if tgt_idx in self.gd.data.conditions
+            }
+
+            # Filter src row-index map to only include relevant src_dist_idx
+            filtered_src_rows = {
+                src_idx: self.gd.data.src_dist_to_rows[src_idx]
+                for src_idx in split_src_idxs
+                if src_idx in self.gd.data.src_dist_to_rows
             }
 
             # Build filtered src_to_tgt_dist_map
@@ -336,8 +341,8 @@ class GroupedDistributionSplitter:
             # Create the filtered GroupedDistributionData
             filtered_data = GroupedDistributionData(
                 src_to_tgt_dist_map=filtered_src_to_tgt_map,
-                row_tgt_dist_idx=filtered_row_tgt,
-                row_src_dist_idx=filtered_row_src,
+                src_dist_to_rows=filtered_src_rows,
+                tgt_dist_to_rows=filtered_tgt_rows,
                 conditions=filtered_conditions,
             )
 

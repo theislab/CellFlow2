@@ -1,39 +1,23 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import anndata as ad
 import numpy as np
 import pandas as pd
+import zarr
 
 from scaleflow.data._anndata_location import AnnDataLocation
+from scaleflow.data._utils import write_nested_dist_data, write_sharded
+from scaleflow.data.io import CSRLabelMapping
 
 __all__ = [
     "GroupedDistribution",
+    "GroupedDistributionData",
+    "GroupedDistributionAnnotation",
 ]
-
-# Where the grouped-distribution metadata lives on a prepared AnnData. The per-row dist-id
-# columns go in ``obs`` (they ARE the ClassSampler `classes` input); everything else lives in
-# ``uns`` so a single AnnData (X + obs + uns) is a self-contained, reloadable prepared dataset.
-OBS_TGT_DIST_IDX = "scaleflow_tgt_dist_idx"
-OBS_SRC_DIST_IDX = "scaleflow_src_dist_idx"
-UNS_KEY = "scaleflow"
-
-
-def _json_default(o: Any) -> Any:
-    """JSON encoder fallback for the numpy scalar/array types in the small metadata."""
-    if isinstance(o, np.integer):
-        return int(o)
-    if isinstance(o, np.floating):
-        return float(o)
-    if isinstance(o, np.bool_):
-        return bool(o)
-    if isinstance(o, np.ndarray):
-        return o.tolist()
-    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
 @dataclass
@@ -77,174 +61,274 @@ class BaseDataMixin:
         return f"{self.__class__.__name__}[{self._format_params(repr)}]"
 
 
-@dataclass(eq=False)
-class GroupedDistribution:
-    """Typed *view* over a prepared :class:`~anndata.AnnData` — the single source of truth.
+@dataclass
+class GroupedDistributionData:
+    """Metadata describing how cells are grouped into source/target distributions.
 
-    The wrapped AnnData carries the per-row distribution assignment in ``obs``
-    (``scaleflow_tgt_dist_idx`` / ``scaleflow_src_dist_idx``) and everything else under
-    ``uns["scaleflow"]`` (conditions, source↔target pairing, label maps, keys, ...). Nothing is
-    duplicated: the typed metadata is materialized **once** in :meth:`__post_init__` for fast
-    repeated access, but the AnnData remains the canonical store and the serialization format.
-
-    Two flavors of the wrapped AnnData:
-
-    - in-memory training: the full sorted dataset (``X`` + obs + uns); the same object also backs
-      the in-memory annbatch source, so there is a single object and no copy.
-    - on-disk training: a metadata-only AnnData (no ``X``, ``n_obs == collection rows``) while the
-      cells stream from the :class:`annbatch.DatasetCollection` passed separately to the samplers.
-
-    ``row_tgt_dist_idx`` is exactly the per-row ``classes`` array
-    :class:`~annbatch.samplers.ClassSampler` consumes; per-condition rows for the few explicit-read
-    paths (source cache, validation, prediction) are derived on demand via :meth:`rows_for`.
+    This container no longer stores the cell matrices themselves. Instead it keeps,
+    per distribution, the *global observation row indices* into the underlying AnnData
+    (or :class:`annbatch.DatasetCollection`). The actual ``X`` rows are streamed on
+    demand by annbatch using these indices and ``annotation.data_location`` to select
+    which array (``X``, an ``obsm`` key, a ``layers`` key, ...) is the cell representation.
     """
 
-    adata: ad.AnnData
+    src_to_tgt_dist_map: dict[int, list[int]]  # (n_src_dists) → (n_tgt_dists_{src_dist_idx})
+    src_dist_to_rows: dict[int, np.ndarray]  # (n_src_dists) → global obs row indices
+    tgt_dist_to_rows: dict[int, np.ndarray]  # (n_tgt_dists) → global obs row indices
+    conditions: dict[int, dict[str, np.ndarray]]  # (n_tgt_dists) → {col_name: (n_rows, *dims)}
 
-    # materialized once from the AnnData in __post_init__ (not __init__ args)
-    row_tgt_dist_idx: np.ndarray = field(init=False, repr=False)
-    row_src_dist_idx: np.ndarray = field(init=False, repr=False)
-    conditions: dict[int, dict[str, np.ndarray]] = field(init=False, repr=False)
-    src_to_tgt_dist_map: dict[int, list[int]] = field(init=False, repr=False)
-    src_dist_idx_to_labels: dict[int, tuple] = field(init=False, repr=False)
-    tgt_dist_idx_to_labels: dict[int, tuple] = field(init=False, repr=False)
-    src_tgt_dist_df: pd.DataFrame = field(init=False, repr=False)
-    default_values: dict[str, Any] = field(init=False, repr=False)
-    tgt_dist_keys: list[str] = field(init=False, repr=False)
-    src_dist_keys: list[str] = field(init=False, repr=False)
-    dist_flag_key: str = field(init=False, repr=False)
-    data_location: AnnDataLocation | None = field(init=False, repr=False)
-    old_obs_index: np.ndarray = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        if UNS_KEY not in self.adata.uns:
-            raise KeyError(
-                f"adata.uns has no {UNS_KEY!r} entry; wrap an AnnData produced by "
-                "GroupedDistribution.from_parts()/to_adata()."
-            )
-        obs = self.adata.obs
-        store = self.adata.uns[UNS_KEY]
-        meta = json.loads(store["meta_json"])
-
-        self.row_tgt_dist_idx = np.asarray(obs[OBS_TGT_DIST_IDX])
-        self.row_src_dist_idx = np.asarray(obs[OBS_SRC_DIST_IDX])
-        self.conditions = {
-            int(t): {c: np.asarray(a) for c, a in cond.items()} for t, cond in store["conditions"].items()
-        }
-        sd = store["src_tgt_dist_df"]
-        self.src_tgt_dist_df = sd if isinstance(sd, pd.DataFrame) else pd.DataFrame(sd)
-        self.src_to_tgt_dist_map = {int(k): [int(t) for t in v] for k, v in meta["src_to_tgt_dist_map"].items()}
-        self.src_dist_idx_to_labels = {int(k): tuple(v) for k, v in meta["src_dist_idx_to_labels"].items()}
-        self.tgt_dist_idx_to_labels = {int(k): tuple(v) for k, v in meta["tgt_dist_idx_to_labels"].items()}
-        self.default_values = meta["default_values"]
-        self.tgt_dist_keys = list(meta["tgt_dist_keys"])
-        self.src_dist_keys = list(meta["src_dist_keys"])
-        self.dist_flag_key = meta["dist_flag_key"]
-        self.data_location = (
-            AnnDataLocation.from_json(meta["data_location"]) if meta.get("data_location") is not None else None
-        )
-        self.old_obs_index = self.adata.obs_names.to_numpy()
-
-    # ------------------------------------------------------------------ construction
     @classmethod
-    def from_parts(
+    def read_zarr(
         cls,
-        adata: ad.AnnData | None,
-        *,
-        row_tgt_dist_idx: np.ndarray,
-        row_src_dist_idx: np.ndarray,
-        conditions: dict[int, dict[str, np.ndarray]],
-        src_to_tgt_dist_map: dict[int, list[int]],
-        src_dist_idx_to_labels: dict[int, Any],
-        tgt_dist_idx_to_labels: dict[int, Any],
-        src_tgt_dist_df: pd.DataFrame,
-        default_values: dict[str, Any],
-        tgt_dist_keys: list[str],
-        src_dist_keys: list[str],
-        dist_flag_key: str,
-        data_location: AnnDataLocation | None = None,
-        old_obs_index: np.ndarray | None = None,
-    ) -> GroupedDistribution:
-        """Build a :class:`GroupedDistribution` by writing the metadata onto an AnnData.
-
-        ``adata`` is the prepared (sorted) dataset to attach to (its ``obs``/``uns`` are written
-        in place). Pass ``None`` to build a metadata-only AnnData (no ``X``) — e.g. the on-disk
-        sidecar or a split — whose obs index is ``old_obs_index``.
+        group: zarr.Group,
+        in_memory: bool = False,
+    ) -> GroupedDistributionData:
         """
-        n_obs = int(np.asarray(row_tgt_dist_idx).shape[0])
-        if adata is None:
-            idx = np.asarray(old_obs_index) if old_obs_index is not None else np.arange(n_obs)
-            adata = ad.AnnData(obs=pd.DataFrame(index=idx.astype(str)))
-        if adata.n_obs != n_obs:
-            raise ValueError(
-                f"adata.n_obs ({adata.n_obs}) does not match the per-row dist assignment length ({n_obs})."
-            )
+        Read the grouped distribution metadata from a Zarr group.
 
-        adata.obs[OBS_TGT_DIST_IDX] = np.asarray(row_tgt_dist_idx)
-        adata.obs[OBS_SRC_DIST_IDX] = np.asarray(row_src_dist_idx)
-        meta = {
-            "src_to_tgt_dist_map": {str(k): [int(t) for t in v] for k, v in src_to_tgt_dist_map.items()},
-            "src_dist_idx_to_labels": {str(k): list(v) for k, v in src_dist_idx_to_labels.items()},
-            "tgt_dist_idx_to_labels": {str(k): list(v) for k, v in tgt_dist_idx_to_labels.items()},
-            "default_values": default_values,
-            "tgt_dist_keys": list(tgt_dist_keys),
-            "src_dist_keys": list(src_dist_keys),
-            "dist_flag_key": dist_flag_key,
-            "data_location": data_location.to_json() if data_location is not None else None,
-        }
-        adata.uns[UNS_KEY] = {
-            "meta_json": json.dumps(meta, default=_json_default),
-            # conditions are arrays -> stored natively (anndata handles nested dict[str, dict[str, array]])
-            "conditions": {str(t): {c: np.asarray(a) for c, a in cond.items()} for t, cond in conditions.items()},
-            "src_tgt_dist_df": src_tgt_dist_df,
-        }
-        return cls(adata)
+        Parameters
+        ----------
+        group
+            Zarr group containing the data.
+        in_memory
+            Accepted for backwards compatibility; ignored. Cell matrices are not
+            stored here (they are streamed by annbatch), and the row-index maps are
+            always small enough to load eagerly.
 
-    @staticmethod
-    def rows_for(row_dist_idx: np.ndarray) -> dict[int, slice | np.ndarray]:
-        """Invert a per-row dist-id column into ``{dist_idx: rows}`` (excludes -1).
-
-        The transient, derive-on-demand replacement for storing ``{dist: [rows]}`` maps; call it
-        only where explicit row reads are needed. When a dist's rows are a contiguous run (the
-        norm: training data is sorted by condition) it is returned as a :class:`slice` so reads are
-        view-based array slices rather than fancy-index copies; otherwise a row-index array.
+        Conditions are stored in CSR-like format:
+        - Each column is a contiguous array (all dists concatenated)
+        - Metadata contains dist_ids and indptr for each column
         """
-        col = np.asarray(row_dist_idx)
-        out: dict[int, slice | np.ndarray] = {}
-        for k in np.unique(col[col >= 0]):
-            idx = np.flatnonzero(col == k)
-            if idx.size and (idx[-1] - idx[0] + 1) == idx.size:
-                out[int(k)] = slice(int(idx[0]), int(idx[-1]) + 1)
-            else:
-                out[int(k)] = idx
-        return out
+        del in_memory  # cells are streamed externally; nothing lazy to keep here
 
-    # ------------------------------------------------------------------ AnnData (de)serialization
-    @classmethod
-    def from_adata(cls, adata: ad.AnnData) -> GroupedDistribution:
-        """Wrap an AnnData previously enriched by :meth:`from_parts` / :meth:`to_adata`."""
-        return cls(adata)
+        # Read conditions from CSR-like structure (always in memory)
+        conditions = {}
+        if "conditions" in group:
+            cond_group = group["conditions"]
 
-    def to_adata(self) -> ad.AnnData:
-        """Return the wrapped (metadata-carrying) AnnData."""
-        return self.adata
+            # Get metadata
+            dist_ids = list(cond_group.attrs.get("dist_ids", []))
 
-    def write_zarr(self, path: str, **_legacy: Any) -> None:
-        """Persist the wrapped AnnData as a zarr store (legacy chunk/shard kwargs are ignored)."""
-        ad.settings.zarr_write_format = 3  # sharding support
-        self.adata.write_zarr(path)
+            if dist_ids:
+                # Get column names (everything that's not metadata)
+                col_names = list(cond_group.keys())
 
-    @classmethod
-    def read_zarr(cls, path: str, in_memory: bool = False) -> GroupedDistribution:
-        """Read a :class:`GroupedDistribution` from an AnnData zarr store written by :meth:`write_zarr`."""
-        del in_memory  # metadata is always materialized eagerly
-        return cls(ad.read_zarr(path))
+                # Initialize conditions dict for each dist_id
+                for dist_id in dist_ids:
+                    conditions[dist_id] = {}
+
+                # Read each column and split by indptr
+                for col_name in col_names:
+                    indptr = cond_group.attrs.get(f"indptr_{col_name}", [])
+                    concatenated = np.asarray(cond_group[col_name])
+
+                    # Split the concatenated array for each distribution
+                    for i, dist_id in enumerate(dist_ids):
+                        start = indptr[i]
+                        end = indptr[i + 1]
+                        conditions[dist_id][col_name] = concatenated[start:end]
+
+        return cls(
+            src_to_tgt_dist_map={
+                int(k): np.array(group["src_to_tgt_dist_map"][k]) for k in group["src_to_tgt_dist_map"].keys()
+            },
+            src_dist_to_rows={int(k): np.asarray(group["src_dist_to_rows"][k]) for k in group["src_dist_to_rows"].keys()},
+            tgt_dist_to_rows={int(k): np.asarray(group["tgt_dist_to_rows"][k]) for k in group["tgt_dist_to_rows"].keys()},
+            conditions=conditions,
+        )
 
     @property
     def is_in_memory(self) -> bool:
-        """Always :obj:`True` (cell matrices live in the external store; metadata is in memory)."""
+        """Always :obj:`True`.
+
+        Kept for backwards compatibility. The cell matrices live in the external
+        AnnData/zarr store and are streamed by annbatch; only lightweight row-index
+        metadata is held here, which is always in memory.
+        """
         return True
 
     def to_memory(self) -> None:
         """No-op, kept for backwards compatibility (cells are streamed externally)."""
         return None
+
+    def write_zarr_group(
+        self,
+        group: zarr.Group,
+        chunk_size: int,
+        shard_size: int,
+        max_workers: int = 1,
+    ) -> None:
+        """Write the grouped distribution metadata to a Zarr group.
+
+        ``max_workers`` is accepted for backwards compatibility but unused: there are
+        no large cell matrices to write in parallel anymore.
+        """
+        del max_workers
+        data = group.create_group("data")
+        for name, dist_map in (
+            ("src_to_tgt_dist_map", self.src_to_tgt_dist_map),
+            ("src_dist_to_rows", self.src_dist_to_rows),
+            ("tgt_dist_to_rows", self.tgt_dist_to_rows),
+        ):
+            write_sharded(
+                group=data,
+                name=name,
+                data={str(k): np.asarray(v) for k, v in dist_map.items()},
+                chunk_size=chunk_size,
+                shard_size=shard_size,
+                compressors=None,
+            )
+
+        conditions_group = data.create_group("conditions")
+        write_nested_dist_data(
+            group=conditions_group,
+            dist_data=self.conditions,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+        )
+
+        return None
+
+
+@dataclass
+class GroupedDistributionAnnotation:
+    old_obs_index: np.ndarray  # (n_cells,) to be able to map back to the original index
+
+    src_dist_idx_to_labels: dict[int, Any]  # (n_src_dists) → Any (e.g. list of strings)
+    tgt_dist_idx_to_labels: dict[int, Any]  # (n_tgt_dists) → Any (e.g. list of strings)
+    src_tgt_dist_df: pd.DataFrame
+
+    default_values: dict[str, Any]
+    tgt_dist_keys: list[str]
+    src_dist_keys: list[str]
+    dist_flag_key: str
+    data_location: AnnDataLocation | None = None  # The location of the data in the AnnData object
+
+    @classmethod
+    def read_zarr(
+        cls,
+        group: zarr.Group,
+    ) -> GroupedDistributionAnnotation:
+        """Read the grouped distribution annotation from a Zarr group."""
+        # Check if this is the new format (has src_dist_idx_to_labels and tgt_dist_idx_to_labels groups)
+        assert "src_dist_idx_to_labels" in group and "tgt_dist_idx_to_labels" in group
+        # New CSRLabelMapping format - read and convert to dict
+        src_mapping = CSRLabelMapping.read_zarr(group["src_dist_idx_to_labels"])
+        tgt_mapping = CSRLabelMapping.read_zarr(group["tgt_dist_idx_to_labels"])
+
+        # Read other elements from the annotation group
+        elem = ad.io.read_elem(group["metadata"])
+
+        # Handle data_location - may not exist in older zarr files
+        data_location = None
+        if "data_location" in elem and elem["data_location"] is not None:
+            data_location = AnnDataLocation.from_json(elem["data_location"])
+
+        return cls(
+            old_obs_index=elem["old_obs_index"],
+            src_dist_idx_to_labels=src_mapping.to_dict(),
+            tgt_dist_idx_to_labels=tgt_mapping.to_dict(),
+            src_tgt_dist_df=elem["src_tgt_dist_df"],
+            default_values=elem["default_values"],
+            tgt_dist_keys=np.array(elem["tgt_dist_keys"]).tolist(),
+            src_dist_keys=np.array(elem["src_dist_keys"]).tolist(),
+            dist_flag_key=elem["dist_flag_key"],
+            data_location=data_location,
+        )
+
+    def write_zarr_group(
+        self,
+        group: zarr.Group,
+        chunk_size: int,
+        shard_size: int,
+    ) -> None:
+        """Write the grouped distribution annotation to a Zarr group."""
+        annotation_group = group.create_group("annotation")
+
+        # Convert dicts to CSRLabelMapping for efficient storage
+        src_mapping = CSRLabelMapping.from_dict(self.src_dist_idx_to_labels)
+        tgt_mapping = CSRLabelMapping.from_dict(self.tgt_dist_idx_to_labels)
+
+        # Write CSRLabelMapping objects
+        src_mapping.write_zarr(annotation_group, "src_dist_idx_to_labels")
+        tgt_mapping.write_zarr(annotation_group, "tgt_dist_idx_to_labels")
+
+        # Write other metadata using write_sharded
+        to_write = {
+            "old_obs_index": self.old_obs_index,
+            "src_tgt_dist_df": self.src_tgt_dist_df,
+            "default_values": self.default_values,
+            "tgt_dist_keys": self.tgt_dist_keys,
+            "src_dist_keys": self.src_dist_keys,
+            "dist_flag_key": self.dist_flag_key,
+            "data_location": self.data_location.to_json() if self.data_location is not None else None,
+        }
+        write_sharded(
+            group=annotation_group,
+            name="metadata",
+            data=to_write,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            compressors=None,
+        )
+        return None
+
+@dataclass
+class GroupedDistribution:
+    data: GroupedDistributionData
+    annotation: GroupedDistributionAnnotation
+
+    def write_zarr(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 4096,
+        shard_size: int = 65536,
+        max_workers: int = 8,
+    ) -> None:
+        """Write the grouped distribution to a Zarr group."""
+        ad.settings.zarr_write_format = 3  # Needed to support sharding in Zarr
+
+        zgroup = zarr.open_group(path, mode="w")
+
+        self.data.write_zarr_group(
+            group=zgroup,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+            max_workers=max_workers,
+        )
+        print("writing annotation")
+        self.annotation.write_zarr_group(
+            group=zgroup,
+            chunk_size=chunk_size,
+            shard_size=shard_size,
+        )
+        return None
+
+    @classmethod
+    def read_zarr(
+        cls,
+        path: str,
+        in_memory: bool = False,
+    ) -> GroupedDistribution:
+        """Read the grouped distribution from a Zarr group.
+
+        Parameters
+        ----------
+        path
+            Path to the Zarr store.
+        in_memory
+            If True, load all arrays into memory as numpy arrays.
+            If False (default), keep arrays as lazy zarr arrays.
+        """
+        zgroup = zarr.open_group(path, mode="r")
+        annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        data = GroupedDistributionData.read_zarr(zgroup["data"], in_memory=in_memory)
+        return cls(
+            annotation=annotation,
+            data=data,
+        )
+
+    def to_memory(self) -> None:
+        """Convert all lazy zarr arrays to in-memory numpy arrays (in-place)."""
+        self.data.to_memory()

@@ -3,8 +3,6 @@ from scaleflow.data._annbatch_sampler import (
     PredictionSampler,
     SourceCache,
     ValidationSampler,
-    _InMemorySource,
-    _sort_adata_by_condition,
     write_sorted_collection,
 )
 from scaleflow.data._anndata_location import AnnDataLocation
@@ -15,6 +13,8 @@ from scaleflow.data._batch_utils import (
 )
 from scaleflow.data._data import (
     GroupedDistribution,
+    GroupedDistributionAnnotation,
+    GroupedDistributionData,
 )
 from scaleflow.data._dataloader import (
     CombinedSampler,
@@ -25,6 +25,8 @@ from scaleflow.data._datamanager import DataManager
 __all__ = [
     "AnnDataLocation",
     "GroupedDistribution",
+    "GroupedDistributionData",
+    "GroupedDistributionAnnotation",
     "GroupedAnnbatchSampler",
     "SourceCache",
     "write_sorted_collection",

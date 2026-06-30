@@ -7,6 +7,8 @@ import pandas as pd
 
 from scaleflow.data._data import (
     GroupedDistribution,
+    GroupedDistributionAnnotation,
+    GroupedDistributionData,
 )
 from scaleflow.logging import timer
 
@@ -114,7 +116,7 @@ class DataManager:
         self,
         obs_df: pd.DataFrame,
         verbose: bool = False,
-    ) -> tuple[pd.DataFrame, dict[str, Any], dict[int, list[int]], dict[int, tuple], dict[int, tuple]]:
+    ) -> tuple[pd.DataFrame, GroupedDistributionAnnotation, dict[int, list[int]], dict[int, tuple], dict[int, tuple]]:
         """
         Prepare annotation data from an observation DataFrame.
 
@@ -130,7 +132,7 @@ class DataManager:
         obs
             Processed observation DataFrame with distribution indices.
         annotation
-            Dict of annotation parts (labels, keys, dist_flag_key, src_tgt_dist_df, ...).
+            GroupedDistributionAnnotation object containing metadata.
         src_to_tgt_dist_map
             Mapping from source distribution indices to target distribution indices.
         src_dist_labels
@@ -215,17 +217,17 @@ class DataManager:
                 tgt_dist_labels_annotation.itertuples(index=False, name=None), strict=True)
         )
 
-        annotation = {
-            "src_tgt_dist_df": src_tgt_dist_df,
-            "old_obs_index": old_index_mapping,
-            "tgt_dist_keys": self._tgt_cols,
-            "src_dist_keys": self.src_dist_keys,
-            "dist_flag_key": self.dist_flag_key,
-            "src_dist_idx_to_labels": src_dist_labels,
-            "tgt_dist_idx_to_labels": tgt_dist_labels_annotation,
-            "default_values": default_values,
-            "data_location": self.data_location,
-        }
+        annotation = GroupedDistributionAnnotation(
+            src_tgt_dist_df=src_tgt_dist_df,
+            old_obs_index=old_index_mapping,
+            tgt_dist_keys=self._tgt_cols,
+            src_dist_keys=self.src_dist_keys,
+            dist_flag_key=self.dist_flag_key,
+            src_dist_idx_to_labels=src_dist_labels,
+            tgt_dist_idx_to_labels=tgt_dist_labels_annotation,
+            default_values=default_values,
+            data_location=self.data_location,
+        )
 
         return obs, annotation, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels
 
@@ -237,9 +239,9 @@ class DataManager:
         src_dist_labels: dict[int, tuple],
         tgt_dist_labels: dict[int, tuple],
         verbose: bool = False,
-    ) -> tuple[dict[int, dict[str, np.ndarray]], np.ndarray, np.ndarray]:
+    ) -> GroupedDistributionData:
         """
-        Prepare the per-row distribution assignment and conditions.
+        Prepare the per-distribution row indices and conditions.
 
         Parameters
         ----------
@@ -260,8 +262,7 @@ class DataManager:
 
         Returns
         -------
-        ``(conditions, row_tgt_dist_idx, row_src_dist_idx)`` — the per-condition embeddings and
-        the per-row target/source distribution-id columns.
+        GroupedDistributionData containing src_data, tgt_data, conditions, and the mapping.
         """
         # prepare conditions as nested dicts: {tgt_dist_idx: {col_name: array}}
         col_to_repr = {key: rep_dict[self.rep_keys[key]] for key in self.rep_keys.keys()}
@@ -274,24 +275,24 @@ class DataManager:
                     tgt_label = tgt_dist_labels[tgt_dist_idx]
                     conditions[tgt_dist_idx] = self._build_condition(src_label, tgt_label, col_to_repr, rep_dict)
 
-        # Record a *per-row* distribution assignment instead of inverting it into
-        # {dist: [rows]} maps. ``row_tgt_dist_idx`` is exactly the per-row ``classes`` array
-        # annbatch.ClassSampler consumes; the read paths that need explicit rows derive them
-        # on demand via GroupedDistributionData.rows_for(...). ``obs`` is sorted but its index
-        # holds the positional obs row (into the prepared obs order), so we scatter back.
-        with timer("Building per-row distribution assignment", verbose=verbose):
-            n_obs = len(obs)
-            positions = obs.index.to_numpy()
-            is_control = obs[self.dist_flag_key].to_numpy().astype(bool)
-            row_tgt_dist_idx = np.full(n_obs, -1, dtype=np.int32)
-            row_src_dist_idx = np.full(n_obs, -1, dtype=np.int32)
-            # control rows already carry tgt_dist_idx == -1 (filled in _prepare_annotation),
-            # so scattering the whole column leaves controls excluded from the target classes.
-            row_tgt_dist_idx[positions] = obs["tgt_dist_idx"].to_numpy()
-            # source cache only reads control rows, so the source id is recorded for controls only.
-            row_src_dist_idx[positions[is_control]] = obs.loc[is_control, "src_dist_idx"].to_numpy()
+        # prepare row indices per source/target distribution.
+        # We no longer materialize the cell matrix here: the actual ``X`` rows are
+        # streamed on demand by annbatch using ``annotation.data_location``. We only
+        # record the positional obs row indices (into ``adata``'s obs order) that make
+        # up each source/target distribution.
+        with timer("Getting source and target distribution row indices", verbose=verbose):
+            src_dist_map = obs[obs[self.dist_flag_key]].groupby("src_dist_idx", observed=False).groups
+            tgt_dist_map = obs[~obs[self.dist_flag_key]].groupby("tgt_dist_idx", observed=False).groups
 
-        return conditions, row_tgt_dist_idx, row_src_dist_idx
+            tgt_dist_to_rows = {int(k): np.asarray(v.to_numpy()) for k, v in tgt_dist_map.items()}
+            src_dist_to_rows = {int(k): np.asarray(v.to_numpy()) for k, v in src_dist_map.items()}
+
+        return GroupedDistributionData(
+            src_to_tgt_dist_map=src_to_tgt_dist_map,
+            src_dist_to_rows=src_dist_to_rows,
+            tgt_dist_to_rows=tgt_dist_to_rows,
+            conditions=conditions,
+        )
 
     def prepare_data(
         self,
@@ -318,9 +319,9 @@ class DataManager:
 
         Returns
         -------
-        GroupedDistribution wrapping ``adata`` (its obs/uns are written with the metadata).
+        GroupedDistribution containing metadata and annotation.
         """
-        return self._prepare(obs_df=adata.obs, rep_dict=adata.uns, adata=adata, verbose=verbose)
+        return self._prepare(obs_df=adata.obs, rep_dict=adata.uns, verbose=verbose)
 
     def prepare_data_from_collection(
         self,
@@ -373,39 +374,19 @@ class DataManager:
         self,
         obs_df: pd.DataFrame,
         rep_dict: Mapping[str, Any],
-        adata: "anndata.AnnData | None" = None,
         verbose: bool = False,
     ) -> GroupedDistribution:
-        """Shared preparation from an obs DataFrame and a representations mapping.
-
-        ``adata`` is the prepared dataset to attach the metadata to (in-memory path); pass
-        ``None`` (collection path) to build a metadata-only AnnData wrapping no ``X``.
-        """
+        """Shared preparation from an obs DataFrame and a representations mapping."""
         DataManager._verify_rep_keys_exists(self.rep_keys, rep_dict)
 
         obs, annotation, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels = self._prepare_annotation(
             obs_df, verbose=verbose
         )
-        conditions, row_tgt_dist_idx, row_src_dist_idx = self._prepare_data(
+        data = self._prepare_data(
             obs, rep_dict, src_to_tgt_dist_map, src_dist_labels, tgt_dist_labels, verbose=verbose
         )
 
-        return GroupedDistribution.from_parts(
-            adata,
-            row_tgt_dist_idx=row_tgt_dist_idx,
-            row_src_dist_idx=row_src_dist_idx,
-            conditions=conditions,
-            src_to_tgt_dist_map=src_to_tgt_dist_map,
-            src_dist_idx_to_labels=annotation["src_dist_idx_to_labels"],
-            tgt_dist_idx_to_labels=annotation["tgt_dist_idx_to_labels"],
-            src_tgt_dist_df=annotation["src_tgt_dist_df"],
-            default_values=annotation["default_values"],
-            tgt_dist_keys=annotation["tgt_dist_keys"],
-            src_dist_keys=annotation["src_dist_keys"],
-            dist_flag_key=annotation["dist_flag_key"],
-            data_location=annotation["data_location"],
-            old_obs_index=annotation["old_obs_index"],
-        )
+        return GroupedDistribution(data=data, annotation=annotation)
 
     def _build_condition(
         self,

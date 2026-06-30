@@ -11,92 +11,12 @@ from scaleflow.data._data import (
 )
 from scaleflow.data._utils import write_nested_dist_data
 
-# Number of obs rows in the dummy fixtures below. The per-row dist-id arrays and the
-# ``old_obs_index`` must all have this length (``to_adata(None)`` builds an AnnData with this
-# many rows and uses ``old_obs_index`` as the obs index).
-_N_OBS = 20
-
-
-def _make_grouped_distribution(
-    conditions,
-    *,
-    n_obs=_N_OBS,
-    src_to_tgt_dist_map=None,
-    src_dist_idx_to_labels=None,
-    tgt_dist_idx_to_labels=None,
-    src_tgt_dist_df=None,
-    default_values=None,
-    tgt_dist_keys=None,
-    src_dist_keys=None,
-    dist_flag_key="flag",
-    data_location=None,
-):
-    """Build a small, internally consistent :class:`GroupedDistribution`.
-
-    The per-row arrays (``row_tgt_dist_idx`` / ``row_src_dist_idx``) and ``old_obs_index`` all have
-    length ``n_obs`` so the object can round-trip through ``to_adata(None)`` / ``write_zarr``.
-    Target dist ids are taken from ``conditions`` (falling back to ``[0]`` when empty); the first
-    half of the rows are controls assigned to source dist 0, the second half are assigned to the
-    target dists in round-robin fashion.
-    """
-    tgt_ids = sorted(int(k) for k in conditions) if conditions else [0]
-
-    row_tgt = np.full(n_obs, -1, dtype=np.int64)
-    row_src = np.full(n_obs, -1, dtype=np.int64)
-    half = n_obs // 2
-    for i in range(half):
-        row_src[i] = 0
-    for i in range(half, n_obs):
-        row_tgt[i] = tgt_ids[(i - half) % len(tgt_ids)]
-
-    data = GroupedDistributionData(
-        src_to_tgt_dist_map=src_to_tgt_dist_map or {0: tgt_ids},
-        row_tgt_dist_idx=row_tgt,
-        row_src_dist_idx=row_src,
-        conditions=conditions,
-    )
-    annotation = GroupedDistributionAnnotation(
-        old_obs_index=np.array([f"cell_{i}" for i in range(n_obs)]),
-        src_dist_idx_to_labels=src_dist_idx_to_labels or {0: ["s_label0"]},
-        tgt_dist_idx_to_labels=tgt_dist_idx_to_labels or {t: [f"t_label{t}"] for t in tgt_ids},
-        src_tgt_dist_df=src_tgt_dist_df
-        if src_tgt_dist_df is not None
-        else pd.DataFrame({"src_dist_idx": [0], "tgt_dist_idx": [tgt_ids[0]]}),
-        default_values=default_values or {"param1": 1, "param2": "val"},
-        tgt_dist_keys=tgt_dist_keys or ["key1", "key2"],
-        src_dist_keys=src_dist_keys or ["skey1"],
-        dist_flag_key=dist_flag_key,
-        data_location=data_location,
-    )
-    return GroupedDistribution(data=data, annotation=annotation)
-
-
-def _assert_conditions_equal(read_conditions, expected_conditions, *, almost=False):
-    """Assert two ``{dist_id: {col: array}}`` condition dicts are equal.
-
-    ``from_adata`` returns int dist-id keys, so the comparison is keyed by ``int(dist_id)``.
-    """
-    assert {int(k) for k in read_conditions} == {int(k) for k in expected_conditions}
-    cmp = np.testing.assert_array_almost_equal if almost else np.testing.assert_array_equal
-    for dist_id, cols in expected_conditions.items():
-        read_cols = read_conditions[int(dist_id)]
-        assert set(read_cols.keys()) == set(cols.keys())
-        for col_name, arr in cols.items():
-            cmp(read_cols[col_name], arr, err_msg=f"Mismatch at dist {dist_id!r}, col {col_name!r}")
-
 
 @pytest.fixture
 def dummy_grouped_distribution_data():
-    """A :class:`GroupedDistributionData` built with the new per-row dist-id fields."""
     src_to_tgt_dist_map = {0: [0, 1], 1: [2]}
-    # 20 obs rows: rows 0..9 are controls (src 0 then src 1), rows 10..19 are targets.
-    row_src = np.full(_N_OBS, -1, dtype=np.int64)
-    row_src[0:5] = 0
-    row_src[5:10] = 1
-    row_tgt = np.full(_N_OBS, -1, dtype=np.int64)
-    row_tgt[10:14] = 0
-    row_tgt[14:17] = 1
-    row_tgt[17:20] = 2
+    src_dist_to_rows = {0: np.arange(10), 1: np.arange(10, 18)}
+    tgt_dist_to_rows = {0: np.arange(5), 1: np.arange(5, 10), 2: np.arange(10, 18)}
     conditions = {
         0: {"cond1": np.array([1, 2, 3]), "cond2": np.array([4, 5])},
         1: {"cond1": np.array([6, 7]), "cond2": np.array([8, 9])},
@@ -104,19 +24,15 @@ def dummy_grouped_distribution_data():
     }
     return GroupedDistributionData(
         src_to_tgt_dist_map=src_to_tgt_dist_map,
-        row_tgt_dist_idx=row_tgt,
-        row_src_dist_idx=row_src,
+        src_dist_to_rows=src_dist_to_rows,
+        tgt_dist_to_rows=tgt_dist_to_rows,
         conditions=conditions,
     )
 
 
 @pytest.fixture
 def dummy_grouped_distribution_annotation():
-    """A :class:`GroupedDistributionAnnotation` matching :func:`dummy_grouped_distribution_data`.
-
-    ``old_obs_index`` has length ``_N_OBS`` so the pair round-trips through ``to_adata(None)``.
-    """
-    old_obs_index = np.array([f"cell_{i}" for i in range(_N_OBS)])
+    old_obs_index = np.arange(20)
     src_dist_idx_to_labels = {0: ["label1", "label2"], 1: ["label3"]}
     tgt_dist_idx_to_labels = {0: ["tlabel1"], 1: ["tlabel2"], 2: ["tlabel3"]}
     src_tgt_dist_df = pd.DataFrame({"src_dist_idx": [0, 0, 1], "tgt_dist_idx": [0, 1, 2], "other_col": ["a", "b", "c"]})
@@ -139,133 +55,140 @@ def dummy_grouped_distribution_annotation():
     )
 
 
-def test_grouped_distribution_data_io(
-    dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
-):
-    """The data half of a GroupedDistribution survives an AnnData round-trip.
+def test_grouped_distribution_data_io(tmp_path, dummy_grouped_distribution_data):
+    store_path = tmp_path / "test_data.zarr"
+    zgroup = zarr.open_group(str(store_path), mode="w")
 
-    Serialization now lives on :class:`GroupedDistribution` (via ``to_adata`` / ``from_adata``),
-    so the per-row dist arrays, ``src_to_tgt_dist_map`` and conditions are exercised through it.
-    """
-    gd = GroupedDistribution(
-        data=dummy_grouped_distribution_data, annotation=dummy_grouped_distribution_annotation
-    )
-    read_gd = GroupedDistribution.from_adata(gd.to_adata(None))
-    read_data = read_gd.data
+    dummy_grouped_distribution_data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
 
-    # src_to_tgt_dist_map
+    read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+    # Check src_to_tgt_dist_map
     assert read_data.src_to_tgt_dist_map.keys() == dummy_grouped_distribution_data.src_to_tgt_dist_map.keys()
     for k in read_data.src_to_tgt_dist_map:
         np.testing.assert_array_equal(
             read_data.src_to_tgt_dist_map[k], dummy_grouped_distribution_data.src_to_tgt_dist_map[k]
         )
 
-    # Per-row dist-id arrays (replace the old src_dist_to_rows / tgt_dist_to_rows maps)
-    np.testing.assert_array_equal(
-        read_data.row_tgt_dist_idx, dummy_grouped_distribution_data.row_tgt_dist_idx
-    )
-    np.testing.assert_array_equal(
-        read_data.row_src_dist_idx, dummy_grouped_distribution_data.row_src_dist_idx
-    )
+    # Check src_dist_to_rows
+    assert read_data.src_dist_to_rows.keys() == dummy_grouped_distribution_data.src_dist_to_rows.keys()
+    for k in read_data.src_dist_to_rows:
+        np.testing.assert_array_equal(
+            read_data.src_dist_to_rows[k], dummy_grouped_distribution_data.src_dist_to_rows[k]
+        )
 
-    # rows_for inverts the per-row column back to the explicit row indices
+    # Check tgt_dist_to_rows
+    assert read_data.tgt_dist_to_rows.keys() == dummy_grouped_distribution_data.tgt_dist_to_rows.keys()
+    for k in read_data.tgt_dist_to_rows:
+        np.testing.assert_array_equal(
+            read_data.tgt_dist_to_rows[k], dummy_grouped_distribution_data.tgt_dist_to_rows[k]
+        )
+
+    # Check conditions
+    assert read_data.conditions.keys() == dummy_grouped_distribution_data.conditions.keys()
+    for k in read_data.conditions:
+        assert read_data.conditions[k].keys() == dummy_grouped_distribution_data.conditions[k].keys()
+        for sub_k in read_data.conditions[k]:
+            np.testing.assert_array_equal(
+                read_data.conditions[k][sub_k], dummy_grouped_distribution_data.conditions[k][sub_k]
+            )
+
+
+def test_grouped_distribution_annotation_io(tmp_path, dummy_grouped_distribution_annotation):
+    store_path = tmp_path / "test_annotation.zarr"
+    zgroup = zarr.open_group(str(store_path), mode="w")
+
+    dummy_grouped_distribution_annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+    read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+
+    np.testing.assert_array_equal(read_annotation.old_obs_index, dummy_grouped_distribution_annotation.old_obs_index)
+
     assert (
-        GroupedDistributionData.rows_for(read_data.row_tgt_dist_idx).keys()
-        == GroupedDistributionData.rows_for(dummy_grouped_distribution_data.row_tgt_dist_idx).keys()
+        read_annotation.src_dist_idx_to_labels.keys()
+        == dummy_grouped_distribution_annotation.src_dist_idx_to_labels.keys()
     )
-
-    # conditions
-    _assert_conditions_equal(read_data.conditions, dummy_grouped_distribution_data.conditions)
-
-
-def test_grouped_distribution_annotation_io(
-    dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
-):
-    """The annotation half of a GroupedDistribution survives an AnnData round-trip."""
-    gd = GroupedDistribution(
-        data=dummy_grouped_distribution_data, annotation=dummy_grouped_distribution_annotation
-    )
-    read_annotation = GroupedDistribution.from_adata(gd.to_adata(None)).annotation
-    expected = dummy_grouped_distribution_annotation
-
-    np.testing.assert_array_equal(
-        read_annotation.old_obs_index.astype(str), expected.old_obs_index.astype(str)
-    )
-
-    # Label maps: from_adata reconstructs the label collections as tuples.
-    assert read_annotation.src_dist_idx_to_labels.keys() == expected.src_dist_idx_to_labels.keys()
     for k in read_annotation.src_dist_idx_to_labels:
-        assert list(read_annotation.src_dist_idx_to_labels[k]) == list(expected.src_dist_idx_to_labels[k])
+        np.testing.assert_array_equal(
+            read_annotation.src_dist_idx_to_labels[k], dummy_grouped_distribution_annotation.src_dist_idx_to_labels[k]
+        )
 
-    assert read_annotation.tgt_dist_idx_to_labels.keys() == expected.tgt_dist_idx_to_labels.keys()
+    assert (
+        read_annotation.tgt_dist_idx_to_labels.keys()
+        == dummy_grouped_distribution_annotation.tgt_dist_idx_to_labels.keys()
+    )
     for k in read_annotation.tgt_dist_idx_to_labels:
-        assert list(read_annotation.tgt_dist_idx_to_labels[k]) == list(expected.tgt_dist_idx_to_labels[k])
+        np.testing.assert_array_equal(
+            read_annotation.tgt_dist_idx_to_labels[k], dummy_grouped_distribution_annotation.tgt_dist_idx_to_labels[k]
+        )
 
-    pd.testing.assert_frame_equal(read_annotation.src_tgt_dist_df, expected.src_tgt_dist_df)
-    assert read_annotation.default_values == expected.default_values
-    assert read_annotation.tgt_dist_keys == expected.tgt_dist_keys
-    assert read_annotation.src_dist_keys == expected.src_dist_keys
-    assert read_annotation.dist_flag_key == expected.dist_flag_key
+    pd.testing.assert_frame_equal(
+        read_annotation.src_tgt_dist_df, dummy_grouped_distribution_annotation.src_tgt_dist_df
+    )
+    assert read_annotation.default_values == dummy_grouped_distribution_annotation.default_values
+    assert read_annotation.tgt_dist_keys == dummy_grouped_distribution_annotation.tgt_dist_keys
+    assert read_annotation.src_dist_keys == dummy_grouped_distribution_annotation.src_dist_keys
+    assert read_annotation.dist_flag_key == dummy_grouped_distribution_annotation.dist_flag_key
 
-    # data_location is preserved
+    # Check data_location is preserved
     assert read_annotation.data_location is not None
-    assert read_annotation.data_location._path == expected.data_location._path
+    assert read_annotation.data_location._path == dummy_grouped_distribution_annotation.data_location._path
 
 
 def test_grouped_distribution_io(tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation):
-    """Full GroupedDistribution survives a write_zarr / read_zarr round-trip."""
     gd = GroupedDistribution(data=dummy_grouped_distribution_data, annotation=dummy_grouped_distribution_annotation)
 
     store_path = tmp_path / "test_grouped_distribution.zarr"
 
-    # Legacy chunk_size/shard_size/max_workers kwargs are accepted and ignored.
     gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
 
     read_gd = GroupedDistribution.read_zarr(str(store_path))
 
-    # Verify data
+    # Verify data (reuse logic or just spot check)
     assert read_gd.data.src_to_tgt_dist_map.keys() == gd.data.src_to_tgt_dist_map.keys()
-    np.testing.assert_array_equal(read_gd.data.row_tgt_dist_idx, gd.data.row_tgt_dist_idx)
-    np.testing.assert_array_equal(read_gd.data.row_src_dist_idx, gd.data.row_src_dist_idx)
-    _assert_conditions_equal(read_gd.data.conditions, gd.data.conditions)
 
     # Verify annotation
     assert read_gd.annotation.dist_flag_key == gd.annotation.dist_flag_key
-    assert read_gd.annotation.data_location._path == gd.annotation.data_location._path
 
 
 class TestConditionsWriteRead:
-    """Conditions of various shapes survive an AnnData (write_zarr / read_zarr) round-trip.
-
-    Serialization now delegates to anndata (no bespoke CSR/indptr layout), so these tests only
-    assert fidelity of the in-memory ``{dist_id: {col: array}}`` structure after the round-trip.
-    """
-
-    def _roundtrip(self, conditions, tmp_path, name, *, src_to_tgt_dist_map=None, tgt_labels=None):
-        gd = _make_grouped_distribution(
-            conditions,
-            src_to_tgt_dist_map=src_to_tgt_dist_map,
-            tgt_dist_idx_to_labels=tgt_labels,
-        )
-        store_path = tmp_path / f"{name}.zarr"
-        gd.write_zarr(path=str(store_path))
-        return GroupedDistribution.read_zarr(str(store_path))
+    """Tests for conditions write/read cycle with various array shapes."""
 
     def test_conditions_2d_arrays(self, tmp_path):
-        """Conditions with 2D arrays like drug embeddings."""
-        # Simulate drug embeddings: each distribution has a different number of drugs (128-dim).
+        """Test conditions with 2D arrays like drug embeddings."""
+        # Simulate drug embeddings: each distribution has 3 drugs with 128-dim embeddings
         conditions = {
             0: {"drug_emb": np.random.rand(3, 128).astype(np.float32)},
             1: {"drug_emb": np.random.rand(5, 128).astype(np.float32)},
             2: {"drug_emb": np.random.rand(1, 128).astype(np.float32)},
         }
-        read_gd = self._roundtrip(
-            conditions, tmp_path, "test_2d_conditions", src_to_tgt_dist_map={0: [0, 1], 1: [2]}
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1], 1: [2]},
+            src_dist_to_rows={0: np.arange(10), 1: np.arange(8)},
+            tgt_dist_to_rows={0: np.arange(5), 1: np.arange(5), 2: np.arange(8)},
+            conditions=conditions,
         )
-        _assert_conditions_equal(read_gd.data.conditions, conditions, almost=True)
+
+        store_path = tmp_path / "test_2d_conditions.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        # Verify conditions structure
+        assert read_data.conditions.keys() == conditions.keys()
+        for dist_id in conditions:
+            assert read_data.conditions[dist_id].keys() == conditions[dist_id].keys()
+            for col_name in conditions[dist_id]:
+                np.testing.assert_array_almost_equal(
+                    read_data.conditions[dist_id][col_name],
+                    conditions[dist_id][col_name],
+                    err_msg=f"Mismatch at dist {dist_id}, col {col_name}",
+                )
 
     def test_conditions_multiple_2d_arrays_same_shape(self, tmp_path):
-        """Multiple 2D arrays with the same shape per distribution."""
+        """Test multiple 2D arrays with the same shape per distribution."""
         conditions = {
             0: {
                 "drug1_emb": np.random.rand(3, 64).astype(np.float32),
@@ -276,13 +199,29 @@ class TestConditionsWriteRead:
                 "drug2_emb": np.random.rand(5, 64).astype(np.float32),
             },
         }
-        read_gd = self._roundtrip(
-            conditions, tmp_path, "test_multi_2d", src_to_tgt_dist_map={0: [0, 1]}
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5), 1: np.arange(5)},
+            conditions=conditions,
         )
-        _assert_conditions_equal(read_gd.data.conditions, conditions, almost=True)
+
+        store_path = tmp_path / "test_multi_2d.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for dist_id in conditions:
+            for col_name in conditions[dist_id]:
+                np.testing.assert_array_almost_equal(
+                    read_data.conditions[dist_id][col_name],
+                    conditions[dist_id][col_name],
+                )
 
     def test_conditions_mixed_1d_arrays(self, tmp_path):
-        """Conditions with multiple 1D arrays of different lengths."""
+        """Test conditions with multiple 1D arrays of different lengths."""
         conditions = {
             0: {
                 "dose": np.array([0.1, 0.5, 1.0]),
@@ -290,60 +229,131 @@ class TestConditionsWriteRead:
                 "cell_type": np.array([1, 2, 3, 4, 5]),
             },
         }
-        read_gd = self._roundtrip(conditions, tmp_path, "test_mixed_1d")
-        _assert_conditions_equal(read_gd.data.conditions, conditions, almost=True)
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_mixed_1d.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        assert sorted(read_data.conditions[0].keys()) == sorted(conditions[0].keys())
+        for col_name in conditions[0]:
+            np.testing.assert_array_almost_equal(
+                read_data.conditions[0][col_name],
+                conditions[0][col_name],
+            )
 
     def test_conditions_empty(self, tmp_path):
-        """An empty conditions dict round-trips to an empty dict."""
-        read_gd = self._roundtrip({}, tmp_path, "test_empty")
-        assert read_gd.data.conditions == {}
+        """Test with empty conditions dict."""
+        conditions = {}
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_empty.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        assert read_data.conditions == {}
 
     def test_conditions_single_element_arrays(self, tmp_path):
-        """Conditions with single-element arrays."""
+        """Test conditions with single-element arrays."""
         conditions = {
             0: {"scalar_cond": np.array([42.0])},
             1: {"scalar_cond": np.array([99.0])},
         }
-        read_gd = self._roundtrip(
-            conditions, tmp_path, "test_scalar", src_to_tgt_dist_map={0: [0, 1]}
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5), 1: np.arange(5)},
+            conditions=conditions,
         )
-        _assert_conditions_equal(read_gd.data.conditions, conditions, almost=True)
+
+        store_path = tmp_path / "test_scalar.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for dist_id in conditions:
+            np.testing.assert_array_almost_equal(
+                read_data.conditions[dist_id]["scalar_cond"],
+                conditions[dist_id]["scalar_cond"],
+            )
 
     def test_conditions_many_distributions(self, tmp_path):
-        """Many distributions, to verify each maps to the correct array."""
+        """Test with many distributions to verify indexing is correct."""
         n_dists = 50
         conditions = {i: {"val": np.array([float(i), float(i) * 2])} for i in range(n_dists)}
-        read_gd = self._roundtrip(
-            conditions,
-            tmp_path,
-            "test_many_dists",
+
+        data = GroupedDistributionData(
             src_to_tgt_dist_map={0: list(range(n_dists))},
+            src_dist_to_rows={0: np.arange(100)},
+            tgt_dist_to_rows={i: np.arange(5) for i in range(n_dists)},
+            conditions=conditions,
         )
-        assert len(read_gd.data.conditions) == n_dists
+
+        store_path = tmp_path / "test_many_dists.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        assert len(read_data.conditions) == n_dists
         for i in range(n_dists):
             np.testing.assert_array_almost_equal(
-                read_gd.data.conditions[i]["val"], np.array([float(i), float(i) * 2])
+                read_data.conditions[i]["val"],
+                np.array([float(i), float(i) * 2]),
             )
 
     def test_conditions_key_ordering_preserved(self, tmp_path):
-        """Each column key maps to the correct array (not just any array)."""
+        """Test that keys are correctly associated with their arrays after sorting."""
+        # Create conditions where key ordering matters for correctness
         conditions = {
             0: {
-                "zebra": np.array([1.0, 2.0, 3.0]),
-                "apple": np.array([10.0, 20.0]),
-                "mango": np.array([100.0]),
+                "zebra": np.array([1.0, 2.0, 3.0]),  # Will be last after sort
+                "apple": np.array([10.0, 20.0]),  # Will be first after sort
+                "mango": np.array([100.0]),  # Will be middle after sort
             },
         }
-        read_gd = self._roundtrip(conditions, tmp_path, "test_key_order")
-        np.testing.assert_array_almost_equal(read_gd.data.conditions[0]["zebra"], np.array([1.0, 2.0, 3.0]))
-        np.testing.assert_array_almost_equal(read_gd.data.conditions[0]["apple"], np.array([10.0, 20.0]))
-        np.testing.assert_array_almost_equal(read_gd.data.conditions[0]["mango"], np.array([100.0]))
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_key_order.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        # Verify each key maps to the correct array (not just any array)
+        np.testing.assert_array_almost_equal(read_data.conditions[0]["zebra"], np.array([1.0, 2.0, 3.0]))
+        np.testing.assert_array_almost_equal(read_data.conditions[0]["apple"], np.array([10.0, 20.0]))
+        np.testing.assert_array_almost_equal(read_data.conditions[0]["mango"], np.array([100.0]))
 
     def test_conditions_values_preserved(self, tmp_path):
-        """Array values are preserved through the round-trip for various dtypes.
+        """Test that array values are preserved through write/read cycle for various dtypes.
 
-        Note: dtype may not be perfectly preserved by anndata zarr encoding; values are
-        preserved regardless, so we compare values (not dtypes).
+        Note: dtype may not be perfectly preserved due to zarr/numpy conversion behavior
+        (e.g. float32 may become float64). Values are preserved regardless.
         """
         conditions = {
             0: {
@@ -353,19 +363,46 @@ class TestConditionsWriteRead:
                 "int64": np.array([1, 2]).astype(np.int64),
             },
         }
-        read_gd = self._roundtrip(conditions, tmp_path, "test_dtypes")
-        _assert_conditions_equal(read_gd.data.conditions, conditions, almost=True)
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_dtypes.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for col_name in conditions[0]:
+            np.testing.assert_array_almost_equal(
+                read_data.conditions[0][col_name],
+                conditions[0][col_name],
+                err_msg=f"Value mismatch for {col_name}",
+            )
 
     def test_realistic_drug_scenario(self, tmp_path):
-        """A realistic drug perturbation scenario.
+        """Test a realistic drug perturbation scenario.
 
-        Simulates multiple target distributions (perturbation conditions), each with a 2D drug
-        embedding (n_drugs x embedding_dim) and a 1D dose vector (n_drugs), where different
-        distributions have different numbers of drugs (combination treatments). The in-memory
-        structure is a nested dict ``{dist_id: {col_name: array}}``.
+        Simulates:
+        - Multiple target distributions (different perturbation conditions)
+        - Each distribution has drug embeddings (2D: n_drugs x embedding_dim)
+        - Each distribution has doses (1D: n_drugs)
+        - Different distributions can have different numbers of drugs (combination treatments)
+
+        On disk: arrays are concatenated into a long array per distribution
+        In memory: nested dict structure {dist_id: {col_name: array}}
         """
         np.random.seed(42)
         embedding_dim = 128
+
+        # Simulate different perturbation scenarios:
+        # dist 0: single drug treatment (1 drug)
+        # dist 1: double drug treatment (2 drugs)
+        # dist 2: triple drug treatment (3 drugs)
         conditions = {
             0: {
                 "drug_embedding": np.random.rand(1, embedding_dim).astype(np.float32),
@@ -380,49 +417,89 @@ class TestConditionsWriteRead:
                 "dose": np.array([0.1, 0.5, 1.0]),
             },
         }
-        read_gd = self._roundtrip(
-            conditions, tmp_path, "test_drug_scenario", src_to_tgt_dist_map={0: [0, 1, 2]}
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1, 2]},  # One source maps to all three perturbations
+            src_dist_to_rows={0: np.arange(100)},  # 100 cells, 50 features
+            tgt_dist_to_rows={
+                0: np.arange(50),  # 50 cells in each target
+                1: np.arange(50),
+                2: np.arange(50),
+            },
+            conditions=conditions,
         )
-        read_conditions = read_gd.data.conditions
+
+        store_path = tmp_path / "test_drug_scenario.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        # Write
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+
+        # Read back
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
 
         # Verify structure is nested in memory
-        assert isinstance(read_conditions, dict)
-        assert isinstance(read_conditions[0], dict)
+        assert isinstance(read_data.conditions, dict)
+        assert isinstance(read_data.conditions[0], dict)
 
+        # Verify each distribution
         for dist_id in conditions:
-            assert dist_id in read_conditions
-            assert "drug_embedding" in read_conditions[dist_id]
-            assert "dose" in read_conditions[dist_id]
+            assert dist_id in read_data.conditions
+            assert "drug_embedding" in read_data.conditions[dist_id]
+            assert "dose" in read_data.conditions[dist_id]
 
-            # Shapes are preserved (anndata keeps the full ndim, no flattening)
+            # Check shapes are preserved
             orig_emb = conditions[dist_id]["drug_embedding"]
-            read_emb = read_conditions[dist_id]["drug_embedding"]
+            read_emb = read_data.conditions[dist_id]["drug_embedding"]
             assert read_emb.shape == orig_emb.shape, f"Shape mismatch at dist {dist_id}"
 
-        _assert_conditions_equal(read_conditions, conditions, almost=True)
+            # Check values are preserved
+            np.testing.assert_array_almost_equal(
+                read_emb, orig_emb, err_msg=f"Drug embedding mismatch at dist {dist_id}"
+            )
+            np.testing.assert_array_almost_equal(
+                read_data.conditions[dist_id]["dose"],
+                conditions[dist_id]["dose"],
+                err_msg=f"Dose mismatch at dist {dist_id}",
+            )
+
+        # Verify on-disk structure: CSR-like format
+        data_group = zgroup["data"]
+        assert "conditions" in data_group
+        cond_group = data_group["conditions"]
+
+        # Check metadata exists
+        assert "dist_ids" in cond_group.attrs
+        assert list(cond_group.attrs["dist_ids"]) == sorted(conditions.keys())
+
+        # Each column should be stored as one contiguous array
+        col_names = list(conditions[0].keys())
+        for col_name in col_names:
+            assert col_name in cond_group, f"Column {col_name} not in conditions group"
+            assert f"indptr_{col_name}" in cond_group.attrs, f"indptr_{col_name} not in attrs"
+
+            # Verify the contiguous array has the right total length
+            expected_total = sum(conditions[dist_id][col_name].shape[0] for dist_id in conditions)
+            actual_total = cond_group[col_name].shape[0]
+            assert actual_total == expected_total, (
+                f"Total length mismatch for {col_name}: {actual_total} vs {expected_total}"
+            )
+
+            # Verify indptr has correct structure
+            indptr = cond_group.attrs[f"indptr_{col_name}"]
+            assert indptr[0] == 0, "indptr should start with 0"
+            assert indptr[-1] == expected_total, "indptr should end with total length"
 
 
 class TestConditionsStringEdgeCases:
-    """Condition column-key encoding edge cases survive an AnnData round-trip.
+    """Tests for condition KEY encoding edge cases.
 
-    These test what happens when condition column names (keys) have weird string values, or when
-    dist_id keys are strings instead of ints. The serialization now stores conditions as a nested
-    ``dict[str, dict[str, array]]`` in ``adata.uns``; the zarr-key constraints of that nested
-    layout still reject forward slashes and empty-string keys (the ``xfail`` cases below).
+    These test what happens when condition column names (keys) have weird string values,
+    or when dist_id keys are strings instead of ints.
     """
 
-    def _roundtrip(self, conditions, tmp_path, name, *, src_to_tgt_dist_map=None, tgt_labels=None):
-        gd = _make_grouped_distribution(
-            conditions,
-            src_to_tgt_dist_map=src_to_tgt_dist_map,
-            tgt_dist_idx_to_labels=tgt_labels,
-        )
-        store_path = tmp_path / f"{name}.zarr"
-        gd.write_zarr(path=str(store_path))
-        return GroupedDistribution.read_zarr(str(store_path))
-
     def test_conditions_with_unicode_column_keys(self, tmp_path):
-        """Column keys containing Unicode (Greek) characters."""
+        """Test conditions where the column key contains Unicode characters."""
         conditions = {
             0: {
                 "α-blocker": np.array([1.0, 2.0, 3.0]),
@@ -433,14 +510,33 @@ class TestConditionsStringEdgeCases:
                 "β-agonist": np.array([8.0]),
             },
         }
-        read_gd = self._roundtrip(
-            conditions, tmp_path, "test_unicode_keys", src_to_tgt_dist_map={0: [0, 1]}
-        )
-        _assert_conditions_equal(read_gd.data.conditions, conditions)
 
-    @pytest.mark.xfail(reason="Slashes in column keys cause zarr group-key issues", strict=True)
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5), 1: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_unicode_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for dist_id in conditions:
+            np.testing.assert_array_equal(
+                read_data.conditions[dist_id]["α-blocker"],
+                conditions[dist_id]["α-blocker"],
+            )
+            np.testing.assert_array_equal(
+                read_data.conditions[dist_id]["β-agonist"],
+                conditions[dist_id]["β-agonist"],
+            )
+
+    @pytest.mark.xfail(reason="Slashes in column keys cause zarr path issues", strict=True)
     def test_conditions_with_special_char_column_keys(self, tmp_path):
-        """Column keys containing special characters (incl. forward slashes)."""
+        """Test conditions where the column key contains special characters."""
         conditions = {
             0: {
                 "drug+combo/v1": np.array([1.0, 2.0]),
@@ -448,28 +544,52 @@ class TestConditionsStringEdgeCases:
                 "name,with,commas": np.array([5.0, 6.0]),
             },
         }
-        read_gd = self._roundtrip(conditions, tmp_path, "test_special_char_keys")
-        _assert_conditions_equal(read_gd.data.conditions, conditions)
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_special_char_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for key in conditions[0]:
+            np.testing.assert_array_equal(
+                read_data.conditions[0][key],
+                conditions[0][key],
+            )
 
     def test_conditions_with_string_dist_id_keys(self, tmp_path):
-        """dist_id keys that are strings instead of ints (e.g. '0' instead of 0).
-
-        ``from_adata`` canonicalizes dist ids back to ``int``.
-        """
+        """Test conditions where dist_id keys are strings instead of ints (e.g. '0' instead of 0)."""
         conditions = {
             "0": {"drug_name": np.array([1.0, 2.0])},
             "1": {"drug_name": np.array([3.0, 4.0])},
         }
-        read_gd = self._roundtrip(
-            conditions, tmp_path, "test_string_dist_ids", src_to_tgt_dist_map={0: [0, 1]}
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={"0": ["0", "1"]},
+            src_dist_to_rows={"0": np.arange(10)},
+            tgt_dist_to_rows={"0": np.arange(5), "1": np.arange(5)},
+            conditions=conditions,
         )
-        # dist ids come back as ints
-        assert set(read_gd.data.conditions.keys()) == {0, 1}
-        np.testing.assert_array_equal(read_gd.data.conditions[0]["drug_name"], np.array([1.0, 2.0]))
-        np.testing.assert_array_equal(read_gd.data.conditions[1]["drug_name"], np.array([3.0, 4.0]))
+
+        store_path = tmp_path / "test_string_dist_ids.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        # After read, check that conditions are accessible
+        # dist_ids may be converted to ints or stay as strings
+        assert 0 in read_data.conditions or "0" in read_data.conditions
 
     def test_conditions_with_cjk_column_keys(self, tmp_path):
-        """Column keys containing CJK characters."""
+        """Test conditions where the column key contains CJK characters."""
         conditions = {
             0: {
                 "日本語": np.array([1.0, 2.0]),
@@ -477,23 +597,56 @@ class TestConditionsStringEdgeCases:
                 "한국어": np.array([5.0, 6.0]),
             },
         }
-        read_gd = self._roundtrip(conditions, tmp_path, "test_cjk_keys")
-        _assert_conditions_equal(read_gd.data.conditions, conditions)
 
-    @pytest.mark.xfail(reason="Empty-string column keys cause zarr group-key issues", strict=True)
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_cjk_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for key in conditions[0]:
+            np.testing.assert_array_equal(
+                read_data.conditions[0][key],
+                conditions[0][key],
+            )
+
+    @pytest.mark.xfail(reason="Empty string column keys cause zarr issues", strict=True)
     def test_conditions_with_empty_string_column_key(self, tmp_path):
-        """An empty-string column key."""
+        """Test conditions where the column key is an empty string."""
         conditions = {
             0: {
                 "": np.array([1.0, 2.0]),  # Empty string as key
                 "normal": np.array([3.0, 4.0]),
             },
         }
-        read_gd = self._roundtrip(conditions, tmp_path, "test_empty_key")
-        _assert_conditions_equal(read_gd.data.conditions, conditions)
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_empty_key.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        np.testing.assert_array_equal(
+            read_data.conditions[0][""],
+            conditions[0][""],
+        )
 
     def test_conditions_with_numeric_string_column_keys(self, tmp_path):
-        """Column keys that look like numbers (e.g. '123')."""
+        """Test conditions where the column key looks like a number (e.g. '123')."""
         conditions = {
             0: {
                 "123": np.array([1.0, 2.0]),
@@ -501,12 +654,29 @@ class TestConditionsStringEdgeCases:
                 "-999": np.array([5.0, 6.0]),
             },
         }
-        read_gd = self._roundtrip(conditions, tmp_path, "test_numeric_keys")
-        _assert_conditions_equal(read_gd.data.conditions, conditions)
 
-    @pytest.mark.xfail(reason="Empty strings and slashes in column keys cause zarr group-key issues", strict=True)
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5)},
+            conditions=conditions,
+        )
+
+        store_path = tmp_path / "test_numeric_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for key in conditions[0]:
+            np.testing.assert_array_equal(
+                read_data.conditions[0][key],
+                conditions[0][key],
+            )
+
+    @pytest.mark.xfail(reason="Empty strings and slashes in column keys cause zarr issues", strict=True)
     def test_conditions_with_mixed_weird_keys(self, tmp_path):
-        """A mix of different weird column keys (Unicode + slash + empty + numeric)."""
+        """Test conditions with a mix of different weird column keys."""
         conditions = {
             0: {
                 "α-blocker+combo/v1": np.array([1.0]),
@@ -521,13 +691,29 @@ class TestConditionsStringEdgeCases:
                 "123": np.array([11.0, 12.0]),
             },
         }
-        read_gd = self._roundtrip(
-            conditions, tmp_path, "test_mixed_weird_keys", src_to_tgt_dist_map={0: [0, 1]}
+
+        data = GroupedDistributionData(
+            src_to_tgt_dist_map={0: [0, 1]},
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5), 1: np.arange(5)},
+            conditions=conditions,
         )
-        _assert_conditions_equal(read_gd.data.conditions, conditions)
+
+        store_path = tmp_path / "test_mixed_weird_keys.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+
+        data.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100, max_workers=1)
+        read_data = GroupedDistributionData.read_zarr(zgroup["data"])
+
+        for dist_id in conditions:
+            for key in conditions[dist_id]:
+                np.testing.assert_array_equal(
+                    read_data.conditions[dist_id][key],
+                    conditions[dist_id][key],
+                )
 
     def test_full_roundtrip_with_weird_keys(self, tmp_path):
-        """Full GroupedDistribution round-trip with Unicode/CJK condition keys and a rich df."""
+        """Test full GroupedDistribution roundtrip with weird condition keys."""
         src_tgt_dist_df = pd.DataFrame({
             "src_dist_idx": [0, 0, 1],
             "tgt_dist_idx": [0, 1, 2],
@@ -541,9 +727,15 @@ class TestConditionsStringEdgeCases:
             2: {"α-blocker": np.array([5.0]), "日本語": np.array([6.0])},
         }
 
-        gd = _make_grouped_distribution(
-            conditions,
+        data = GroupedDistributionData(
             src_to_tgt_dist_map={0: [0, 1], 1: [2]},
+            src_dist_to_rows={0: np.arange(10), 1: np.arange(8)},
+            tgt_dist_to_rows={0: np.arange(5), 1: np.arange(5), 2: np.arange(8)},
+            conditions=conditions,
+        )
+
+        annotation = GroupedDistributionAnnotation(
+            old_obs_index=np.arange(20),
             src_dist_idx_to_labels={0: ["cell_line_0"], 1: ["cell_line_1"]},
             tgt_dist_idx_to_labels={0: ["tlabel1"], 1: ["tlabel2"], 2: ["tlabel3"]},
             src_tgt_dist_df=src_tgt_dist_df,
@@ -553,15 +745,20 @@ class TestConditionsStringEdgeCases:
             dist_flag_key="control",
         )
 
+        gd = GroupedDistribution(data=data, annotation=annotation)
+
         store_path = tmp_path / "test_full_roundtrip_weird_keys.zarr"
-        gd.write_zarr(path=str(store_path))
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
 
         read_gd = GroupedDistribution.read_zarr(str(store_path))
 
-        # Conditions survived the round-trip
-        _assert_conditions_equal(read_gd.data.conditions, conditions)
-        # The rich src/tgt pairing dataframe survived too
-        pd.testing.assert_frame_equal(read_gd.annotation.src_tgt_dist_df, src_tgt_dist_df)
+        # Verify conditions survived roundtrip
+        for dist_id in conditions:
+            for key in conditions[dist_id]:
+                np.testing.assert_array_equal(
+                    read_gd.data.conditions[dist_id][key],
+                    conditions[dist_id][key],
+                )
 
 
 
@@ -746,37 +943,25 @@ class TestInMemoryAndToMemory:
     def test_read_zarr_roundtrips_row_indices(
         self, tmp_path, dummy_grouped_distribution_data, dummy_grouped_distribution_annotation
     ):
-        """read_zarr roundtrips the per-row dist-id metadata (always in memory)."""
+        """Test that read_zarr roundtrips the row-index metadata (always in memory)."""
         gd = GroupedDistribution(
             data=dummy_grouped_distribution_data,
             annotation=dummy_grouped_distribution_annotation,
         )
         store_path = tmp_path / "test_in_memory.zarr"
-        gd.write_zarr(path=str(store_path))
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
 
         read_gd = GroupedDistribution.read_zarr(str(store_path))
 
         # Row-index metadata is always in memory now
         assert read_gd.data.is_in_memory is True
 
-        # Verify per-row dist-id arrays roundtrip correctly
-        np.testing.assert_array_equal(
-            read_gd.data.row_src_dist_idx, dummy_grouped_distribution_data.row_src_dist_idx
-        )
-        np.testing.assert_array_equal(
-            read_gd.data.row_tgt_dist_idx, dummy_grouped_distribution_data.row_tgt_dist_idx
-        )
-
-        # rows_for() reconstructs the same per-dist row groups from the roundtripped column
-        def _as_index(rows, n):
-            return np.arange(n)[rows] if isinstance(rows, slice) else np.asarray(rows)
-
-        n = read_gd.data.row_src_dist_idx.shape[0]
-        original_rows = GroupedDistributionData.rows_for(dummy_grouped_distribution_data.row_src_dist_idx)
-        read_rows = GroupedDistributionData.rows_for(read_gd.data.row_src_dist_idx)
-        assert read_rows.keys() == original_rows.keys()
-        for k in original_rows:
-            np.testing.assert_array_equal(_as_index(read_rows[k], n), _as_index(original_rows[k], n))
+        # Verify row indices roundtrip correctly
+        for k in dummy_grouped_distribution_data.src_dist_to_rows:
+            np.testing.assert_array_equal(
+                read_gd.data.src_dist_to_rows[k],
+                dummy_grouped_distribution_data.src_dist_to_rows[k],
+            )
 
     def test_is_in_memory_for_datamanager_created_data(self, sample_grouped_distribution):
         """Test that data created by DataManager is already in memory."""
@@ -785,18 +970,14 @@ class TestInMemoryAndToMemory:
 
     def test_grouped_distribution_data_is_in_memory_property(self):
         """Test is_in_memory property for manually created data."""
-        row_tgt = np.array([-1, -1, 0, 0, 1], dtype=np.int64)
-        row_src = np.array([0, 0, -1, -1, -1], dtype=np.int64)
         data = GroupedDistributionData(
             src_to_tgt_dist_map={0: [0, 1]},
-            row_tgt_dist_idx=row_tgt,
-            row_src_dist_idx=row_src,
+            src_dist_to_rows={0: np.arange(10)},
+            tgt_dist_to_rows={0: np.arange(5), 1: np.arange(5)},
             conditions={0: {"cond": np.array([1, 2])}, 1: {"cond": np.array([3, 4])}},
         )
-        # Metadata is always in memory
+        # Numpy arrays should be in memory
         assert data.is_in_memory is True
-        # to_memory() is a no-op that returns None
-        assert data.to_memory() is None
 
 
 class TestAnnDataLocationSerialization:
@@ -975,56 +1156,64 @@ class TestAnnotationDataLocation:
         assert read_gd.annotation.data_location is not None
         assert read_gd.annotation.data_location._path == gd.annotation.data_location._path
 
-    def _roundtrip_data_location(self, tmp_path, name, base_annotation_kwargs, data_location):
-        """Round-trip a GroupedDistribution carrying ``data_location`` and return the read-back one.
-
-        Serialization is now AnnData-based on :class:`GroupedDistribution`; ``data_location`` is
-        stored (as JSON) in ``adata.uns`` and reconstructed by ``from_adata``.
-        """
-        annotation = GroupedDistributionAnnotation(**base_annotation_kwargs, data_location=data_location)
-        # base_annotation_kwargs has old_obs_index of length 20; build a matching data half.
-        data = GroupedDistributionData(
-            src_to_tgt_dist_map={0: [0, 1], 1: [2]},
-            row_tgt_dist_idx=np.full(20, -1, dtype=np.int64),
-            row_src_dist_idx=np.full(20, -1, dtype=np.int64),
-            conditions={},
-        )
-        gd = GroupedDistribution(data=data, annotation=annotation)
-        store_path = tmp_path / f"{name}.zarr"
-        gd.write_zarr(path=str(store_path))
-        return GroupedDistribution.read_zarr(str(store_path))
-
     def test_annotation_with_none_data_location(self, tmp_path, base_annotation_kwargs):
-        """data_location=None survives the round-trip as None."""
-        read_gd = self._roundtrip_data_location(tmp_path, "test_none_location", base_annotation_kwargs, None)
-        assert read_gd.annotation.data_location is None
+        """Test annotation IO with data_location=None."""
+        annotation = GroupedDistributionAnnotation(**base_annotation_kwargs, data_location=None)
+
+        store_path = tmp_path / "test_none_location.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+        annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+        read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        assert read_annotation.data_location is None
 
     def test_annotation_with_obsm_data_location(self, tmp_path, base_annotation_kwargs):
-        """obsm data_location survives the round-trip."""
+        """Test annotation IO with obsm data_location."""
         data_location = AnnDataLocation().obsm["X_pca"]
-        read_gd = self._roundtrip_data_location(
-            tmp_path, "test_obsm_location", base_annotation_kwargs, data_location
+        annotation = GroupedDistributionAnnotation(
+            **base_annotation_kwargs,
+            data_location=data_location,
         )
-        assert read_gd.annotation.data_location is not None
-        assert read_gd.annotation.data_location._path == data_location._path
+
+        store_path = tmp_path / "test_obsm_location.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+        annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+        read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        assert read_annotation.data_location is not None
+        assert read_annotation.data_location._path == data_location._path
 
     def test_annotation_with_X_data_location(self, tmp_path, base_annotation_kwargs):
-        """X (main matrix) data_location survives the round-trip."""
+        """Test annotation IO with X (main matrix) data_location."""
         data_location = AnnDataLocation().X
-        read_gd = self._roundtrip_data_location(
-            tmp_path, "test_X_location", base_annotation_kwargs, data_location
+        annotation = GroupedDistributionAnnotation(
+            **base_annotation_kwargs,
+            data_location=data_location,
         )
-        assert read_gd.annotation.data_location is not None
-        assert read_gd.annotation.data_location._path == data_location._path
+
+        store_path = tmp_path / "test_X_location.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+        annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+        read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        assert read_annotation.data_location is not None
+        assert read_annotation.data_location._path == data_location._path
 
     def test_annotation_with_layers_data_location(self, tmp_path, base_annotation_kwargs):
-        """layers data_location survives the round-trip."""
+        """Test annotation IO with layers data_location."""
         data_location = AnnDataLocation().layers["counts"]
-        read_gd = self._roundtrip_data_location(
-            tmp_path, "test_layers_location", base_annotation_kwargs, data_location
+        annotation = GroupedDistributionAnnotation(
+            **base_annotation_kwargs,
+            data_location=data_location,
         )
-        assert read_gd.annotation.data_location is not None
-        assert read_gd.annotation.data_location._path == data_location._path
+
+        store_path = tmp_path / "test_layers_location.zarr"
+        zgroup = zarr.open_group(str(store_path), mode="w")
+        annotation.write_zarr_group(group=zgroup, chunk_size=10, shard_size=100)
+
+        read_annotation = GroupedDistributionAnnotation.read_zarr(zgroup["annotation"])
+        assert read_annotation.data_location is not None
+        assert read_annotation.data_location._path == data_location._path
 
     def test_grouped_distribution_preserves_data_location(
         self,
@@ -1032,7 +1221,7 @@ class TestAnnotationDataLocation:
         dummy_grouped_distribution_data,
         base_annotation_kwargs,
     ):
-        """GroupedDistribution preserves data_location through write_zarr / read_zarr."""
+        """Test that GroupedDistribution preserves data_location through write/read."""
         data_location = AnnDataLocation().obsm["X_scVI"]
         annotation = GroupedDistributionAnnotation(
             **base_annotation_kwargs,
@@ -1045,7 +1234,7 @@ class TestAnnotationDataLocation:
         )
 
         store_path = tmp_path / "test_gd_location.zarr"
-        gd.write_zarr(path=str(store_path))
+        gd.write_zarr(path=str(store_path), chunk_size=10, shard_size=100, max_workers=1)
 
         read_gd = GroupedDistribution.read_zarr(str(store_path))
         assert read_gd.annotation.data_location is not None

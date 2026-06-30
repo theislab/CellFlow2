@@ -1,7 +1,6 @@
 import functools
 import os
 import types
-import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import field as dc_field
 from typing import Any, Literal
@@ -23,13 +22,10 @@ from scaleflow.data import (
     DataManager,
     GroupedAnnbatchSampler,
     GroupedDistribution,
-    GroupedDistributionData,
     PredictionSampler,
     SamplerABC,
     SourceCache,
     ValidationSampler,
-    _InMemorySource,
-    _sort_adata_by_condition,
 )
 from scaleflow.model._utils import _write_predictions
 from scaleflow.networks import _velocity_field
@@ -78,9 +74,6 @@ class ScaleFlow:
         # "call prepare_data first" error instead of AttributeError.
         self._train_data: GroupedDistribution | None = None
         self._train_collection: Any | None = None
-        # True when training data is in memory (prepare_data_in_memory): the sampler then
-        # uses Loader.add_adata and pins ClassSampler chunk_size to 1 (per-row sampling).
-        self._in_memory: bool = False
         self._condition_dim: int | None = None
         self._vf: (
             _velocity_field.ConditionalVelocityField
@@ -90,44 +83,6 @@ class ScaleFlow:
         ) = None
 
     def prepare_data(
-        self,
-        collection: Any,
-        *,
-        dist_flag_key: str,
-        src_dist_keys: Sequence[str],
-        tgt_dist_keys: Sequence[str] | dict[str, Sequence[str]],
-        rep_keys: dict[str, str] | None = None,
-        rep_path: str | None = None,
-        rep_dict: Mapping[str, Any] | None = None,
-        data_location: AnnDataLocation | None = None,
-        extra_rep_keys: dict[str, tuple[str, str]] | None = None,
-        verbose: bool = False,
-    ) -> None:
-        """Deprecated alias for :meth:`prepare_on_disk`.
-
-        Use :meth:`prepare_on_disk` for an on-disk collection or
-        :meth:`prepare_data_in_memory` for an in-memory :class:`~anndata.AnnData`.
-        """
-        warnings.warn(
-            "`prepare_data` is deprecated; use `prepare_on_disk` (on-disk collection) or "
-            "`prepare_data_in_memory` (in-memory AnnData).",
-            FutureWarning,
-            stacklevel=2,
-        )
-        self.prepare_on_disk(
-            collection,
-            dist_flag_key=dist_flag_key,
-            src_dist_keys=src_dist_keys,
-            tgt_dist_keys=tgt_dist_keys,
-            rep_keys=rep_keys,
-            rep_path=rep_path,
-            rep_dict=rep_dict,
-            data_location=data_location,
-            extra_rep_keys=extra_rep_keys,
-            verbose=verbose,
-        )
-
-    def prepare_on_disk(
         self,
         collection: Any,
         *,
@@ -199,120 +154,29 @@ class ScaleFlow:
         if rep_dict is None and rep_path is None:
             rep_dict = {}
         self._train_collection = collection
-        self._in_memory = False
         self.train_data = self._dm.prepare_data_from_collection(
             collection, rep_path=rep_path, rep_dict=rep_dict, verbose=verbose
         )
-
-    def prepare_data_in_memory(
-        self,
-        adata: ad.AnnData,
-        *,
-        dist_flag_key: str,
-        src_dist_keys: Sequence[str],
-        tgt_dist_keys: Sequence[str] | dict[str, Sequence[str]],
-        rep_keys: dict[str, str] | None = None,
-        data_location: AnnDataLocation | None = None,
-        extra_rep_keys: dict[str, tuple[str, str]] | None = None,
-        output_path: str | None = None,
-        verbose: bool = False,
-    ) -> None:
-        """Prepare grouped-distribution training metadata from an in-memory AnnData.
-
-        The AnnData is sorted by condition (so every condition is one contiguous run) and the
-        cells are streamed by annbatch's in-memory loader (``Loader.add_adata``) with
-        ``chunk_size=1`` (per-row sampling). Condition embeddings are read from ``adata.uns``
-        via ``rep_keys`` (the in-memory analogue of the on-disk ``rep_path`` store).
-
-        Parameters
-        ----------
-        adata
-            In-memory :class:`~anndata.AnnData`. ``uns`` holds the representation stores named
-            by ``rep_keys``.
-        dist_flag_key, src_dist_keys, tgt_dist_keys, rep_keys, data_location, extra_rep_keys
-            As in :meth:`prepare_on_disk`.
-        output_path
-            Optional path to write the *prepared* sorted AnnData (X + obs dist-ids + uns
-            metadata) as a self-contained zarr. If it already exists it is loaded instead of
-            recomputing the sort/preparation. Validity of a reused file is the caller's (e.g.
-            Snakemake's) responsibility — no fingerprinting is done here.
-        verbose
-            Whether to print timing information.
-
-        Returns
-        -------
-        Updates :attr:`data_manager` and :attr:`train_data`.
-        """
-        if data_location is None:
-            data_location = AnnDataLocation().X
-        self._dm = DataManager(
-            dist_flag_key=dist_flag_key,
-            src_dist_keys=list(src_dist_keys),
-            tgt_dist_keys=(
-                {g: list(cols) for g, cols in tgt_dist_keys.items()}
-                if isinstance(tgt_dist_keys, dict)
-                else list(tgt_dist_keys)
-            ),
-            rep_keys=dict(rep_keys) if rep_keys else {},
-            data_location=data_location,
-            extra_rep_keys=extra_rep_keys,
-        )
-
-        if output_path is not None and os.path.exists(output_path):
-            # reuse a previously prepared artifact (already sorted, metadata embedded)
-            adata_sorted = ad.read_zarr(output_path)
-            self.train_data = GroupedDistribution.from_adata(adata_sorted)
-        else:
-            adata_sorted = _sort_adata_by_condition(
-                adata,
-                dist_flag_key=dist_flag_key,
-                src_dist_keys=list(src_dist_keys),
-                tgt_dist_keys=(
-                    {g: list(cols) for g, cols in tgt_dist_keys.items()}
-                    if isinstance(tgt_dist_keys, dict)
-                    else list(tgt_dist_keys)
-                ),
-            )
-            self.train_data = self._dm.prepare_data(adata_sorted, verbose=verbose)
-            if output_path is not None:
-                # embed metadata into the sorted adata and persist the self-contained artifact
-                self.train_data.to_adata(adata_sorted)
-                ad.settings.zarr_write_format = 3
-                adata_sorted.write_zarr(output_path)
-
-        self._train_collection = _InMemorySource(adata_sorted)
-        self._in_memory = True
 
     def make_dataloader(
         self,
         *,
         batch_size: int = 1024,
-        chunk_size: int | None = None,
+        chunk_size: int,
         preload_nchunks: int | None = None,
         seed: int = 0,
         **kwargs: Any,
     ) -> GroupedAnnbatchSampler:
-        """Build an annbatch-backed training sampler over the prepared data.
+        """Build an annbatch-backed training sampler over the prepared collection.
 
-        For on-disk training ``chunk_size`` is the annbatch ``ClassSampler`` read-slice size
-        (required): it must be <= every trained condition's cell count and
-        ``chunk_size * preload_nchunks`` must be divisible by ``batch_size`` (see
-        :class:`~scaleflow.data.GroupedAnnbatchSampler`), and the collection must be written
-        sorted by condition (see :func:`~scaleflow.data.write_sorted_collection`). For in-memory
-        training (:meth:`prepare_data_in_memory`) ``chunk_size`` is pinned to 1 (per-row
-        sampling); passing any other value raises.
+        ``chunk_size`` is the annbatch ``ClassSampler`` read-slice size; it must be <= every
+        trained condition's cell count and ``chunk_size * preload_nchunks`` must be divisible
+        by ``batch_size`` (see :class:`~scaleflow.data.GroupedAnnbatchSampler`). The collection
+        must be written sorted by condition (see
+        :func:`~scaleflow.data.write_sorted_collection`).
         """
         if self.train_data is None or getattr(self, "_train_collection", None) is None:
-            raise ValueError("Call `prepare_on_disk`/`prepare_data_in_memory` first.")
-        if self._in_memory:
-            if chunk_size not in (None, 1):
-                raise ValueError("In-memory training uses chunk_size=1 (per-row sampling); do not pass another value.")
-            chunk_size = 1
-        elif chunk_size is None:
-            raise ValueError(
-                "`chunk_size` is required for on-disk training (the ClassSampler read-slice size; "
-                "must be <= every trained condition's cell count)."
-            )
+            raise ValueError("Call `prepare_data` first.")
         return GroupedAnnbatchSampler(
             self._train_collection,
             self.train_data,
@@ -325,13 +189,10 @@ class ScaleFlow:
 
     @staticmethod
     def _feature_dim(collection: Any) -> int:
-        """Read the cell-feature dimension from a collection / in-memory source without loading X."""
+        """Read the cell-feature dimension from a collection without loading X."""
         import zarr
 
-        from scaleflow.data._annbatch_sampler import _InMemorySource, _open_collection
-
-        if isinstance(collection, _InMemorySource):
-            return int(collection.adata.shape[1])
+        from scaleflow.data._annbatch_sampler import _open_collection
 
         coll = _open_collection(collection)
         g = next(iter(coll))
@@ -842,10 +703,16 @@ class ScaleFlow:
         if self.trainer is None:
             raise ValueError("Model not initialized. Please call `prepare_model` first.")
 
-        # Build the annbatch-backed training sampler over the prepared data if the caller did
-        # not provide one. make_dataloader validates chunk_size (required on-disk, pinned to 1
-        # in memory).
+        # Build the annbatch-backed training sampler over the prepared collection if
+        # the caller did not provide one.
         if train_dataloader is None:
+            if chunk_size is None:
+                raise ValueError(
+                    "`chunk_size` is required when training builds the default annbatch sampler. "
+                    "It is the ClassSampler read-slice size and must be <= every trained condition's "
+                    "cell count (see GroupedAnnbatchSampler). Pass `chunk_size=...` to `train`, or supply "
+                    "a `train_dataloader`."
+                )
             train_dataloader = self.make_dataloader(
                 batch_size=batch_size,
                 chunk_size=chunk_size,
@@ -970,7 +837,7 @@ class ScaleFlow:
             raise ValueError("No collection available; pass `collection` or call `prepare_data` first.")
 
         conditions = self._dm.get_condition_data(covariate_data, rep_dict=rep_dict, rep_path=rep_path)
-        source_cache = SourceCache(coll, GroupedDistributionData.rows_for(self.train_data.data.row_src_dist_idx))
+        source_cache = SourceCache(coll, self.train_data.data.src_dist_to_rows)
         label_to_src = {
             tuple(str(x) for x in lbl): int(idx)
             for idx, lbl in self.train_data.annotation.src_dist_idx_to_labels.items()
