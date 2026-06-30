@@ -218,6 +218,14 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         recon_dec = callbacks.load_recon_decoder(str(dec_path))
         adata_recon = sc.read_h5ad(str(h5ad_path))
         log_dose_key = recon_cfg.get("log_dose_obs_key", None)
+        # obsm key of the latent the model predicts — used to decode the control latent so
+        # the pred delta is decode(pred) − decode(ctrl_latent). Resolve from the zarr itself.
+        emb_obsm_key = recon_cfg.get("emb_obsm_key")
+        if not emb_obsm_key:
+            try:
+                emb_obsm_key = gds[cfg.selected_datasets[0]].annotation.data_location.to_path()[-1][1]
+            except Exception:  # noqa: BLE001
+                emb_obsm_key = None
         recon_cb = callbacks.ReconMetricsLogger(
             decoder=recon_dec,
             adata=adata_recon,
@@ -225,11 +233,13 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             cell_line_obs_key=str(recon_cfg.cell_line_obs_key),
             control_obs_key=str(recon_cfg.get("control_obs_key", "control")),
             log_dose_obs_key=str(log_dose_key) if log_dose_key else None,
+            emb_obsm_key=str(emb_obsm_key) if emb_obsm_key else None,
             valid_freq=int(cfg.training.valid_freq),
             wandb_run=wandb_run,
         )
         cbs.append(recon_cb)
-        print(f"  recon metrics enabled: {recon_dec.input_key} → {len(recon_dec.var_names or [])} genes")
+        print(f"  recon metrics enabled: {recon_dec.input_key} → {len(recon_dec.var_names or [])} genes "
+              f"(pred delta vs decode(ctrl latent '{emb_obsm_key}'))")
 
     monitor_metrics = ["loss"]
     for ds in val_samplers:

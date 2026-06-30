@@ -286,6 +286,7 @@ class ReconMetricsLogger(ComputationCallback):
         cell_line_obs_key: str,
         control_obs_key: str = "control",
         log_dose_obs_key: str | None = None,
+        emb_obsm_key: str | None = None,
         valid_freq: int = 1,
         wandb_run=None,
     ):
@@ -296,10 +297,15 @@ class ReconMetricsLogger(ComputationCallback):
         self._ctrl_key = control_obs_key
         # obs column whose condition-key value is log1p(raw): match numerically, not by string
         self._log_dose_key = log_dose_obs_key
+        # obsm key of the latent the model predicts (e.g. X_state). When set, the PRED delta
+        # subtracts decode(control latent) instead of the observed control genes, so the
+        # decoder's offset cancels in the predicted perturbation.
+        self._emb_key = emb_obsm_key
         self._valid_freq = valid_freq
         self._wandb_run = wandb_run
         self._step = 0
         self._ctrl_cache: dict[str, np.ndarray] = {}
+        self._ctrl_decoded_cache: dict[str, np.ndarray] = {}
         # precompute column indices for decoder's var_names
         var_names = decoder.var_names
         if var_names is not None:
@@ -311,6 +317,7 @@ class ReconMetricsLogger(ComputationCallback):
     def on_train_begin(self, *args, **kwargs) -> None:
         self._step = 0
         self._ctrl_cache = {}
+        self._ctrl_decoded_cache = {}
 
     @staticmethod
     def _to_dense(X) -> np.ndarray:
@@ -358,6 +365,27 @@ class ReconMetricsLogger(ComputationCallback):
             self._ctrl_cache[cell_line] = X[:, self._var_idx] if self._var_idx is not None else X
         return self._ctrl_cache[cell_line]
 
+    def _get_ctrl_decoded(self, cond_key: tuple) -> np.ndarray | None:
+        """Mean of decode(control-cell latents): the decoder's own control gene profile.
+
+        Uses the same control cells as :meth:`_get_ctrl_genes` but their ``emb_obsm_key``
+        latent, decoded — so the pred delta becomes decode(pred) − decode(ctrl_latent),
+        cancelling the decoder offset. Cached per cell line.
+        """
+        if self._emb_key is None or self._emb_key not in self._adata.obsm:
+            return None
+        cond_key = self._normalize_key(cond_key)
+        cl_idx = self._cond_keys.index(self._cl_key)
+        cell_line = str(cond_key[cl_idx])
+        if cell_line not in self._ctrl_decoded_cache:
+            obs = self._adata.obs
+            mask = obs[self._ctrl_key].astype(bool) & (obs[self._cl_key].astype(str) == cell_line)
+            if mask.sum() == 0:
+                return None
+            Z = np.asarray(self._adata[mask].obsm[self._emb_key], dtype=np.float32)
+            self._ctrl_decoded_cache[cell_line] = self._decoder.decode(Z).mean(axis=0)
+        return self._ctrl_decoded_cache[cell_line]
+
     def _compute_recon(self, pred_data: dict, prefix: str, step_label: str) -> dict:
         """Gene-space delta metrics over ``pred_data`` ({ds: {cond_key: pred_latent}}).
 
@@ -381,9 +409,14 @@ class ReconMetricsLogger(ComputationCallback):
                 pred_genes = self._decoder.decode(pred_arr)
                 pred_sigs.append(float(pred_arr.mean()))
                 predgene_sigs.append(float(pred_genes.mean()))
-                ctrl_mean = ctrl_genes.mean(axis=0)
+                ctrl_mean = ctrl_genes.mean(axis=0)               # observed control genes
+                # pred delta uses decode(control latent) when available, so the decoder
+                # offset cancels (decode(pred) − decode(ctrl)); else fall back to observed.
+                ctrl_pred = self._get_ctrl_decoded(cond_key)
+                if ctrl_pred is None:
+                    ctrl_pred = ctrl_mean
                 delta_true = true_genes.mean(axis=0) - ctrl_mean
-                delta_pred = pred_genes.mean(axis=0) - ctrl_mean
+                delta_pred = pred_genes.mean(axis=0) - ctrl_pred
                 r, _ = pearsonr(delta_true, delta_pred)
                 r2_deltas.append(float(r ** 2))
                 pearson_deltas.append(float(r))
