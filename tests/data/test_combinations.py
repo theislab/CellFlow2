@@ -16,6 +16,7 @@ from scaleflow.data import (
     DataManager,
     GroupedAnnbatchSampler,
     GroupedDistribution,
+    GroupedDistributionData,
     write_sorted_collection,
 )
 
@@ -301,7 +302,7 @@ def test_combination_with_split():
         force_training_values={}, ratios=[0.6, 0.2, 0.2], random_state=0,
     ).split()
     assert set(splits) == {"train", "val", "test"}
-    tgt = {k: set(v.data.tgt_dist_to_rows) for k, v in splits.items()}
+    tgt = {k: set(GroupedDistributionData.rows_for(v.data.row_tgt_dist_idx)) for k, v in splits.items()}
     assert tgt["train"].isdisjoint(tgt["val"]) and tgt["train"].isdisjoint(tgt["test"])
     # every split's conditions remain (1, K=2, emb) combinations
     for v in splits.values():

@@ -41,7 +41,7 @@ from annbatch import Loader
 from annbatch.abc import Sampler
 from annbatch.samplers import ClassSampler
 
-from scaleflow.data._data import GroupedDistribution
+from scaleflow.data._data import GroupedDistribution, GroupedDistributionData
 from scaleflow.data._dataloader import SamplerABC
 
 __all__ = [
@@ -65,6 +65,102 @@ def _open_collection(collection: Any) -> Any:
     if isinstance(collection, DatasetCollection):
         return collection
     return DatasetCollection(str(collection), mode="r")
+
+
+class _LoaderSource:
+    """Strategy for populating a fresh annbatch :class:`~annbatch.Loader`.
+
+    Every sampler here drives a ``Loader``; the only thing that differs between the
+    on-disk and in-memory data paths is *how the loader is filled*. ``use_collection``
+    is itself just sugar over ``add_adatas`` in annbatch, so the two paths share all
+    downstream logic (``ClassSampler``, ``return_index`` row lookups, source caching).
+    """
+
+    #: In-memory sources read individual rows, so ClassSampler must use ``chunk_size=1``
+    #: (per-row sampling). The on-disk path streams contiguous chunks and is unconstrained.
+    forces_chunk_size_one: bool = False
+
+    def attach(self, loader: Loader) -> Loader:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def read_rows(self, dist_to_rows: dict[int, slice | np.ndarray]) -> dict[int, Any]:  # pragma: no cover
+        """Read each distribution's ``X`` rows into memory (sparse stays sparse)."""
+        raise NotImplementedError
+
+
+class _CollectionSource(_LoaderSource):
+    """On-disk source: an :class:`annbatch.DatasetCollection` (or a path to one)."""
+
+    def __init__(self, collection: Any) -> None:
+        self._collection = collection
+
+    def attach(self, loader: Loader) -> Loader:
+        return loader.use_collection(_open_collection(self._collection))
+
+    def read_rows(self, dist_to_rows: dict[int, slice | np.ndarray]) -> dict[int, Any]:
+        order = sorted(int(k) for k in dist_to_rows)
+        if not order:
+            return {}
+
+        def _request(rows: slice | np.ndarray) -> dict[str, Any]:
+            # annbatch accepts a list of slices or an int array as `requests`; a slice keeps
+            # the read contiguous (one block) instead of gathering scattered rows.
+            if isinstance(rows, slice):
+                n = rows.stop - rows.start
+                return {"requests": [rows], "splits": [np.arange(n)]}
+            rows = np.asarray(rows, dtype=np.int64)
+            return {"requests": rows, "splits": [np.arange(len(rows))]}
+
+        requests = [_request(dist_to_rows[k]) for k in order]
+        sampler = _ExplicitRequestSampler(iter(requests), batch_size=None, n_batches=len(requests))
+        loader = _make_loader(self, batch_sampler=sampler, return_index=False)
+        return {k: batch["X"] for k, batch in zip(order, loader, strict=True)}
+
+
+class _InMemorySource(_LoaderSource):
+    """In-memory source wrapping a single :class:`anndata.AnnData`.
+
+    The AnnData is expected to be sorted by condition (see
+    :func:`_sort_adata_by_condition`): sorting is not required for correctness at
+    ``chunk_size=1`` (rows are sampled by class, so any layout yields class-coherent
+    batches), but it collapses each condition into one contiguous run, which keeps
+    ``ClassSampler``'s run-length encoding compact and makes row reads cheap.
+    """
+
+    forces_chunk_size_one = True
+
+    def __init__(self, adata: Any) -> None:
+        self.adata = adata
+
+    def attach(self, loader: Loader) -> Loader:
+        return loader.add_adata(self.adata)
+
+    def read_rows(self, dist_to_rows: dict[int, slice | np.ndarray]) -> dict[int, Any]:
+        # Direct array access: a slice is a view (dense) / efficient row-slice (CSR); annbatch
+        # is unnecessary for in-memory reads. Sparse stays sparse.
+        x = self.adata.X
+        return {int(k): x[rows] for k, rows in dist_to_rows.items()}
+
+
+def _as_source(collection: Any) -> _LoaderSource:
+    """Normalize a ``collection`` argument into a :class:`_LoaderSource`.
+
+    A bare :class:`anndata.AnnData` is treated as an in-memory source; anything else
+    (a :class:`~annbatch.DatasetCollection` or path) is an on-disk collection.
+    """
+    import anndata as ad
+
+    if isinstance(collection, _LoaderSource):
+        return collection
+    if isinstance(collection, ad.AnnData):
+        return _InMemorySource(collection)
+    return _CollectionSource(collection)
+
+
+def _make_loader(source: _LoaderSource, *, batch_sampler: Sampler, return_index: bool) -> Loader:
+    """Build a fresh annbatch ``Loader`` for ``source`` with the given batch sampler."""
+    loader = Loader(batch_sampler=batch_sampler, return_index=return_index, to_torch=False, preload_to_gpu=False)
+    return source.attach(loader)
 
 
 class _ExplicitRequestSampler(Sampler):
@@ -98,23 +194,13 @@ class _ExplicitRequestSampler(Sampler):
         yield from self._request_iter
 
 
-def _read_distributions(collection: Any, dist_to_rows: dict[int, np.ndarray]) -> dict[int, Any]:
-    """Read each distribution's rows from the collection's ``X`` into memory.
+def _read_distributions(collection: Any, dist_to_rows: dict[int, slice | np.ndarray]) -> dict[int, Any]:
+    """Read each distribution's rows from the collection/adata ``X`` into memory.
 
-    Sparse stays sparse (no densification). Returns ``{dist_idx: cells}``.
+    Delegates to the source (annbatch for on-disk collections, direct slicing for in-memory
+    AnnData). Sparse stays sparse (no densification). Returns ``{dist_idx: cells}``.
     """
-    order = sorted(int(k) for k in dist_to_rows.keys())
-    if not order:
-        return {}
-    coll = _open_collection(collection)
-    requests = [
-        {"requests": np.asarray(dist_to_rows[k], dtype=np.int64), "splits": [np.arange(len(dist_to_rows[k]))]}
-        for k in order
-    ]
-    sampler = _ExplicitRequestSampler(iter(requests), batch_size=None, n_batches=len(requests))
-    loader = Loader(batch_sampler=sampler, return_index=False, to_torch=False, preload_to_gpu=False)
-    loader = loader.use_collection(coll)
-    return {k: batch["X"] for k, batch in zip(order, loader, strict=True)}
+    return _as_source(collection).read_rows(dist_to_rows)
 
 
 def _cond_key(annotation: Any, tgt_idx: int) -> tuple[str, ...]:
@@ -226,8 +312,10 @@ class GroupedAnnbatchSampler(SamplerABC):
 
         data = grouped_distribution.data
         self._conditions = data.conditions
-        self._src_dist_to_rows = data.src_dist_to_rows
-        self._tgt_dist_to_rows = {int(k): np.asarray(v) for k, v in data.tgt_dist_to_rows.items()}
+        # Per-row distribution assignment (the ClassSampler `classes` input). Rows for the
+        # source cache are derived on demand from the source column.
+        self._row_tgt_dist_idx = np.asarray(data.row_tgt_dist_idx)
+        self._row_src_dist_idx = np.asarray(data.row_src_dist_idx)
 
         # reverse map tgt -> src (each target distribution has exactly one source)
         self._tgt_to_src: dict[int, int] = {}
@@ -235,11 +323,13 @@ class GroupedAnnbatchSampler(SamplerABC):
             for t in tgts:
                 self._tgt_to_src[int(t)] = int(s)
 
-        # conditions we can actually sample: have a source, rows, and an embedding
+        # per-target row counts (cells per condition), straight from the per-row column
+        present, counts = np.unique(self._row_tgt_dist_idx[self._row_tgt_dist_idx >= 0], return_counts=True)
+        self._tgt_counts = {int(t): int(c) for t, c in zip(present, counts, strict=True)}
+
+        # conditions we can actually sample: present in rows, with a mapped source and an embedding
         self._tgt_idx_order = sorted(
-            t
-            for t in self._tgt_dist_to_rows
-            if t in self._tgt_to_src and t in self._conditions and len(self._tgt_dist_to_rows[t]) > 0
+            int(t) for t in self._tgt_counts if int(t) in self._tgt_to_src and int(t) in self._conditions
         )
         if not self._tgt_idx_order:
             raise ValueError("No sampleable target distributions (need a mapped source, rows, and a condition).")
@@ -267,18 +357,27 @@ class GroupedAnnbatchSampler(SamplerABC):
     def init_sampler(self) -> None:
         if self._initialized:
             raise ValueError("Sampler already initialized. Call init_sampler() only once.")
-        coll = _open_collection(self._collection)
+        source = _as_source(self._collection)
 
-        # in-memory source cache (one-time reads; scattered rows are fine here)
-        self._source_cache = SourceCache(coll, self._src_dist_to_rows)
+        # In-memory sources sample one row at a time, so ClassSampler must use chunk_size=1
+        # (any layout then yields class-coherent batches). Reject a conflicting value rather
+        # than silently overriding the caller.
+        if source.forces_chunk_size_one and self._chunk_size != 1:
+            raise ValueError(
+                f"In-memory training requires chunk_size=1 (per-row sampling), got chunk_size={self._chunk_size}."
+            )
+
+        # in-memory source cache (one-time reads; scattered rows are fine here). Control rows
+        # per source distribution are derived on demand from the per-row source column.
+        self._source_cache = SourceCache(source, GroupedDistributionData.rows_for(self._row_src_dist_idx))
 
         # independent reproducible rng streams: class selection (ClassSampler), source cells
         cls_ss, src_ss = np.random.SeedSequence(self._seed).spawn(2)
         self._src_cell_rng = np.random.default_rng(src_ss)
 
-        # total obs in the collection. old_obs_index spans every collection row and is shared
-        # by all splits, so this is the loader's n_obs without touching the store.
-        n_obs = int(len(self._gd.annotation.old_obs_index))
+        # n_obs is the per-row column length, i.e. the loader's row count (ClassSampler requires
+        # len(classes) == loader n_obs).
+        n_obs = int(self._row_tgt_dist_idx.shape[0])
 
         # hard-error: every *sampled* condition (positive weight) must hold at least one full
         # chunk. Zero-weighted conditions are excluded by ClassSampler and exempt from the rule.
@@ -286,9 +385,7 @@ class GroupedAnnbatchSampler(SamplerABC):
             sampled = set(self._tgt_idx_order)
         else:
             sampled = {t for t, w in zip(self._tgt_idx_order, self._weights, strict=True) if w > 0}
-        too_small = [
-            t for t in self._tgt_idx_order if t in sampled and len(self._tgt_dist_to_rows[t]) < self._chunk_size
-        ]
+        too_small = [t for t in self._tgt_idx_order if t in sampled and self._tgt_counts[t] < self._chunk_size]
         if too_small:
             labels = "; ".join("(" + ", ".join(_cond_key(self._gd.annotation, t)) + ")" for t in too_small)
             raise ValueError(
@@ -298,13 +395,14 @@ class GroupedAnnbatchSampler(SamplerABC):
             )
 
         # classes over all obs: sampleable targets -> their own category, everything else
-        # (controls + non-split targets) -> the excluded sentinel (weight 0).
+        # (controls + non-sampled targets) -> the excluded sentinel (weight 0). The per-row
+        # target column already encodes this; we only remap its ids to dense category codes.
         categories = [str(t) for t in self._tgt_idx_order] + [_EXCLUDED_CLASS]
         excluded_code = len(self._tgt_idx_order)
         codes = np.full(n_obs, excluded_code, dtype=np.int64)
         self._row_to_tgt = np.full(n_obs, -1, dtype=np.int64)
         for code, t in enumerate(self._tgt_idx_order):
-            rows = self._tgt_dist_to_rows[t]
+            rows = np.flatnonzero(self._row_tgt_dist_idx == t)
             codes[rows] = code
             self._row_to_tgt[rows] = t
         classes = pd.Categorical.from_codes(codes, categories=categories)
@@ -328,8 +426,7 @@ class GroupedAnnbatchSampler(SamplerABC):
             drop_last=True,  # every emitted batch is exactly batch_size (matches source n)
             rng=np.random.default_rng(cls_ss),
         )
-        loader = Loader(batch_sampler=class_sampler, return_index=True, to_torch=False, preload_to_gpu=False)
-        self._loader = loader.use_collection(coll)
+        self._loader = _make_loader(source, batch_sampler=class_sampler, return_index=True)
         self._iter = iter(self._loader)
         self._initialized = True
 
@@ -403,8 +500,8 @@ class ValidationSampler(SamplerABC):
         if self._initialized:
             return
         gdd = self._data.data
-        self._src_cells = _read_distributions(self._collection, gdd.src_dist_to_rows)
-        self._tgt_cells = _read_distributions(self._collection, gdd.tgt_dist_to_rows)
+        self._src_cells = _read_distributions(self._collection, GroupedDistributionData.rows_for(gdd.row_src_dist_idx))
+        self._tgt_cells = _read_distributions(self._collection, GroupedDistributionData.rows_for(gdd.row_tgt_dist_idx))
         self._initialized = True
 
     @property
@@ -459,7 +556,9 @@ class PredictionSampler(SamplerABC):
     def init_sampler(self) -> None:
         if self._initialized:
             return
-        self._src_cells = _read_distributions(self._collection, self._data.data.src_dist_to_rows)
+        self._src_cells = _read_distributions(
+            self._collection, GroupedDistributionData.rows_for(self._data.data.row_src_dist_idx)
+        )
         self._initialized = True
 
     @property
@@ -486,6 +585,43 @@ class PredictionSampler(SamplerABC):
     @property
     def data(self) -> GroupedDistribution:
         return self._data
+
+
+def _condition_sort_cols(
+    dist_flag_key: str,
+    src_dist_keys: list[str],
+    tgt_dist_keys: list[str] | dict[str, list[str]],
+) -> list[str]:
+    """obs columns to sort by so every ``(src, tgt)`` condition is a contiguous run.
+
+    Matches the key order :class:`~scaleflow.data.DataManager` uses to group cells into
+    distributions. ``tgt_dist_keys`` may be the grouped (combination) form ``{group: [cols]}``;
+    it is flattened to its columns.
+    """
+    tgt_cols = (
+        [c for cols in tgt_dist_keys.values() for c in cols]
+        if isinstance(tgt_dist_keys, dict)
+        else list(tgt_dist_keys)
+    )
+    return [dist_flag_key, *src_dist_keys, *tgt_cols]
+
+
+def _sort_adata_by_condition(
+    adata: Any,
+    *,
+    dist_flag_key: str,
+    src_dist_keys: list[str],
+    tgt_dist_keys: list[str] | dict[str, list[str]],
+) -> Any:
+    """Return a copy of ``adata`` with rows sorted so each condition is contiguous.
+
+    Uses a stable sort on :func:`_condition_sort_cols`. This is the layout the in-memory
+    (``Loader.add_adata``) and on-disk (``ClassSampler``) paths both prefer for fast
+    per-condition range access.
+    """
+    sort_cols = _condition_sort_cols(dist_flag_key, src_dist_keys, tgt_dist_keys)
+    order = adata.obs.sort_values(sort_cols, kind="stable").index
+    return adata[order].copy()
 
 
 def write_sorted_collection(
@@ -531,14 +667,9 @@ def write_sorted_collection(
     """
     from annbatch import DatasetCollection
 
-    tgt_cols = (
-        [c for cols in tgt_dist_keys.values() for c in cols]
-        if isinstance(tgt_dist_keys, dict)
-        else list(tgt_dist_keys)
+    adata_sorted = _sort_adata_by_condition(
+        adata, dist_flag_key=dist_flag_key, src_dist_keys=src_dist_keys, tgt_dist_keys=tgt_dist_keys
     )
-    sort_cols = [dist_flag_key, *src_dist_keys, *tgt_cols]
-    order = adata.obs.sort_values(sort_cols, kind="stable").index
-    adata_sorted = adata[order].copy()
 
     if sorted_adata_path is None:
         sorted_adata_path = f"{collection_path}.sorted_adata.zarr"

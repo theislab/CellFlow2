@@ -6,7 +6,13 @@ import pandas as pd
 import pytest
 import zarr
 
-from scaleflow.data import AnnDataLocation, DataManager, GroupedAnnbatchSampler, write_sorted_collection
+from scaleflow.data import (
+    AnnDataLocation,
+    DataManager,
+    GroupedAnnbatchSampler,
+    GroupedDistributionData,
+    write_sorted_collection,
+)
 from scaleflow.data._data_splitter import GroupedDistributionSplitter
 from scaleflow.model._scaleflow import ScaleFlow
 
@@ -131,7 +137,7 @@ def test_end_to_end_training_with_split(tmp_path, adata_test):
     assert set(splits) == {"train", "val", "test"}
 
     # target conditions are partitioned across splits (disjoint), and together cover all
-    tgt = {k: set(v.data.tgt_dist_to_rows.keys()) for k, v in splits.items()}
+    tgt = {k: set(GroupedDistributionData.rows_for(v.data.row_tgt_dist_idx)) for k, v in splits.items()}
     assert tgt["train"].isdisjoint(tgt["val"])
     assert tgt["train"].isdisjoint(tgt["test"])
     assert tgt["val"].isdisjoint(tgt["test"])
