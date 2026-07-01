@@ -85,17 +85,23 @@ condition (`MixedTypeData` = categorical embeddings **+ per-cell `obsm` continuo
 groups, and coupling (`CouplingData` = `state_lin`/`state_quad`, split for **incomparable-space/Gromov
 OT** via `n_shared_dims`); `MatchedData.align()` reconciles source/target counts (subset/repeat).
 
-Key finding: **annbatch's Loader streams `X` + `obs` (+index) — NOT `obsm`.** (The collection *writer*
-already persists `obsm`/`layers` in `annbatch/io.py`; only the *reader* yields X+obs.) Everything else
-(state, categorical embeddings from uns reps, groups, matching one-to-many/`matched_keys`, train
-ClassSampler + val per-condition reads, scalar covs as numeric obs cols) is coverable now.
+Key finding: annbatch's main Loader streams `X` + `obs` (+index), not `obsm` in the same yield — but
+that is **not a blocker and needs no extension**. annbatch ingests arbitrary `BackingArray`s
+(`add_datasets` accepts `zarr.Array`/`CSRDataset`), so each `obsm` rep is a gatherable zarr array; we
+read its rows by the batch's **row indices** (main loader with `return_index=True`) via the
+explicit-request gather already in `classmap/_source.py` (`_ExplicitRequestSampler`/`read_rows`).
 
-**Resolution (decided): request an annbatch read-side extension — multi-array/obsm streaming** — so the
-Loader gathers selected `obsm` (opt. `layers`) arrays by the SAME row indices as `X`, returned in the
-batch dict (`add_adata(adata, obsm_keys=[...])` / `use_collection(coll, obsm_keys=[...])` →
-`batch["obsm"][key]`). Backward-compatible; reuses the existing gather/ClassSampler chunk path; the
-right layer vs. folding obsm into `X` (which would corrupt var/dtype). This unblocks the two obsm
-payloads (continuous covariates + coupling reps) so the container classes can be fully retired.
+Mechanism (companion gather by shared index — NOT obs-concat; `add_datasets` concatenates on the obs
+axis, so parallel obsm is a companion source, not an append):
+```
+main ClassSampler loader (return_index=True) → {X[tgt chunk], index}
+obsm rep zarr (BackingArray)  ──gather rows[index]──▶  obsm[index]   → condition/coupling payload
+```
+`obsm` reps sit in the collection in the same sorted obs order as `X` (writer persists obsm), so
+`obsm[index]` aligns by construction (in-memory: `adata.obsm[key][index]`). Efficient because
+ClassSampler picks contiguous class chunks → `index` is contiguous-ish → near-slice reads. This covers
+the two obsm payloads (continuous covariates + coupling reps) with existing primitives, so scflow's
+container classes retire fully.
 
 Target loader output (no container classes):
 ```
@@ -128,8 +134,9 @@ Self-contained subpackage (deps: anndata+annbatch+numpy+pandas only). Commit `2b
 
 ## Next steps (resume here)
 
-0. **File the annbatch obsm/multi-array streaming extension** (issue → PR): read-side gather of
-   selected `obsm`/`layers` by the same indices as `X`. Prereq for the two obsm payloads.
+(No annbatch extension needed — obsm co-streams via companion index-gather over obsm `BackingArray`s,
+existing primitives; see the container-audit section.)
+
 1. Draft **Phase 1** on a branch in `sc-flow-tools` (cell-source abstraction + index-backed `StateData`
    + obs-only `get_distribution_data` accepting a `DatasetCollection`) → draft PR for Lorenzo.
 2. **Phase 2**: annbatch loader emitting the full batch dict above (uses the obsm extension); retire
