@@ -25,6 +25,12 @@ CellFlow2 depends on sc-flow-tools and retires its own data layer** (keeping onl
   `matched_keys` can be passed at inference for arbitrary control selection.
 - **Sampler**: shared sampler = scaleflow's annbatch `ClassSampler` **one-class-per-batch** loader
   (both tools use it). sc-flow-tools' multi-node weighted `TrainSampler` added later as an alternative.
+- **annbatch-only loading, all payloads in scope**: the annbatch loader must reproduce EVERYTHING
+  scflow's loaders/containers deliver, so scflow's container abstractions
+  (`StateData`/`CategoricalData`/`MixedTypeData`/`CouplingData`/`DistributionData`/`MatchedData`/
+  `NestedData`) are **fully retired** and non-annbatch train/val loaders removed. Scope confirmed to
+  include categorical embeddings + scalar-numeric covs (obs) + **multi-dim per-cell obsm condition
+  covariates** + **incomparable-space/Gromov coupling** (`n_shared_dims`, `state_lin`/`state_quad`).
 - **Python ≥3.12** (annbatch uses PEP 695 `type` aliases).
 - **Ownership direction (pending final confirm with Lorenzo)**: sc-flow-tools hosts the shared data
   layer; CellFlow2 depends on it. Needs the data layer landed on `main`/released for a stable dep.
@@ -72,6 +78,33 @@ matched-distribution computation run on obs alone, cells streamed?"). Do it as a
 (additive, minimal) — the PR doubles as the sync artifact. The code already points this way, so it's a
 contained refactor, not a redesign.
 
+## Container audit + the annbatch extension needed
+
+Audited scflow's containers/samplers: a batch node (`DistributionData`) carries state (`StateData.X`),
+condition (`MixedTypeData` = categorical embeddings **+ per-cell `obsm` continuous covariates**),
+groups, and coupling (`CouplingData` = `state_lin`/`state_quad`, split for **incomparable-space/Gromov
+OT** via `n_shared_dims`); `MatchedData.align()` reconciles source/target counts (subset/repeat).
+
+Key finding: **annbatch's Loader streams `X` + `obs` (+index) — NOT `obsm`.** (The collection *writer*
+already persists `obsm`/`layers` in `annbatch/io.py`; only the *reader* yields X+obs.) Everything else
+(state, categorical embeddings from uns reps, groups, matching one-to-many/`matched_keys`, train
+ClassSampler + val per-condition reads, scalar covs as numeric obs cols) is coverable now.
+
+**Resolution (decided): request an annbatch read-side extension — multi-array/obsm streaming** — so the
+Loader gathers selected `obsm` (opt. `layers`) arrays by the SAME row indices as `X`, returned in the
+batch dict (`add_adata(adata, obsm_keys=[...])` / `use_collection(coll, obsm_keys=[...])` →
+`batch["obsm"][key]`). Backward-compatible; reuses the existing gather/ClassSampler chunk path; the
+right layer vs. folding obsm into `X` (which would corrupt var/dtype). This unblocks the two obsm
+payloads (continuous covariates + coupling reps) so the container classes can be fully retired.
+
+Target loader output (no container classes):
+```
+batch = { "source_state": X[src], "target_state": X[tgt],
+          "condition": {<cat>: emb_from_uns_reps, <cont>: obsm[key][tgt]},   # obsm ← extension
+          "coupling":  {"state_lin": rep[:, :k], "state_quad": rep[:, k:]},  # obsm ← extension
+          "groups": <from obs> }
+```
+
 ## Prototype already built (this branch): `src/scaleflow/classmap/`
 
 Self-contained subpackage (deps: anndata+annbatch+numpy+pandas only). Commit `2b66433`.
@@ -95,11 +128,15 @@ Self-contained subpackage (deps: anndata+annbatch+numpy+pandas only). Commit `2b
 
 ## Next steps (resume here)
 
+0. **File the annbatch obsm/multi-array streaming extension** (issue → PR): read-side gather of
+   selected `obsm`/`layers` by the same indices as `X`. Prereq for the two obsm payloads.
 1. Draft **Phase 1** on a branch in `sc-flow-tools` (cell-source abstraction + index-backed `StateData`
    + obs-only `get_distribution_data` accepting a `DatasetCollection`) → draft PR for Lorenzo.
-2. **Phase 2**: port `classmap/_source.py` + `_loader.py` logic onto Phase 1 (annbatch ClassSampler).
-3. Point `ScaleFlow` (CellFlow2 model) at the sc-flow-tools data layer; retire `scaleflow.data` +
-   `scaleflow.classmap`.
+2. **Phase 2**: annbatch loader emitting the full batch dict above (uses the obsm extension); retire
+   scflow's container classes + non-annbatch train/val samplers.
+3. **CellFlow2**: annbatch-only; delete non-annbatch train/val loaders; make `prepare_*` accept
+   `DatasetCollection | AnnData` only; keep `predict(...)` accepting `AnnData`. Point `ScaleFlow` at the
+   sc-flow-tools data layer; retire `scaleflow.data` + `scaleflow.classmap`.
 
 Open sync items with Lorenzo: hosting/ownership + landing the data layer on `main`; confirm Phase-1
 obs-only matched-index split fits his model; final `obs`/`uns` contract key names; batch contract
