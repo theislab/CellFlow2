@@ -10,6 +10,8 @@ model:
   condition_dropout_prob:  0.0    # classifier-free guidance: prob of nulling the whole condition
                                   # during training (0 = off; ~0.1–0.2 to enable CFG). At inference
                                   # pass predict_kwargs.guidance_scale > 1 to amplify the condition.
+  layer_norm_before_concatenation: false   # LayerNorm t/x/cond before combining (helps adaln_zero
+                                            # balance time vs condition in the modulation vector)
 
   # Condition (set) encoder. encoder_arch is applied per condition key — the code
   # loops over the condition keys and builds {key: encoder_arch}, so every

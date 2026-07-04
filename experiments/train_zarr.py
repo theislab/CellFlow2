@@ -190,6 +190,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         hidden_dims=hidden_dims,
         decoder_dims=decoder_dims,
         condition_embedding_dim=int(m.condition_embedding_dim),
+        layer_norm_before_concatenation=bool(m.get("layer_norm_before_concatenation", False)),
         match_fn=partial(match_linear, epsilon=float(cfg.match_fn.epsilon)),
         probability_path=OmegaConf.to_container(m.probability_path_kwargs, resolve=True),
         optimizer=optimizer,
