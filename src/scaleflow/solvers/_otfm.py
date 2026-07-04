@@ -318,6 +318,9 @@ class OTFlowMatching:
         kwargs = dict(kwargs_frozen)
         # classifier-free guidance scale (not a diffrax arg → pop it). w=1 → plain conditional.
         guidance_scale = float(kwargs.pop("guidance_scale", 1.0))
+        if guidance_scale != 1.0:
+            # fires once per unique predict-config (this fn is cached), not per predict call
+            print(f"[predict] classifier-free guidance ON — guidance_scale (w) = {guidance_scale}", flush=True)
 
         def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
             params, condition, encoder_noise = args
