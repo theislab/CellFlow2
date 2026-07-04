@@ -126,6 +126,8 @@ class ConditionalVelocityField(nn.Module):
     decoder_dropout: float = 0.0
     layer_norm_before_concatenation: bool = False
     linear_projection_before_concatenation: bool = False
+    condition_dropout_prob: float = 0.0   # classifier-free guidance: prob of dropping the whole
+                                          # condition to a null (zeros) embedding during training
 
     def setup(self):
         """Initialize the network."""
@@ -236,6 +238,7 @@ class ConditionalVelocityField(nn.Module):
         cond: dict[str, jnp.ndarray],
         encoder_noise: jnp.ndarray,
         train: bool = True,
+        force_uncond: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         squeeze = x_t.ndim == 1
         cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
@@ -262,6 +265,16 @@ class ConditionalVelocityField(nn.Module):
         t_encoded = self.layer_norm_time(t_encoded)
         x_encoded = self.layer_norm_x(x_encoded)
         cond_embedding = self.layer_norm_condition(cond_embedding)
+
+        # Classifier-free guidance: null the condition (zeros AFTER layer-norm, to avoid
+        # normalizing an all-zeros vector). `force_uncond=True` → unconditional velocity at
+        # inference; during training each batch is nulled with prob `condition_dropout_prob`
+        # so the model also learns the unconditional field.
+        if force_uncond:
+            cond_embedding = jnp.zeros_like(cond_embedding)
+        elif train and self.condition_dropout_prob > 0.0:
+            drop = jax.random.bernoulli(self.make_rng("dropout"), p=self.condition_dropout_prob)
+            cond_embedding = jnp.where(drop, jnp.zeros_like(cond_embedding), cond_embedding)
 
         if squeeze:
             cond_embedding = jnp.squeeze(cond_embedding)  # , 0)
@@ -703,6 +716,8 @@ class EquilibriumVelocityField(nn.Module):
     decoder_dropout: float = 0.0
     layer_norm_before_concatenation: bool = False
     linear_projection_before_concatenation: bool = False
+    condition_dropout_prob: float = 0.0   # classifier-free guidance: prob of dropping the whole
+                                          # condition to a null (zeros) embedding during training
 
     def setup(self):
         """Initialize the network."""

@@ -316,10 +316,21 @@ class OTFlowMatching:
             return self._predict_fn_cache[kwargs_frozen]
 
         kwargs = dict(kwargs_frozen)
+        # classifier-free guidance scale (not a diffrax arg → pop it). w=1 → plain conditional.
+        guidance_scale = float(kwargs.pop("guidance_scale", 1.0))
 
         def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
             params, condition, encoder_noise = args
-            return self.vf_state_inference.apply_fn({"params": params}, t, x, condition, encoder_noise, train=False)[0]
+            v_cond = self.vf_state_inference.apply_fn(
+                {"params": params}, t, x, condition, encoder_noise, train=False
+            )[0]
+            if guidance_scale == 1.0:
+                return v_cond
+            # v = v_null + w·(v_cond − v_null): amplify the condition-specific velocity.
+            v_null = self.vf_state_inference.apply_fn(
+                {"params": params}, t, x, condition, encoder_noise, train=False, force_uncond=True
+            )[0]
+            return v_null + guidance_scale * (v_cond - v_null)
 
         def solve_ode(
             params: Any, x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray

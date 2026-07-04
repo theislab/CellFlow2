@@ -259,6 +259,7 @@ class ScaleFlow:
         layers_after_pool: Layers_t = dc_field(default_factory=lambda: []),
         condition_embedding_dim: int = 256,
         cond_output_dropout: float = 0.9,
+        condition_dropout_prob: float = 0.0,   # classifier-free guidance: prob of nulling the whole condition
         condition_encoder_kwargs: dict[str, Any] | None = None,
         pool_sample_covariates: bool = True,
         time_freqs: int = 1024,
@@ -480,6 +481,7 @@ class ScaleFlow:
                 layers_before_pool=layers_before_pool,
                 layers_after_pool=layers_after_pool,
                 cond_output_dropout=cond_output_dropout,
+                condition_dropout_prob=condition_dropout_prob,
                 condition_encoder_kwargs=condition_encoder_kwargs,
                 act_fn=vf_act_fn,
                 hidden_dims=hidden_dims,
@@ -509,6 +511,7 @@ class ScaleFlow:
                 layers_before_pool=layers_before_pool,
                 layers_after_pool=layers_after_pool,
                 cond_output_dropout=cond_output_dropout,
+                condition_dropout_prob=condition_dropout_prob,
                 condition_encoder_kwargs=condition_encoder_kwargs,
                 act_fn=vf_act_fn,
                 time_freqs=time_freqs,
