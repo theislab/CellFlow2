@@ -1,3 +1,5 @@
 solver_key: otfm
 predict_kwargs:
   max_steps: 32768
+  guidance_scale: 1.0    # classifier-free guidance at predict time (1.0 = off). Applies to
+                         # VALIDATION predictions; requires a model trained with condition_dropout_prob>0.
