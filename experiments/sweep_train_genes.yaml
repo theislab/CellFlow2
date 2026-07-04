@@ -36,6 +36,21 @@ parameters:
     value: genes
   selected_datasets:
     value: [sciplex]
+
+  # ── YOUR h5ad + the same 2000 genes as recon ────────────────────────────────
+  datasets.sciplex.path:
+    value: /storage/pancellflow/sciplex3_with_emb.h5ad     # ← your h5ad
+  data.var_names_file:
+    value: /storage/pancellflow/var_names.json             # ← same genes/order as recon (JSON list)
+
+  # ── split: SAME held-out-drug split as the zarr training (deterministic) ─────
+  split.by:
+    value: [drug]
+  split.ratios:
+    value: [0.7, 0.2, 0.1]
+  split.random_state:
+    value: 42
+
   ablation.mode:
     value: default                 # no prophet token
   model.conditioning_key:

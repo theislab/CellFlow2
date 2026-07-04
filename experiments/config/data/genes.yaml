@@ -12,3 +12,6 @@ data:
     # dose has NO rep_key → DataManager stores it as a raw scalar condition
   log1p_dose_from: dose_value              # create obs['dose'] = log1p(dose_value) before grouping
   # no extra_rep_keys → no prophet token
+  var_names_file: null                     # optional: JSON list of gene names to subset the h5ad to
+                                           # (use the SAME genes as recon, e.g. /storage/pancellflow/var_names.json)
+

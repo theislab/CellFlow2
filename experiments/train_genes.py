@@ -80,6 +80,24 @@ def build_gd_from_h5ad(path: str, data_cfg: DictConfig, ds_cfg: DictConfig | Non
     from scaleflow.data import AnnDataLocation, DataManager
 
     adata = sc.read_h5ad(path)
+
+    # Restrict to the SAME genes (and order) used by the recon decoder, from a JSON list of
+    # var_names (e.g. the file saved during recon: json.dump(list(adata.var_names[hvg]))).
+    var_names_file = data_cfg.get("var_names_file", None)
+    if var_names_file:
+        import json
+        with open(str(var_names_file)) as f:
+            genes = list(json.load(f))
+        present = set(map(str, adata.var_names))
+        missing = [g for g in genes if g not in present]
+        if missing:
+            raise ValueError(
+                f"{len(missing)}/{len(genes)} requested genes are missing from {path} "
+                f"(e.g. {missing[:5]}). var_names_file must match this h5ad's var_names."
+            )
+        adata = adata[:, genes].copy()   # exact same genes, same order as recon
+        print(f"  subset to {adata.n_vars} genes from {var_names_file}")
+
     flag_key = str(data_cfg.dist_flag_key)
     adata = mark_control(adata, flag_key)
     adata = _to_dense_X(adata)
