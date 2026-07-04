@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+from functools import partial
 from pathlib import Path
 
 import shutil
@@ -329,8 +330,21 @@ class BestModelCheckpoint(ComputationCallback):
                                      valid_pred_data, solver, pred_data_by_w=pred_data_by_w)
 
 
-def evaluate_test(solver, test_samplers: dict) -> dict:
-    """Per-condition and aggregated test metrics for each dataset."""
+def _predict_kwargs_for_test(predict_kwargs: dict | None) -> dict:
+    """Predict kwargs for test/inference: drop the CFG w-sweep list (guidance_scales) so the
+    single configured guidance_scale is used; keep max_steps etc."""
+    pk = dict(predict_kwargs or {})
+    pk.pop("guidance_scales", None)
+    return pk
+
+
+def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = None) -> dict:
+    """Per-condition and aggregated test metrics for each dataset.
+
+    ``predict_kwargs`` (e.g. the configured ``guidance_scale``) is forwarded to
+    ``solver.predict`` so test predictions honor the guidance scale from config.
+    """
+    pk = _predict_kwargs_for_test(predict_kwargs)
     keys = list(ValMetricsLogger.METRICS)
     per_dataset: dict = {}
     all_per_condition: dict = {}
@@ -339,8 +353,9 @@ def evaluate_test(solver, test_samplers: dict) -> dict:
         batch = sampler.sample(mode="on_train_end")
         src, cond, true = batch["source"], batch["condition"], batch["target"]
 
-        print(f"  [{name}] predicting {len(src)} test conditions …")
-        pred = jax.tree.map(solver.predict, src, cond)
+        print(f"  [{name}] predicting {len(src)} test conditions …"
+              + (f" (guidance_scale={pk['guidance_scale']})" if pk.get("guidance_scale", 1.0) != 1.0 else ""))
+        pred = jax.tree.map(partial(solver.predict, **pk), src, cond)
 
         per_condition = {}
         for cond_key in tqdm(sorted(true.keys(), key=str), desc=f"  test metrics [{name}]"):
@@ -583,12 +598,17 @@ class ReconMetricsLogger(ComputationCallback):
             return self._compute_recon_multi_w(pred_data_by_w)
         return self._compute_recon(valid_pred_data, "val", f"step {self._step}")
 
-    def evaluate_test(self, solver, test_samplers: dict) -> dict:
-        """Gene-space recon metrics on the held-out test set (logged as ``test_recon_*``)."""
+    def evaluate_test(self, solver, test_samplers: dict, predict_kwargs: dict | None = None) -> dict:
+        """Gene-space recon metrics on the held-out test set (logged as ``test_recon_*``).
+
+        ``predict_kwargs`` (e.g. the configured ``guidance_scale``) is forwarded to
+        ``solver.predict`` so test predictions honor the guidance scale from config.
+        """
+        pk = _predict_kwargs_for_test(predict_kwargs)
         pred_data = {}
         for name, sampler in test_samplers.items():
             batch = sampler.sample(mode="on_train_end")
-            pred_data[name] = jax.tree.map(solver.predict, batch["source"], batch["condition"])
+            pred_data[name] = jax.tree.map(partial(solver.predict, **pk), batch["source"], batch["condition"])
         return self._compute_recon(pred_data, "test", "test")
 
     def on_log_iteration(self, valid_source_data, valid_true_data,

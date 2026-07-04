@@ -283,13 +283,13 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     best_solver = sf.solver
 
     print("Evaluating on test set …")
-    test_metrics = callbacks.evaluate_test(best_solver, test_samplers)
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=predict_kwargs)
 
     # ── gene-space recon metrics on the test set (test_recon_*) ──
     test_recon = {}
     if recon_cb is not None:
         print("Evaluating gene-space recon on test set …")
-        test_recon = recon_cb.evaluate_test(best_solver, test_samplers)
+        test_recon = recon_cb.evaluate_test(best_solver, test_samplers, predict_kwargs=predict_kwargs)
 
     result_path = output_dir / f"{name}_results.pkl"
     with open(result_path, "wb") as f:
