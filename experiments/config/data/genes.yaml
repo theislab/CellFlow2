@@ -1,0 +1,14 @@
+# @package _global_
+# DataManager grouping for GENE-EXPRESSION training: the flow transports raw adata.X
+# (data_location = AnnDataLocation().X in train_genes.py), NOT an obsm embedding.
+# Dose-resolved conditions (drug × log1p dose). No prophet token (keep ablation.mode=default).
+data:
+  dist_flag_key: control
+  src_dist_keys: [cell_line]
+  tgt_dist_keys: [drug, dose]              # dose-resolved (log1p)
+  rep_keys:
+    cell_line: cell_line_ccle_embeddings   # obs['cell_line'] values are keys of uns['cell_line_ccle_embeddings']
+    drug:      drug_0_embeddings           # obs['drug'] values are keys of uns['drug_0_embeddings']
+    # dose has NO rep_key → DataManager stores it as a raw scalar condition
+  log1p_dose_from: dose_value              # create obs['dose'] = log1p(dose_value) before grouping
+  # no extra_rep_keys → no prophet token

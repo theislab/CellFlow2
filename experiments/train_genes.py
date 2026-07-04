@@ -1,0 +1,367 @@
+"""Train a CellFlow2 flow-matching model directly in GENE-EXPRESSION space.
+
+Both endpoints of the flow are raw gene expression: x_0 = control cells' ``adata.X``,
+x_1 = perturbed cells' ``adata.X``. GroupedDistributions are built in-memory from a raw
+``.h5ad`` via the DataManager with ``data_location = AnnDataLocation().X`` (NOT an obsm
+embedding). No reconstruction decoder and no recon metrics — the model operates end-to-end
+on genes, so gene-space metrics come for free from the ordinary validation metrics.
+
+    python experiments/train_genes.py
+    python experiments/train_genes.py wandb.enabled=true
+    python experiments/train_genes.py training.num_iterations=300 training.valid_freq=150
+"""
+import os
+
+# set JAX env before importing jax (pulled in by scaleflow / utils)
+os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
+os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/storage/jax_cache")
+os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
+
+os.environ.setdefault("WANDB_HTTP_TIMEOUT", "7200")
+os.environ.setdefault("WANDB_INIT_TIMEOUT", "7200")
+os.environ.setdefault("WANDB_RETRY_MAX", "10")
+os.environ.setdefault("WANDB_SILENT", "true")
+
+import time
+from functools import partial
+from pathlib import Path
+
+import cloudpickle
+import hydra
+import jax
+import numpy as np
+from omegaconf import DictConfig, OmegaConf
+
+from scaleflow.data import GroupedDistribution, split_datasets
+from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
+from scaleflow.model import ScaleFlow
+from scaleflow.training import Metrics
+from scaleflow.utils import match_linear
+
+import utils
+import callbacks
+import temp_edit
+
+
+# ─────────────────────────── h5ad → gene-space GroupedDistribution ───────────────────────────
+def mark_control(adata, flag_key: str):
+    """Ensure a boolean control column. No-op if ``flag_key`` already present, else derive
+    control = every drug slot == 'control'."""
+    if flag_key in adata.obs:
+        adata.obs[flag_key] = adata.obs[flag_key].astype(bool)
+        return adata
+    drug_col = "drug_0" if "drug_0" in adata.obs else "drug"
+    ctrl = adata.obs[drug_col].astype(str) == "control"
+    if "drug_1" in adata.obs:
+        ctrl &= adata.obs["drug_1"].astype(str) == "control"
+    adata.obs[flag_key] = ctrl
+    return adata
+
+
+def _to_dense_X(adata):
+    """Materialize adata.X as a dense float32 array (DataManager fancy-indexes rows of it)."""
+    import scipy.sparse as sp
+
+    if sp.issparse(adata.X):
+        adata.X = np.asarray(adata.X.todense(), dtype=np.float32)
+    else:
+        adata.X = np.asarray(adata.X, dtype=np.float32)
+    return adata
+
+
+def build_gd_from_h5ad(path: str, data_cfg: DictConfig, ds_cfg: DictConfig | None = None) -> GroupedDistribution:
+    """Group a raw .h5ad into an in-memory GroupedDistribution over GENE EXPRESSION.
+
+    ``data_location = AnnDataLocation().X`` → x_0/x_1 are rows of ``adata.X``. Optional
+    ``log1p_dose_from`` adds a log1p 'dose' scalar condition; ``rep_keys`` map condition keys
+    (drug, cell_line) to their ``adata.uns`` embedding dicts.
+    """
+    import scanpy as sc
+    from scaleflow.data import AnnDataLocation, DataManager
+
+    adata = sc.read_h5ad(path)
+    flag_key = str(data_cfg.dist_flag_key)
+    adata = mark_control(adata, flag_key)
+    adata = _to_dense_X(adata)
+
+    # dose → log1p scalar condition (no rep_key ⇒ stored as a raw scalar by the DataManager)
+    dose_src = data_cfg.get("log1p_dose_from", None)
+    if dose_src and dose_src in adata.obs:
+        adata.obs["dose"] = np.log1p(adata.obs[dose_src].astype("float32"))
+
+    extra = data_cfg.get("extra_rep_keys", None)
+    extra = {k: tuple(v) for k, v in OmegaConf.to_container(extra, resolve=True).items()} if extra else None
+
+    dm = DataManager(
+        dist_flag_key=flag_key,
+        src_dist_keys=list(data_cfg.src_dist_keys),
+        tgt_dist_keys=list(data_cfg.tgt_dist_keys),
+        rep_keys=OmegaConf.to_container(data_cfg.rep_keys, resolve=True),
+        data_location=AnnDataLocation().X,          # ← gene expression, not an obsm embedding
+        extra_rep_keys=extra,
+    )
+    return dm.prepare_data(adata, verbose=True)
+
+
+def run(cfg: DictConfig, gds: dict | None = None) -> dict:
+    # ── wandb sweep is dominant: init first, then overlay its params onto cfg ──
+    wandb_run = None
+    if cfg.wandb.enabled or os.environ.get("WANDB_SWEEP_ID"):
+        try:
+            import wandb
+            project = cfg.wandb.project if not os.environ.get("WANDB_SWEEP_ID") else None
+            wandb_run = wandb.init(
+                project=project,
+                entity=cfg.wandb.get("entity"),
+                name=cfg.wandb.get("run_name"),
+                config=OmegaConf.to_container(cfg, resolve=True),
+                settings=wandb.Settings(init_timeout=7200),
+            )
+            OmegaConf.set_struct(cfg, False)
+            for k, v in dict(wandb_run.config).items():
+                if "." in k or not isinstance(v, dict):
+                    OmegaConf.update(cfg, k, v)
+            OmegaConf.set_struct(cfg, True)
+            print(f"  wandb run: {wandb_run.url}")
+        except ImportError:
+            print("  wandb not installed — skipping")
+
+    # ── log resolved config ──
+    m_cfg = cfg.model
+    for ds_name in cfg.selected_datasets:
+        print(f"  datasets.{ds_name}.path       = {cfg.datasets[ds_name].path}")
+    print(f"  data.cell_data             = adata.X (gene expression)")
+    print(f"  ablation.mode              = {cfg.ablation.mode}")
+    print(f"  model.hidden_dims          = {list(m_cfg.hidden_dims)}")
+    print(f"  model.decoder_dims         = {list(m_cfg.decoder_dims)}")
+    print(f"  model.conditioning_key     = {m_cfg.conditioning_key}")
+    print(f"  model.condition_encoder.cond_output_dropout = {m_cfg.condition_encoder.cond_output_dropout}")
+    print(f"  training.peak_lr           = {cfg.training.peak_lr}")
+    print(f"  training.num_iterations    = {cfg.training.num_iterations}")
+    print(f"  match_fn.epsilon           = {cfg.match_fn.epsilon}")
+
+    # ── in-memory gene-space loading (AFTER sweep overlay so paths/keys are correct) ──
+    if gds is None:
+        gds = {}
+        for ds_name in cfg.selected_datasets:
+            path = str(cfg.datasets[ds_name].path)
+            print(f"Building gene-space GroupedDistribution [{ds_name}] ← {path}")
+            gds[ds_name] = build_gd_from_h5ad(path, cfg.data, cfg.datasets[ds_name])
+
+    mode       = cfg.ablation.mode
+    output_dir = Path(cfg.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_tag    = wandb_run.id if wandb_run is not None else "local"
+    name       = f"genes_{mode}_{run_tag}"
+    ckpt_path  = output_dir / f"{name}_best_ckpt"
+    transform  = utils.ConditionTransform(mode, seed=int(cfg.seed)) if mode != "prophet" else None
+
+    print(f"\n{'='*64}")
+    print(f"  {name}  |  mode={mode}  split_by={list(cfg.split.by)}  "
+          f"solver={cfg.solver.solver_key}  conditioning={cfg.model.conditioning_key}")
+    print(f"{'='*64}")
+
+    print("Splitting datasets …")
+    data = split_datasets(
+        gds,
+        holdout_combinations=bool(cfg.split.holdout_combinations),
+        split_by=list(cfg.split.by),
+        split_key="split",
+        ratios=list(cfg.split.ratios),
+        random_state=int(cfg.split.random_state),
+    )
+
+    print("Creating samplers …")
+    bs    = int(cfg.training.batch_size)
+    n_val = cfg.training.get("n_val_conditions", None)
+    n_val = int(n_val) if n_val is not None else None
+
+    train_samplers, val_samplers, test_samplers = {}, {}, {}
+    for ds in gds:
+        seed = int(cfg.datasets[ds].get("seed", cfg.seed))
+        train_samplers[ds] = ReservoirSampler(
+            data[ds]["train"], np.random.default_rng(seed),
+            batch_size=bs,
+            pool_fraction=float(cfg.training.pool_fraction),
+            replacement_prob=float(cfg.training.replacement_prob),
+            condition_transform=transform,
+        )
+        val_samplers[ds] = ValidationSampler(
+            data[ds]["val"],
+            n_conditions_on_log_iteration=n_val,
+            n_conditions_on_train_end=n_val,
+            seed=seed,
+            condition_transform=transform,
+        )
+        test_samplers[ds] = ValidationSampler(
+            data[ds]["test"],
+            n_conditions_on_log_iteration=None,
+            n_conditions_on_train_end=None,
+            seed=seed,
+            condition_transform=transform,
+        )
+
+    train_sampler = CombinedSampler(
+        samplers=train_samplers,
+        rng=np.random.default_rng(int(cfg.split.random_state)),
+    )
+    train_sampler.init_sampler()
+    for s in val_samplers.values():
+        s.init_sampler()
+    for s in test_samplers.values():
+        s.init_sampler()
+
+    sample_batch = train_sampler.sample()
+    gene_dim = int(np.asarray(sample_batch["src_cell_data"]).shape[-1])
+    print(f"  gene dim (src_cell_data): {gene_dim}")
+    print(f"  condition keys: {[(k, tuple(np.asarray(v).shape)) for k, v in sample_batch['condition'].items()]}")
+
+    print("Building model …")
+    m            = cfg.model
+    cond_key     = m.conditioning_key
+    hidden_dims  = tuple(int(x) for x in m.hidden_dims)
+    decoder_dims = tuple(int(x) for x in m.decoder_dims)
+    if cond_key == "adaln_zero" and decoder_dims[-1] != hidden_dims[-1]:
+        raise ValueError(
+            f"adaln_zero requires decoder_dims[-1] == hidden_dims[-1]; "
+            f"got {decoder_dims[-1]} vs {hidden_dims[-1]}."
+        )
+
+    ce           = m.condition_encoder
+    encoder_arch = OmegaConf.to_container(ce.encoder_arch, resolve=True)
+    layers_before_pool = {k: encoder_arch for k in sample_batch["condition"]}
+    layers_after_pool  = OmegaConf.to_container(ce.layers_after_pool, resolve=True)
+    print(f"  set-encoder layers per modality: {list(layers_before_pool)}")
+
+    optimizer, _ = utils.build_optimizer(cfg)
+    predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
+    sf = ScaleFlow(solver=cfg.solver.solver_key)
+    sf._validation_data["predict_kwargs"] = predict_kwargs
+    sf.prepare_model(
+        sample_batch=sample_batch,                     # I/O width auto-sized to gene_dim
+        max_combination_length=int(m.max_combination_length),
+        conditioning=cond_key,
+        conditioning_kwargs=OmegaConf.to_container(m.conditioning_kwargs, resolve=True),
+        pooling=ce.pooling,
+        pooling_kwargs=OmegaConf.to_container(ce.pooling_kwargs, resolve=True),
+        layers_before_pool=layers_before_pool,
+        layers_after_pool=layers_after_pool,
+        cond_output_dropout=float(ce.cond_output_dropout),
+        hidden_dims=hidden_dims,
+        decoder_dims=decoder_dims,
+        condition_embedding_dim=int(m.condition_embedding_dim),
+        match_fn=partial(match_linear, epsilon=float(cfg.match_fn.epsilon)),
+        probability_path=OmegaConf.to_container(m.probability_path_kwargs, resolve=True),
+        optimizer=optimizer,
+    )
+    n_params = sum(x.size for x in jax.tree.leaves(sf.solver.vf_state.params))
+    print(f"  total parameters: {n_params:,}  (gene I/O dim: {gene_dim})")
+
+    val_log_path = str(output_dir / f"{name}_val_metrics.json")
+    cbs = [
+        Metrics(
+            metrics=["r_squared", "e_distance", "mmd"],
+            metric_aggregations=["mean"],
+            use_gpu_optimized=True,
+            precision="bfloat16",
+        ),
+        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
+        callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),
+        temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
+    ]
+    # NOTE: no ReconMetricsLogger / recon decoder — the flow is already in gene space, so
+    # ValMetricsLogger's r_squared/e_distance/mmd/*_delta are gene-space metrics directly.
+
+    monitor_metrics = ["loss"]
+    for ds in val_samplers:
+        monitor_metrics += [
+            f"{ds}_r_squared_mean",
+            f"{ds}_e_distance_mean",
+            f"{ds}_mmd_mean",
+            f"{ds}_nn_displacement_corr",
+            f"{ds}_gap_closure_mean",
+        ]
+
+    print(f"Training {int(cfg.training.num_iterations)} iterations "
+          f"(val every {int(cfg.training.valid_freq)} steps) …")
+    t0 = time.perf_counter()
+    sf.train(
+        train_dataloader=train_sampler,
+        val_dataloader=val_samplers,
+        num_iterations=int(cfg.training.num_iterations),
+        valid_freq=int(cfg.training.valid_freq),
+        log_every=int(cfg.training.get("log_every", 1000)),
+        callbacks=cbs,
+        monitor_metrics=monitor_metrics,
+    )
+    print(f"  training done in {(time.perf_counter() - t0) / 60:.1f} min")
+    callbacks.save_logs(name, sf.trainer.training_logs, output_dir)
+
+    if ckpt_path.exists():
+        print(f"Loading best checkpoint from {ckpt_path} …")
+        import orbax.checkpoint as ocp
+        target      = callbacks._solver_params(sf.solver)
+        best_params = ocp.PyTreeCheckpointer().restore(str(ckpt_path), item=target)
+        callbacks.restore_solver_params(sf.solver, best_params)
+    else:
+        print("  no checkpoint found — using final iterate")
+    best_solver = sf.solver
+
+    print("Evaluating on test set …")
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers)
+
+    result_path = output_dir / f"{name}_results.pkl"
+    with open(result_path, "wb") as f:
+        cloudpickle.dump(test_metrics, f)
+    print(f"  test results saved → {result_path}")
+
+    if wandb_run is not None:
+        test_log = {f"test_{k}": v for k, v in test_metrics["aggregated"].items()}
+        for dsname, dsres in test_metrics["per_dataset"].items():
+            for k, v in dsres["aggregated"].items():
+                test_log[f"test_{dsname}_{k}"] = v
+        wandb_run.log(test_log)
+        for k, v in test_log.items():
+            wandb_run.summary[k] = v
+
+    # ── effect-size diagnostics over train / val / test (one predict pass each) ──
+    diag_cfg  = cfg.get("diagnostics", {})
+    n_diag    = int(diag_cfg.get("n_conditions", 100))
+    max_cells = int(diag_cfg.get("max_cells", 2000))
+    print(f"Running effect-size diagnostics ({n_diag} conditions/split) …")
+    diag_samplers = temp_edit.make_diagnostic_samplers(
+        data, n_conditions=n_diag, transform=transform, seed=int(cfg.seed)
+    )
+    temp_edit.full_diagnostics(
+        best_solver, diag_samplers, output_dir, name,
+        wandb_run=wandb_run, max_cells=max_cells, seed=int(cfg.seed),
+    )
+
+    print(f"\n{'='*64}")
+    print(f"  Final test metrics — {name}")
+    print(f"{'='*64}")
+    for k, v in test_metrics["aggregated"].items():
+        print(f"  {k:<18} {v:.4f}")
+
+    if wandb_run is not None:
+        wandb_run.finish()
+
+    return {"solver": best_solver, "test_metrics": test_metrics}
+
+
+@hydra.main(config_path="config", config_name="train_genes", version_base=None)
+def main(cfg: DictConfig) -> None:
+    try:
+        run(cfg)
+    except Exception:
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.run.finish(exit_code=1)
+        except Exception:
+            pass
+        raise
+
+
+if __name__ == "__main__":
+    main()

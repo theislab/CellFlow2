@@ -1,0 +1,24 @@
+# @package _global_
+# Entrypoint for train_genes.py — flow-matching directly in GENE-EXPRESSION space
+# (x_0/x_1 = control/perturbed adata.X). In-memory GroupedDistributions via DataManager;
+# no reconstruction decoder / recon metrics.
+#
+#   python experiments/train_genes.py
+#   python experiments/train_genes.py wandb.enabled=true
+#   python experiments/train_genes.py training.num_iterations=300 training.valid_freq=150
+defaults:
+  - solver: otfm
+  - conditioning: concatenation
+  - datasets: h5ad_genes
+  - data: genes
+  - model: default
+  - match_fn: default
+  - split: drug
+  - training: default
+  - ablation: default
+  - wandb: default
+  - _self_
+
+seed: 42
+output_dir: /storage/pancellflow/outputs/train_genes
+selected_datasets: [sciplex]

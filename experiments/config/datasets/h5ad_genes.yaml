@@ -1,0 +1,4 @@
+# Registry of raw .h5ad datasets for gene-space (adata.X) training. Choose via selected_datasets.
+sciplex:
+  path: /storage/pancellflow/sciplex3_with_emb.h5ad
+  seed: 42
