@@ -1,0 +1,18 @@
+# @package _global_
+# DataManager grouping for recon_weights/sciplex3_with_emb.h5ad in the AE_128 latent.
+# Mirrors scripts/prepare_sciplex_prophet.py: dose-resolved conditions (drug × log1p dose, NOT pooled)
+# + a prophet token via extra_rep_keys. The cell representation the flow transports in is
+# obsm['AE_128_opt'] (128-d AE latent). Single-drug h5ad: a `drug` column (drug_1 is all-control).
+data:
+  dist_flag_key: control
+  src_dist_keys: [cell_line]
+  tgt_dist_keys: [drug, dose]              # dose-resolved (log1p), like prepare_sciplex_prophet.py
+  rep_keys:
+    cell_line: cell_line_ccle_embeddings
+    drug:      drug_0_embeddings           # drug names in obs['drug'] are keys of uns['drug_0_embeddings']
+    # dose has NO rep_key → DataManager stores it as a raw scalar condition
+  extra_rep_keys:
+    prophet: [drug, prophet_emb]           # uns['prophet_emb'][drug] → 'prophet' token; kept iff ablation=prophet
+  log1p_dose_from: dose_value              # create obs['dose'] = log1p(dose_value) before grouping
+  cell_embedding:
+    key: AE_128_opt                        # obsm latent = data_location = flow space (128-d)

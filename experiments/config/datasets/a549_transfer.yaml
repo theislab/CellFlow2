@@ -1,0 +1,21 @@
+# Registry for the tahoe_a549 → sciplex transfer run. Each entry carries per-dataset `prep`
+# (harmonization) + `holdout` (false → all-in-train, true → drug-held-out split).
+# tahoe is A549-only; sciplex keeps all 3 cell lines (A549/K-562/MCF7) — cell_line is a covariate,
+# batch (tahoe vs sciplex) is a separate covariate. Transfer is tahoe-A549 → sciplex-A549.
+tahoe_a549:
+  # A549 (CVCL_0023) subset of tahoe_prophet_filtered → carries uns['prophet_emb'] for all 182 drugs,
+  # so ablation=prophet/random work jointly (both datasets have a prophet token for every condition).
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/data/pancellflow/unipert/tahoe_a549_prophet.h5ad
+  seed: 44
+  holdout: false                         # all tahoe drugs → training
+  prep:
+    cell_line_map: {CVCL_0023: A549}     # canonicalize to A549 (+ copy its CCLE embedding to key 'A549')
+    batch: tahoe_a549
+    log1p_dose_from: dosage              # tahoe dose column
+sciplex3:
+  path: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights/sciplex3_with_emb.h5ad
+  seed: 51
+  holdout: true                          # standard held-out-drug split (validation/recon land here)
+  prep:
+    batch: sciplex3                      # all 3 cell lines kept (no filter)
+    log1p_dose_from: dose_value          # sciplex dose column

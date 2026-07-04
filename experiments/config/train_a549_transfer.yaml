@@ -1,0 +1,41 @@
+# @package _global_
+# Entrypoint: tahoe_a549 (all drugs, all-train) + sciplex_a549 (held-out-drug split) transfer in X_state,
+# with a batch covariate, dose-resolved, prophet wired. Gene-space recon delta-R² logged on sciplex only.
+#   python experiments/train_comparison.py --config-name train_a549_transfer wandb.enabled=true
+#   python experiments/train_comparison.py --config-name train_a549_transfer training.num_iterations=300 training.valid_freq=150
+defaults:
+  - solver: otfm
+  - conditioning: concatenation
+  - datasets: a549_transfer
+  - data: a549_state
+  - model: h5ad
+  - match_fn: h5ad
+  - split: drug
+  - training: default
+  - ablation: default
+  - wandb: default
+  - _self_
+
+seed: 42
+output_dir: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/outputs/train_comparison/a549_transfer
+selected_datasets: [tahoe_a549, sciplex3]
+
+model:
+  max_combination_length: 1
+
+# gene-space recon on the held-out sciplex conditions via the X_state decoder. cond_key order is
+# (cell_line, batch, drug, dose); the recon adata is A549-filtered + batch-injected via `prep`.
+recon:
+  decoder_path: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights/dec_X_state_opt
+  h5ad_path:    /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights/sciplex3_with_emb.h5ad
+  emb_obsm_key: X_state
+  condition_obs_keys: [cell_line, batch, drug, dose_value]
+  cell_line_obs_key: cell_line
+  control_obs_key: control
+  log_dose_obs_key: dose_value
+  prep:
+    batch: sciplex3           # recon over all sciplex conditions (3 lines); no A549 filter
+
+wandb:
+  project: pancellflow
+  entity:  pancellflow
