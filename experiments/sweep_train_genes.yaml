@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DRY-RUN TEMPLATE — gene-expression training (train_genes.py, flow in adata.X space).
+# Short iterations to validate the pipeline end-to-end; bump num_iterations/valid_freq
+# and add real swept params once it runs clean.
+#
+#   wandb sweep experiments/sweep_train_genes.yaml     → prints sweep_id
+#   wandb agent <entity>/<project>/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+project: sciplex_genes
+program: experiments/train_genes.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_nn_displacement_corr
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}          # so wandb passes params as hydra overrides (key=value)
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # ── swept (example: 2 runs) — replace/extend with the knobs you want ────────
+  model.condition_encoder.cond_output_dropout:
+    values: [0.1, 0.9]
+
+  # ── fixed (dry run: short) ──────────────────────────────────────────────────
+  datasets:
+    value: h5ad_genes
+  data:
+    value: genes
+  selected_datasets:
+    value: [sciplex]
+  ablation.mode:
+    value: default                 # no prophet token
+  model.conditioning_key:
+    value: concatenation
+  match_fn.epsilon:
+    value: 1.0
+  training.peak_lr:
+    value: 1.0e-4
+  training.batch_size:
+    value: 512
+  training.warmup_iterations:
+    value: 100
+  training.num_iterations:
+    value: 500                     # DRY RUN — raise for a real run (e.g. 100000+)
+  training.valid_freq:
+    value: 250                     # DRY RUN — raise accordingly
