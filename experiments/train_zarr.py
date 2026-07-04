@@ -283,13 +283,16 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     best_solver = sf.solver
 
     print("Evaluating on test set …")
-    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=predict_kwargs)
+    # re-read predict_kwargs from cfg (the earlier dict was mutated when the trainer popped
+    # guidance_scales); test sweeps the SAME guidance_scales as validation, plotting all w.
+    test_predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs)
 
     # ── gene-space recon metrics on the test set (test_recon_*) ──
     test_recon = {}
     if recon_cb is not None:
         print("Evaluating gene-space recon on test set …")
-        test_recon = recon_cb.evaluate_test(best_solver, test_samplers, predict_kwargs=predict_kwargs)
+        test_recon = recon_cb.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs)
 
     result_path = output_dir / f"{name}_results.pkl"
     with open(result_path, "wb") as f:
@@ -301,7 +304,11 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         for dsname, dsres in test_metrics["per_dataset"].items():
             for k, v in dsres["aggregated"].items():
                 test_log[f"test_{dsname}_{k}"] = v
-        test_log.update(test_recon)  # test_recon_r2_delta / pearson (+ medians)
+        # per-w test curves (CFG sweep): test_<metric>__w<w> for every guidance scale
+        for w, agg in test_metrics.get("per_w_aggregated", {}).items():
+            for k, v in agg.items():
+                test_log[f"test_{k}__w{w}"] = v
+        test_log.update(test_recon)  # test_recon_r2_delta / pearson (+ medians) + __w<w> curves
         wandb_run.log(test_log)
         for k, v in test_log.items():
             wandb_run.summary[k] = v

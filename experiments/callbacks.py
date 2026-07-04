@@ -330,46 +330,72 @@ class BestModelCheckpoint(ComputationCallback):
                                      valid_pred_data, solver, pred_data_by_w=pred_data_by_w)
 
 
-def _predict_kwargs_for_test(predict_kwargs: dict | None) -> dict:
-    """Predict kwargs for test/inference: drop the CFG w-sweep list (guidance_scales) so the
-    single configured guidance_scale is used; keep max_steps etc."""
-    pk = dict(predict_kwargs or {})
-    pk.pop("guidance_scales", None)
-    return pk
+def _test_guidance_plan(predict_kwargs: dict | None) -> tuple[dict, list[float], float]:
+    """Resolve test predict kwargs + the list of guidance scales to evaluate.
+
+    Returns ``(base_pk, ws, base_w)`` where ``base_pk`` is the diffrax kwargs with the CFG
+    w-sweep list stripped (so ``guidance_scale`` is set per w), ``ws`` is the list of scales
+    to evaluate (the same ``guidance_scales`` used at validation, else the single configured
+    ``guidance_scale``), and ``base_w`` is the scale whose metrics fill the default keys.
+    """
+    pk_all = dict(predict_kwargs or {})
+    gs = pk_all.pop("guidance_scales", None)
+    base_pk = dict(pk_all)
+    base_w = float(base_pk.get("guidance_scale", 1.0))
+    ws = [float(w) for w in gs] if gs else [base_w]
+    return base_pk, ws, base_w
 
 
 def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = None) -> dict:
     """Per-condition and aggregated test metrics for each dataset.
 
-    ``predict_kwargs`` (e.g. the configured ``guidance_scale``) is forwarded to
-    ``solver.predict`` so test predictions honor the guidance scale from config.
+    When ``predict_kwargs`` carries a ``guidance_scales`` list (the CFG w-sweep used at
+    validation), the SAME sampled test batch is predicted once per w. The returned dict holds
+    the default-w (config ``guidance_scale``) results plus ``per_w_aggregated`` = {w: aggregated}
+    so every w can be plotted; no best-w is selected.
     """
-    pk = _predict_kwargs_for_test(predict_kwargs)
+    base_pk, ws, base_w = _test_guidance_plan(predict_kwargs)
     keys = list(ValMetricsLogger.METRICS)
-    per_dataset: dict = {}
-    all_per_condition: dict = {}
 
+    # sample each dataset ONCE so all w are compared on the same cells/conditions
+    batches = {}
     for name, sampler in test_samplers.items():
-        batch = sampler.sample(mode="on_train_end")
-        src, cond, true = batch["source"], batch["condition"], batch["target"]
+        b = sampler.sample(mode="on_train_end")
+        batches[name] = (b["source"], b["condition"], b["target"])
 
-        print(f"  [{name}] predicting {len(src)} test conditions …"
-              + (f" (guidance_scale={pk['guidance_scale']})" if pk.get("guidance_scale", 1.0) != 1.0 else ""))
-        pred = jax.tree.map(partial(solver.predict, **pk), src, cond)
+    if len(ws) > 1:
+        print(f"  test classifier-free guidance sweep over w = {ws}")
 
-        per_condition = {}
-        for cond_key in tqdm(sorted(true.keys(), key=str), desc=f"  test metrics [{name}]"):
-            src_arr = src.get(cond_key) if isinstance(src, dict) else None
-            per_condition[str(cond_key)] = _condition_metrics(true[cond_key], pred[cond_key], src_arr)
-            all_per_condition[f"{name}/{cond_key}"] = per_condition[str(cond_key)]
-
-        per_dataset[name] = {
-            "per_condition": per_condition,
-            "aggregated": {k: float(np.nanmean([v[k] for v in per_condition.values()])) for k in keys},
+    per_w_result: dict = {}
+    for w in ws:
+        pkw = dict(base_pk)
+        pkw["guidance_scale"] = w
+        per_dataset: dict = {}
+        all_per_condition: dict = {}
+        for name, (src, cond, true) in batches.items():
+            print(f"  [{name}] predicting {len(src)} test conditions …"
+                  + (f" (w={w})" if len(ws) > 1 or w != 1.0 else ""))
+            pred = jax.tree.map(partial(solver.predict, **pkw), src, cond)
+            per_condition = {}
+            for cond_key in tqdm(sorted(true.keys(), key=str), desc=f"  test metrics [{name}] w={w}"):
+                src_arr = src.get(cond_key) if isinstance(src, dict) else None
+                per_condition[str(cond_key)] = _condition_metrics(true[cond_key], pred[cond_key], src_arr)
+                all_per_condition[f"{name}/{cond_key}"] = per_condition[str(cond_key)]
+            per_dataset[name] = {
+                "per_condition": per_condition,
+                "aggregated": {k: float(np.nanmean([v[k] for v in per_condition.values()])) for k in keys},
+            }
+        aggregated = {k: float(np.nanmean([v[k] for v in all_per_condition.values()])) for k in keys}
+        per_w_result[w] = {
+            "per_dataset": per_dataset,
+            "per_condition": all_per_condition,
+            "aggregated": aggregated,
         }
 
-    aggregated = {k: float(np.nanmean([v[k] for v in all_per_condition.values()])) for k in keys}
-    return {"per_dataset": per_dataset, "per_condition": all_per_condition, "aggregated": aggregated}
+    default = per_w_result.get(base_w, per_w_result[ws[0]])
+    if len(ws) > 1:
+        default["per_w_aggregated"] = {w: per_w_result[w]["aggregated"] for w in ws}
+    return default
 
 
 class ReconMetricsLogger(ComputationCallback):
@@ -601,15 +627,34 @@ class ReconMetricsLogger(ComputationCallback):
     def evaluate_test(self, solver, test_samplers: dict, predict_kwargs: dict | None = None) -> dict:
         """Gene-space recon metrics on the held-out test set (logged as ``test_recon_*``).
 
-        ``predict_kwargs`` (e.g. the configured ``guidance_scale``) is forwarded to
-        ``solver.predict`` so test predictions honor the guidance scale from config.
+        When ``predict_kwargs`` carries a ``guidance_scales`` list (the CFG w-sweep used at
+        validation), the same sampled test batch is decoded/scored at every w and each is
+        returned as ``test_recon_<k>__w<w>``; the default ``test_recon_<k>`` keys hold the
+        config ``guidance_scale`` (base w). No best-w is selected.
         """
-        pk = _predict_kwargs_for_test(predict_kwargs)
-        pred_data = {}
-        for name, sampler in test_samplers.items():
-            batch = sampler.sample(mode="on_train_end")
-            pred_data[name] = jax.tree.map(partial(solver.predict, **pk), batch["source"], batch["condition"])
-        return self._compute_recon(pred_data, "test", "test")
+        base_pk, ws, base_w = _test_guidance_plan(predict_kwargs)
+
+        # sample once so all w share the same cells/conditions
+        batches = {name: sampler.sample(mode="on_train_end") for name, sampler in test_samplers.items()}
+
+        per_w = {}
+        for w in ws:
+            pkw = dict(base_pk)
+            pkw["guidance_scale"] = w
+            pred_data = {
+                name: jax.tree.map(partial(solver.predict, **pkw), b["source"], b["condition"])
+                for name, b in batches.items()
+            }
+            per_w[w] = self._compute_recon(pred_data, "test", f"test w={w}", emit=False)
+
+        default = per_w.get(base_w, per_w[ws[0]])
+        if len(ws) == 1:
+            return default
+        out = dict(default)  # default test_recon_* at base w
+        for w in sorted(per_w):
+            for k, v in per_w[w].items():
+                out[f"{k}__w{w}"] = v            # all-w curves
+        return out
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
                          valid_pred_data, solver, pred_data_by_w=None, **kwargs) -> dict:
