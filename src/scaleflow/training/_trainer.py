@@ -48,6 +48,13 @@ class CellFlowTrainer:
 
         self.solver = solver
         self.predict_kwargs = predict_kwargs or {}
+        # Classifier-free guidance: optional list of guidance scales to evaluate at each
+        # validation. When set (len > 1), the SAME sampled val batch is predicted once per w
+        # so metrics are comparable across w. Popped out of predict_kwargs so it never reaches
+        # solver.predict/diffeqsolve. The scalar predict_kwargs["guidance_scale"] (default 1.0)
+        # is the baseline/positional w handed to the non-w-aware callbacks.
+        gs = self.predict_kwargs.pop("guidance_scales", None)
+        self.guidance_scales: list[float] = [float(w) for w in gs] if gs else []
         self.rng_subsampling = np.random.default_rng(seed)
         self.training_logs: dict[str, Any] = {}
 
@@ -58,22 +65,40 @@ class CellFlowTrainer:
     ) -> tuple[
         dict[str, dict[str, ArrayLike]],
         dict[str, dict[str, ArrayLike]],
+        dict[str, dict[str, ArrayLike]],
+        dict[float, dict[str, dict[str, ArrayLike]]],
     ]:
         """Compute predictions for validation data.
 
         Handles ValidationSampler format: {"source": dict, "condition": dict, "target": dict}
         where each dict maps condition_key -> data.
+
+        Returns ``(valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w)``.
+        ``valid_pred_data`` are the predictions at the baseline guidance scale (positional,
+        for w-agnostic callbacks). ``pred_data_by_w`` maps each guidance scale w →
+        ``{val_key: {cond_key: pred}}`` from the SAME sampled batch, so metrics are comparable
+        across w. In the default (no ``guidance_scales``) case this holds a single entry.
         """
         from functools import partial
 
         import jax
 
+        base_w = float(self.predict_kwargs.get("guidance_scale", 1.0))
+        ws = self.guidance_scales if self.guidance_scales else [base_w]
+
         valid_source_data: dict[str, dict[str, ArrayLike]] = {}
-        valid_pred_data: dict[str, dict[str, ArrayLike]] = {}
         valid_true_data: dict[str, dict[str, ArrayLike]] = {}
+        pred_data_by_w: dict[float, dict[str, dict[str, ArrayLike]]] = {w: {} for w in ws}
+
+        def _predict_kwargs_for(w: float) -> dict:
+            kw = dict(self.predict_kwargs)
+            kw["guidance_scale"] = w
+            return kw
 
         # Add progress bar for validation
         print(f"\nStarting validation on {len(val_data)} dataset(s)...")
+        if len(ws) > 1:
+            print(f"  classifier-free guidance sweep over w = {ws}")
         val_pbar = tqdm(val_data.items(), desc="Validation", leave=True, total=len(val_data))
         for val_key, vdl in val_pbar:
             val_pbar.set_description(f"Validation ({val_key}) - sampling")
@@ -92,13 +117,17 @@ class CellFlowTrainer:
                 valid_source_data[val_key] = src
                 valid_true_data[val_key] = true_tgt
 
-                val_pbar.set_description(f"Validation ({val_key}) - predicting ({len(src)} conditions)")
-                # Use jax.tree.map for efficient per-condition prediction
-                valid_pred_data[val_key] = jax.tree.map(
-                    partial(self.solver.predict, **self.predict_kwargs),
-                    src,
-                    condition,
-                )
+                for w in ws:
+                    val_pbar.set_description(
+                        f"Validation ({val_key}) - predicting ({len(src)} conditions)"
+                        + (f" w={w}" if len(ws) > 1 else "")
+                    )
+                    # Use jax.tree.map for efficient per-condition prediction
+                    pred_data_by_w[w][val_key] = jax.tree.map(
+                        partial(self.solver.predict, **_predict_kwargs_for(w)),
+                        src,
+                        condition,
+                    )
             else:
                 # Handle old format (single batch): {"src_cell_data", "tgt_cell_data", "condition"}
                 src = batch["src_cell_data"]
@@ -107,13 +136,19 @@ class CellFlowTrainer:
                 valid_source_data[val_key] = src
                 valid_true_data[val_key] = true_tgt
 
-                val_pbar.set_description(f"Validation ({val_key}) - predicting")
-                valid_pred_data[val_key] = self.solver.predict(src, condition=condition, **self.predict_kwargs)
+                for w in ws:
+                    val_pbar.set_description(
+                        f"Validation ({val_key}) - predicting" + (f" w={w}" if len(ws) > 1 else "")
+                    )
+                    pred_data_by_w[w][val_key] = self.solver.predict(
+                        src, condition=condition, **_predict_kwargs_for(w)
+                    )
 
             val_pbar.set_description(f"Validation ({val_key}) - done")
 
         print("Validation complete!")
-        return valid_source_data, valid_true_data, valid_pred_data
+        valid_pred_data = pred_data_by_w.get(base_w, pred_data_by_w[ws[0]])
+        return valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w
 
     def _update_logs(self, logs: dict[str, Any]) -> None:
         """Update training logs."""
@@ -188,7 +223,7 @@ class CellFlowTrainer:
 
             if ((it - 1) % valid_freq == 0) and (it > 1):
                 # Get predictions from validation data
-                valid_source_data, valid_true_data, valid_pred_data = self._validation_step(
+                valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w = self._validation_step(
                     valid_loaders, mode="on_log_iteration"
                 )
 
@@ -214,6 +249,7 @@ class CellFlowTrainer:
                     self.solver,
                     additional_metrics=additional_metrics,
                     iteration=it,
+                    pred_data_by_w=pred_data_by_w,
                 )
                 self._update_logs(metrics)
                 # Update progress bar
@@ -226,10 +262,13 @@ class CellFlowTrainer:
                 pbar.set_postfix(postfix_dict)
 
         if num_iterations > 0:
-            valid_source_data, valid_true_data, valid_pred_data = self._validation_step(
+            valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w = self._validation_step(
                 valid_loaders, mode="on_train_end"
             )
-            metrics = crun.on_train_end(valid_source_data, valid_true_data, valid_pred_data, self.solver)
+            metrics = crun.on_train_end(
+                valid_source_data, valid_true_data, valid_pred_data, self.solver,
+                pred_data_by_w=pred_data_by_w,
+            )
             self._update_logs(metrics)
 
         self.solver.is_trained = True

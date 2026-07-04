@@ -1,5 +1,12 @@
 solver_key: otfm
 predict_kwargs:
   max_steps: 32768
-  guidance_scale: 1.0    # classifier-free guidance at predict time (1.0 = off). Applies to
-                         # VALIDATION predictions; requires a model trained with condition_dropout_prob>0.
+  guidance_scale: 1.0    # baseline / positional CFG scale (1.0 = plain conditional). Used for the
+                         # non-w-aware callbacks and as the fallback when guidance_scales is unset.
+  # Classifier-free guidance sweep: at EACH validation the same sampled batch is predicted once
+  # per w below; ValMetricsLogger / ReconMetricsLogger / BestModelCheckpoint log every w
+  # (val_<metric>__w<w>) and expose the BEST w as the default val_<metric> (+ val_best_w) for
+  # graphing/checkpointing. Set to null (or a single-element list) to disable the sweep. Costs one
+  # extra ODE solve over the val set per extra w. Only meaningful for a model trained with
+  # condition_dropout_prob > 0 (so v_null is learned); w=1.0 is always the safe baseline.
+  guidance_scales: [1.0, 1.05, 1.1, 1.2]

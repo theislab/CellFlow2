@@ -133,18 +133,32 @@ class ValMetricsLogger(ComputationCallback):
                 )
         return per_ds
 
-    def _compute_and_save(self, valid_source_data, valid_true_data, valid_pred_data) -> dict:
-        per_ds = self._gather(valid_source_data, valid_true_data, valid_pred_data)
-        if not per_ds:
-            return {}
+    # guidance scale picked (by this primary metric) when a CFG w-sweep is active
+    _PRIMARY = "pearson_r_delta"
 
+    def _entry(self, per_ds: dict) -> dict:
+        """Mean+median of each metric across all conditions."""
         flat = [m for ms in per_ds.values() for m in ms]
-        entry = {"step": self._step, "n_conditions": len(flat)}
+        entry = {"n_conditions": len(flat)}
         for k in self.METRICS:
             vals = [m[k] for m in flat]
-            entry[k] = float(np.nanmean(vals))              # mean across conditions
-            entry[f"{k}_median"] = float(np.nanmedian(vals))  # median across conditions
+            entry[k] = float(np.nanmean(vals))
+            entry[f"{k}_median"] = float(np.nanmedian(vals))
+        return entry
 
+    def _monitor(self, per_ds: dict) -> dict:
+        return {
+            f"{ds}_nn_displacement_corr": float(np.nanmean([m["nn_displacement_corr"] for m in ms]))
+            for ds, ms in per_ds.items()
+        }
+
+    def _print_entry(self, entry: dict, tag: str = "") -> None:
+        print(f"    val{tag}  R²={entry['r_squared']:.4f}  r={entry['pearson_r']:.4f}  "
+              f"ΔR²={entry['r_squared_delta']:.4f}  Δr={entry['pearson_r_delta']:.4f}  "
+              f"nn_disp_corr={entry['nn_displacement_corr']:.4f}  "
+              f"E-dist={entry['e_distance']:.4f}  MMD={entry['mmd']:.4f}  (step {self._step})")
+
+    def _save_entry(self, entry: dict) -> None:
         entries = []
         if os.path.exists(self.save_path):
             with open(self.save_path) as f:
@@ -153,28 +167,73 @@ class ValMetricsLogger(ComputationCallback):
         with open(self.save_path, "w") as f:
             json.dump(entries, f, indent=2)
 
-        print(f"    val  R²={entry['r_squared']:.4f}  r={entry['pearson_r']:.4f}  "
-              f"ΔR²={entry['r_squared_delta']:.4f}  Δr={entry['pearson_r_delta']:.4f}  "
-              f"nn_disp_corr={entry['nn_displacement_corr']:.4f}  "
-              f"E-dist={entry['e_distance']:.4f}  MMD={entry['mmd']:.4f}  (step {self._step})")
-        if self._wandb_run is not None:
-            log = {f"val_{k}": entry[k] for k in self.METRICS}
-            log.update({f"val_{k}_median": entry[f"{k}_median"] for k in self.METRICS})
-            self._wandb_run.log(log)
+    @staticmethod
+    def _score(entry: dict, key: str) -> float:
+        s = entry.get(key)
+        return -np.inf if (s is None or np.isnan(s)) else float(s)
 
-        return {
-            f"{ds}_nn_displacement_corr": float(np.nanmean([m["nn_displacement_corr"] for m in ms]))
-            for ds, ms in per_ds.items()
-        }
+    def _compute_and_save(self, valid_source_data, valid_true_data, valid_pred_data,
+                          pred_data_by_w=None) -> dict:
+        multi = pred_data_by_w is not None and len(pred_data_by_w) > 1
+
+        # ── single guidance scale (default behaviour) ──
+        if not multi:
+            per_ds = self._gather(valid_source_data, valid_true_data, valid_pred_data)
+            if not per_ds:
+                return {}
+            entry = self._entry(per_ds)
+            entry["step"] = self._step
+            self._save_entry(entry)
+            self._print_entry(entry)
+            if self._wandb_run is not None:
+                log = {f"val_{k}": entry[k] for k in self.METRICS}
+                log.update({f"val_{k}_median": entry[f"{k}_median"] for k in self.METRICS})
+                self._wandb_run.log(log)
+            return self._monitor(per_ds)
+
+        # ── classifier-free guidance sweep: evaluate every w, log all, graph the best ──
+        per_w: dict = {}  # w -> (entry, per_ds)
+        for w, pred in pred_data_by_w.items():
+            per_ds = self._gather(valid_source_data, valid_true_data, pred)
+            if per_ds:
+                per_w[w] = (self._entry(per_ds), per_ds)
+        if not per_w:
+            return {}
+
+        best_w = max(per_w, key=lambda w: self._score(per_w[w][0], self._PRIMARY))
+        best_entry, best_per_ds = per_w[best_w]
+
+        wandb_log: dict = {}
+        for w in sorted(per_w):
+            e = per_w[w][0]
+            self._print_entry(e, tag=f" [w={w}]")
+            for k in self.METRICS:                       # all-w curves
+                wandb_log[f"val_{k}__w{w}"] = e[k]
+                wandb_log[f"val_{k}_median__w{w}"] = e[f"{k}_median"]
+        for k in self.METRICS:                           # best-w → the default (graphed) val_* keys
+            wandb_log[f"val_{k}"] = best_entry[k]
+            wandb_log[f"val_{k}_median"] = best_entry[f"{k}_median"]
+        wandb_log["val_best_w"] = float(best_w)
+        print(f"    val  → best w={best_w} by {self._PRIMARY} "
+              f"(Δr={best_entry[self._PRIMARY]:.4f})  (step {self._step})")
+        if self._wandb_run is not None:
+            self._wandb_run.log(wandb_log)
+
+        save_entry = dict(best_entry)
+        save_entry["step"] = self._step
+        save_entry["best_w"] = float(best_w)
+        save_entry["per_w"] = {str(w): per_w[w][0] for w in sorted(per_w)}
+        self._save_entry(save_entry)
+        return self._monitor(best_per_ds)
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
-                         valid_pred_data, solver, **kwargs) -> dict:
+                         valid_pred_data, solver, pred_data_by_w=None, **kwargs) -> dict:
         self._step += self._valid_freq
-        return self._compute_and_save(valid_source_data, valid_true_data, valid_pred_data)
+        return self._compute_and_save(valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w)
 
     def on_train_end(self, valid_source_data, valid_true_data,
-                     valid_pred_data, solver, **kwargs) -> dict:
-        return self._compute_and_save(valid_source_data, valid_true_data, valid_pred_data)
+                     valid_pred_data, solver, pred_data_by_w=None, **kwargs) -> dict:
+        return self._compute_and_save(valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w)
 
 
 # Metrics where higher = better. All others (e_distance, mmd) → lower = better.
@@ -208,13 +267,15 @@ class BestModelCheckpoint(ComputationCallback):
         self._metric    = metric
         self._maximize  = metric in _MAXIMIZE_METRICS
         self.best_score = -np.inf if self._maximize else np.inf
+        self.best_w     = None   # guidance scale that achieved best_score (CFG sweep only)
         self._wandb_run = wandb_run
         self._ckptr     = ocp.PyTreeCheckpointer()
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self.best_score = -np.inf if self._maximize else np.inf
+        self.best_w     = None
 
-    def _compute_score(self, valid_source_data, valid_true_data, valid_pred_data) -> float:
+    def _score_pred(self, valid_source_data, valid_true_data, valid_pred_data) -> float:
         scores = []
         for ds in valid_true_data:
             for cond_key, true_arr in valid_true_data[ds].items():
@@ -227,26 +288,45 @@ class BestModelCheckpoint(ComputationCallback):
         return float(np.nanmean(scores)) if scores else float("nan")
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
-                         valid_pred_data, solver, **kwargs) -> dict:
-        score = self._compute_score(valid_source_data, valid_true_data, valid_pred_data)
-        if np.isnan(score):
-            return {}
+                         valid_pred_data, solver, pred_data_by_w=None, **kwargs) -> dict:
+        # Guidance is inference-only, so the saved params are identical for every w; the w
+        # sweep only changes the SCORE used to decide "is this iterate the best". We pick the
+        # iterate that scores best at its own optimal guidance and record that w.
+        eval_w = None
+        if pred_data_by_w is not None and len(pred_data_by_w) > 1:
+            w_scores = {w: self._score_pred(valid_source_data, valid_true_data, pred)
+                        for w, pred in pred_data_by_w.items()}
+            w_scores = {w: s for w, s in w_scores.items() if not np.isnan(s)}
+            if not w_scores:
+                return {}
+            eval_w = (max if self._maximize else min)(w_scores, key=w_scores.get)
+            score = w_scores[eval_w]
+        else:
+            score = self._score_pred(valid_source_data, valid_true_data, valid_pred_data)
+            if np.isnan(score):
+                return {}
+
         is_better = score > self.best_score if self._maximize else score < self.best_score
         if is_better:
             self.best_score = score
+            self.best_w = eval_w
             if self.save_path.exists():
                 shutil.rmtree(self.save_path)
             self._ckptr.save(str(self.save_path), _solver_params(solver))
-            print(f"    ✓ checkpoint saved  (val {self._metric}={score:.4f})")
+            w_msg = f" @ w={eval_w}" if eval_w is not None else ""
+            print(f"    ✓ checkpoint saved  (val {self._metric}={score:.4f}{w_msg})")
         wandb_key = f"best_val_{self._metric}"
+        out = {wandb_key: self.best_score}
+        if self.best_w is not None:
+            out["best_val_w"] = float(self.best_w)
         if self._wandb_run is not None:
-            self._wandb_run.log({wandb_key: self.best_score})
-        return {wandb_key: self.best_score}
+            self._wandb_run.log(out)
+        return out
 
     def on_train_end(self, valid_source_data, valid_true_data,
-                     valid_pred_data, solver, **kwargs) -> dict:
+                     valid_pred_data, solver, pred_data_by_w=None, **kwargs) -> dict:
         return self.on_log_iteration(valid_source_data, valid_true_data,
-                                     valid_pred_data, solver)
+                                     valid_pred_data, solver, pred_data_by_w=pred_data_by_w)
 
 
 def evaluate_test(solver, test_samplers: dict) -> dict:
@@ -393,10 +473,12 @@ class ReconMetricsLogger(ComputationCallback):
             self._ctrl_decoded_cache[cell_line] = self._decoder.decode(Z).mean(axis=0)
         return self._ctrl_decoded_cache[cell_line]
 
-    def _compute_recon(self, pred_data: dict, prefix: str, step_label: str) -> dict:
+    def _compute_recon(self, pred_data: dict, prefix: str, step_label: str, emit: bool = True) -> dict:
         """Gene-space delta metrics over ``pred_data`` ({ds: {cond_key: pred_latent}}).
 
-        ``prefix`` selects the metric namespace (``"val"`` or ``"test"``).
+        ``prefix`` selects the metric namespace (``"val"`` or ``"test"``). When ``emit`` is
+        False the result is returned without logging to wandb (used by the CFG w-sweep, which
+        logs all w at once afterwards).
         """
         r2_deltas, pearson_deltas = [], []
         r2_fulls, pearson_fulls = [], []   # non-delta: decode(pred) vs true genes (no control)
@@ -448,7 +530,7 @@ class ReconMetricsLogger(ComputationCallback):
             for k in keys:
                 out[f"{prefix}_recon_{k}"] = float("nan")
                 out[f"{prefix}_recon_{k}_median"] = float("nan")
-            if self._wandb_run is not None:
+            if emit and self._wandb_run is not None:
                 self._wandb_run.log(out)
             return out
         if n_unmatched:
@@ -466,11 +548,39 @@ class ReconMetricsLogger(ComputationCallback):
               f"R²={out[f'{prefix}_recon_r2']:.4f} r={out[f'{prefix}_recon_pearson_r']:.4f}  "
               f"(med R²δ={out[f'{prefix}_recon_r2_delta_median']:.4f} rδ={out[f'{prefix}_recon_pearson_r_delta_median']:.4f}) "
               f"({step_label})")
-        if self._wandb_run is not None:
+        if emit and self._wandb_run is not None:
             self._wandb_run.log(out)
         return out
 
-    def _compute(self, valid_source_data, valid_true_data, valid_pred_data) -> dict:
+    def _compute_recon_multi_w(self, pred_data_by_w: dict) -> dict:
+        """CFG sweep: decode+score at each w, log all w curves, graph the best w."""
+        primary = "val_recon_pearson_r_delta"
+        per_w = {}
+        for w, pred in pred_data_by_w.items():
+            per_w[w] = self._compute_recon(pred, "val", f"step {self._step} w={w}", emit=False)
+
+        def score(out: dict) -> float:
+            s = out.get(primary)
+            return -np.inf if (s is None or np.isnan(s)) else float(s)
+
+        best_w = max(per_w, key=lambda w: score(per_w[w]))
+        best = per_w[best_w]
+
+        wandb_log: dict = {}
+        for w in sorted(per_w):
+            for k, v in per_w[w].items():
+                wandb_log[f"{k}__w{w}"] = v          # all-w curves
+        wandb_log.update(best)                        # best-w → default val_recon_* keys
+        wandb_log["val_recon_best_w"] = float(best_w)
+        print(f"    val recon  → best w={best_w} by {primary} "
+              f"(rδ={score(best):.4f})  (step {self._step})")
+        if self._wandb_run is not None:
+            self._wandb_run.log(wandb_log)
+        return best
+
+    def _compute(self, valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w=None) -> dict:
+        if pred_data_by_w is not None and len(pred_data_by_w) > 1:
+            return self._compute_recon_multi_w(pred_data_by_w)
         return self._compute_recon(valid_pred_data, "val", f"step {self._step}")
 
     def evaluate_test(self, solver, test_samplers: dict) -> dict:
@@ -482,13 +592,13 @@ class ReconMetricsLogger(ComputationCallback):
         return self._compute_recon(pred_data, "test", "test")
 
     def on_log_iteration(self, valid_source_data, valid_true_data,
-                         valid_pred_data, solver, **kwargs) -> dict:
+                         valid_pred_data, solver, pred_data_by_w=None, **kwargs) -> dict:
         self._step += self._valid_freq
-        return self._compute(valid_source_data, valid_true_data, valid_pred_data)
+        return self._compute(valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w)
 
     def on_train_end(self, valid_source_data, valid_true_data,
-                     valid_pred_data, solver, **kwargs) -> dict:
-        return self._compute(valid_source_data, valid_true_data, valid_pred_data)
+                     valid_pred_data, solver, pred_data_by_w=None, **kwargs) -> dict:
+        return self._compute(valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w)
 
 
 def load_recon_decoder(dir_path: str):
