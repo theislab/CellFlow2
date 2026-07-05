@@ -1,3 +1,4 @@
+import gc
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -260,6 +261,15 @@ class CellFlowTrainer:
                 if "train_loss_functional" in additional_metrics:
                     postfix_dict["loss_func"] = round(additional_metrics["train_loss_functional"], 3)
                 pbar.set_postfix(postfix_dict)
+
+                # Free the validation predictions NOW. Otherwise these locals stay referenced
+                # through the next valid_freq training steps and, crucially, while the *next*
+                # _validation_step builds its own predictions — transiently holding
+                # prev + new in RAM. With a guidance-scale sweep that is (N×prev)+(N×new),
+                # which is what OOM-kills the second validation. The callbacks already returned
+                # the scalar metrics, so the arrays are no longer needed.
+                del valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w
+                gc.collect()
 
         if num_iterations > 0:
             valid_source_data, valid_true_data, valid_pred_data, pred_data_by_w = self._validation_step(
