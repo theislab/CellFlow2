@@ -44,10 +44,10 @@ def test_scheme_builds_and_binds():
     scheme = perturbation_scheme(adata, context=["cell_line"], perturbation=["drug"],
                                  control_values={"drug": "control"}, n_rows_per_leaf=16)
     assert scheme.root == "pert"
-    # pert weights only non-control combos; ctrl only control combos (weight-0 ⇒ excluded = selection)
-    pert_w = scheme.nodes["pert"].weighting.weights
+    # pert weights only non-control combos; ctrl only control combos (absent/0 ⇒ excluded = selection)
+    pert_w = scheme.nodes["pert"].weights
     assert all(combo[1] != "control" for combo in pert_w) and len(pert_w) == 4      # (A,d1)(A,d2)(B,d1)(B,d2)
-    ctrl_w = scheme.nodes["ctrl"].weighting.weights
+    ctrl_w = scheme.nodes["ctrl"].weights
     assert all(combo[1] == "control" for combo in ctrl_w) and len(ctrl_w) == 2       # (A,ctrl)(B,ctrl)
 
 

@@ -1,7 +1,7 @@
 """Declarative, index-free class-mapping sampler over annbatch (prototype).
 
 A rooted tree of `Node`s over named sources; each node is a partition of its source's cells into
-leaves (unique column-combinations) with a per-combination `Weighting`. The root samples a leaf via
+leaves (unique column-combinations) with a per-combination weight mapping. The root samples a leaf via
 annbatch `ClassSampler` (weight 0 ⇒ excluded ⇒ = selection); bound children are fetched conditioned on
 the parent's shared-column values. No row indices are exposed — the scheme is columns / keys / weights.
 
@@ -14,51 +14,43 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 import anndata as ad
 import numpy as np
 import pandas as pd
-from annbatch import Loader
+from annbatch import DatasetCollection, Loader
 from annbatch.samplers import ClassSampler
 
-__all__ = ["Weighting", "Node", "Bind", "Scheme", "TreeSampler", "perturbation_scheme"]
+Container = ad.AnnData | DatasetCollection  # a cell source: in-memory AnnData or on-disk DatasetCollection
+
+__all__ = ["Node", "Bind", "Scheme", "TreeSampler", "perturbation_scheme",
+           "uniform", "frequency", "inverse_frequency"]
+
+# Weights are just a mapping {combination -> weight}. A combination absent from the mapping (or with
+# weight 0) is excluded — that IS the selection, native to annbatch ClassSampler. The "uniform /
+# frequency / inverse_frequency" niceties are plain above-layer functions that build such a dict.
+Weights = Mapping[tuple, float]
 
 
-# ───────────────────────────────────────────────────────────────── weighting: one source of truth
-@dataclass(frozen=True)
-class Weighting:
-    """weight(leaf) = weights.get(leaf, default), normalized. `uniform` = just `default`.
+def uniform(combos) -> dict[tuple, float]:
+    return {tuple(c): 1.0 for c in combos}
 
-    The schema is always this general (weights, default); the policy niceties are constructor-only.
-    """
 
-    weights: Mapping[tuple, float] = field(default_factory=dict)
-    default: float = 1.0
+def frequency(counts: Mapping[tuple, int]) -> dict[tuple, float]:
+    return {tuple(k): float(c) for k, c in counts.items()}
 
-    @classmethod
-    def uniform(cls) -> "Weighting":
-        return cls(default=1.0)
 
-    @classmethod
-    def explicit(cls, weights: Mapping[tuple, float], default: float = 0.0) -> "Weighting":
-        return cls(dict(weights), default)
+def inverse_frequency(counts: Mapping[tuple, int]) -> dict[tuple, float]:
+    return {tuple(k): 1.0 / c for k, c in counts.items()}
 
-    @classmethod
-    def frequency(cls, counts: Mapping[tuple, int]) -> "Weighting":
-        return cls({k: float(c) for k, c in counts.items()}, 0.0)
 
-    @classmethod
-    def inverse_frequency(cls, counts: Mapping[tuple, int]) -> "Weighting":
-        return cls({k: 1.0 / c for k, c in counts.items()}, 0.0)
-
-    def vector(self, leaves: Sequence[tuple]) -> np.ndarray:
-        """Resolve to normalized per-leaf weights (→ ClassSampler.class_weights). The only consumer."""
-        v = np.array([self.weights.get(tuple(lf), self.default) for lf in leaves], dtype=float)
-        s = v.sum()
-        if s <= 0:
-            raise ValueError("Weighting resolves to all-zero over these leaves — nothing to sample.")
-        return v / s
+def _weight_vector(weights: Weights, leaves: Sequence[tuple]) -> np.ndarray:
+    """Resolve {combo: weight} to normalized per-leaf weights (→ ClassSampler.class_weights)."""
+    v = np.array([float(weights.get(tuple(lf), 0.0)) for lf in leaves], dtype=float)
+    s = v.sum()
+    if s <= 0:
+        raise ValueError("weights resolve to all-zero over these leaves — nothing to sample.")
+    return v / s
 
 
 # ───────────────────────────────────────────────────────────────── schema
@@ -67,15 +59,15 @@ class Node:
     source: str  # key into Scheme.sources
     cols: tuple[str, ...]  # tree levels → leaves = unique combinations (over ALL the source's cells)
     keys: tuple[str, ...] = ("X",)  # representation location(s): "X" | "obsm/<k>" | "layers/<k>"
-    weighting: Weighting = field(default_factory=Weighting)
+    weights: Weights = field(default_factory=dict)  # {combo: weight}; absent/0 ⇒ excluded (= selection)
 
     def __post_init__(self) -> None:  # structural checks (data-free)
         if not self.cols or not self.keys:
             raise ValueError("Node.cols and Node.keys must be non-empty.")
-        for k in self.weighting.weights:
+        for k in self.weights:
             if len(k) != len(self.cols):
                 raise ValueError(f"weight key {k!r} arity != cols {self.cols}.")
-        if self.weighting.default < 0 or any(w < 0 for w in self.weighting.weights.values()):
+        if any(w < 0 for w in self.weights.values()):
             raise ValueError("weights must be non-negative.")
 
 
@@ -88,12 +80,12 @@ class Bind:
 
 @dataclass(frozen=True)
 class Scheme:
-    sources: Mapping[str, Any]  # {name: AnnData}  (DatasetCollection is a documented extension)
+    sources: Mapping[str, Container]  # {name: AnnData | DatasetCollection}
     nodes: Mapping[str, Node]
     root: str
+    n_rows_per_leaf: int  # cells drawn per node-leaf per batch (with replacement) — no default: decide it
+    seed: int  # no default: reproducibility must be explicit
     binds: tuple[Bind, ...] = ()
-    n_rows_per_leaf: int = 256
-    seed: int = 0
 
     def __post_init__(self) -> None:  # structural: rooted tree + references
         if self.root not in self.nodes:
@@ -156,7 +148,7 @@ class TreeSampler:
         for name, node in scheme.nodes.items():
             obs = scheme.sources[node.source].obs
             codes, leaves = _leaf_codes(obs, node.cols)
-            self._st[name] = {"node": node, "codes": codes, "leaves": leaves, "w": node.weighting.vector(leaves)}
+            self._st[name] = {"node": node, "codes": codes, "leaves": leaves, "w": _weight_vector(node.weights, leaves)}
 
         self._build_root_loader()
         self._build_child_caches()
@@ -244,7 +236,7 @@ def perturbation_scheme(
     *,
     context: Sequence[str],
     perturbation: Sequence[str],
-    control_values: Mapping[str, Any],
+    control_values: Mapping[str, object],
     key: str = "X",
     n_rows_per_leaf: int = 256,
     seed: int = 0,
@@ -264,8 +256,8 @@ def perturbation_scheme(
     return Scheme(
         sources={"data": adata},
         nodes={
-            "pert": Node("data", cols, (key,), Weighting.explicit({c: 1.0 for c in pert}, default=0.0)),
-            "ctrl": Node("data", cols, (key,), Weighting.explicit({c: 1.0 for c in ctrl}, default=0.0)),
+            "pert": Node("data", cols, (key,), uniform(pert)),   # non-control combos weighted; rest excluded
+            "ctrl": Node("data", cols, (key,), uniform(ctrl)),   # control combos weighted; rest excluded
         },
         root="pert",
         binds=(Bind("pert", "ctrl", common=tuple(context)),),
