@@ -317,13 +317,16 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     diag_cfg  = cfg.get("diagnostics", {})
     n_diag    = int(diag_cfg.get("n_conditions", 100))
     max_cells = int(diag_cfg.get("max_cells", 2000))
-    print(f"Running effect-size diagnostics ({n_diag} conditions/split) …")
+    # sweep the SAME guidance weights as validation/test so diagnostics has per-w plots
+    diag_ws = test_predict_kwargs.get("guidance_scales") or [test_predict_kwargs.get("guidance_scale", 1.0)]
+    print(f"Running effect-size diagnostics ({n_diag} conditions/split, w={diag_ws}) …")
     diag_samplers = temp_edit.make_diagnostic_samplers(
         data, n_conditions=n_diag, transform=transform, seed=int(cfg.seed)
     )
     temp_edit.full_diagnostics(
         best_solver, diag_samplers, output_dir, name,
         wandb_run=wandb_run, max_cells=max_cells, seed=int(cfg.seed),
+        guidance_scales=diag_ws,
     )
 
     print(f"\n{'='*64}")

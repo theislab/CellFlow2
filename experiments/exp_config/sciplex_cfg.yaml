@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CFG training sweep: lr=1e-4, adaln_zero, cond_output_dropout=0.2, AE_128 embedding.
+# Sweeps the CFG null-drop probability (condition_dropout_prob) — the only CFG knob
+# that affects TRAINING. guidance_scale (w) is swept post-hoc at val/test/diagnostics.
+# Requires the fix/adaln_zero + feat/cfg_guidance branch.
+#
+#   wandb sweep experiments/exp_config/sciplex_cfg.yaml   → sweep_id
+#   wandb agent <entity>/sciplex_cfg/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+project: sciplex_cfg
+program: experiments/train_zarr.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_nn_displacement_corr
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - datasets=zarr_sciplex
+  - selected_datasets=[sciplex]
+  - ${args_no_hyphens}
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # ── swept: CFG training param (null-drop probability) ───────────────────────
+  model.condition_dropout_prob:
+    value: 0.15        # 0.0 = no CFG capability (baseline); >0 = CFG-trainable
+
+  # ── fixed ───────────────────────────────────────────────────────────────────
+  embedding:
+    value: AE_128                     # sciplex3_AE_128.zarr + dec_AE_128 recon decoder
+  ablation.mode:
+    value: prophet
+  model.conditioning_key:
+    value: adaln_zero
+  model.hidden_dims:
+    value: [256, 256, 256]
+  model.decoder_dims:
+    value: [256, 256, 256]           # adaln_zero requires decoder_dims[-1]==hidden_dims[-1]
+  model.condition_embedding_dim:
+    value: 256
+  model.condition_encoder.cond_output_dropout:
+    value: 0.2
+  # adaln_zero: rebalance time vs condition in the modulation (recommended)
+  model.layer_norm_before_concatenation:
+    value: false
+  model.probability_path_kwargs.constant_noise:
+    value: 0.1
+  match_fn.epsilon:
+    value: 1.0
+  training.peak_lr:
+    value: 1.0e-4
+  training.batch_size:
+    value: 512
+  training.warmup_iterations:
+    value: 5000
+  training.num_iterations:
+    value: 2000000
+  training.valid_freq:
+    value: 200000
+    

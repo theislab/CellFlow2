@@ -85,7 +85,10 @@ class CellFlowTrainer:
         import jax
 
         base_w = float(self.predict_kwargs.get("guidance_scale", 1.0))
-        ws = self.guidance_scales if self.guidance_scales else [base_w]
+        # Only sweep guidance scales when the model is CFG-enabled; otherwise every w returns
+        # the same conditional velocity, so collapse to a single (baseline) pass.
+        cfg_on = getattr(self.solver, "cfg_enabled", False)
+        ws = self.guidance_scales if (self.guidance_scales and cfg_on) else [base_w]
 
         valid_source_data: dict[str, dict[str, ArrayLike]] = {}
         valid_true_data: dict[str, dict[str, ArrayLike]] = {}

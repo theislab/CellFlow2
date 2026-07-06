@@ -355,6 +355,9 @@ def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = Non
     so every w can be plotted; no best-w is selected.
     """
     base_pk, ws, base_w = _test_guidance_plan(predict_kwargs)
+    # skip the w-sweep for non-CFG models: every w gives the same conditional prediction.
+    if not getattr(solver, "cfg_enabled", False):
+        ws = [base_w]
     keys = list(ValMetricsLogger.METRICS)
 
     # sample each dataset ONCE so all w are compared on the same cells/conditions

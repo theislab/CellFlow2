@@ -176,23 +176,44 @@ def make_diagnostic_samplers(data: dict, n_conditions: int = 100, transform=None
 
 
 def full_diagnostics(solver, split_samplers: dict, output_dir, name: str = "model",
-                     wandb_run=None, max_cells: int = 2000, seed: int = 0):
-    """Predict each (split, dataset) subsample ONCE → combined per-condition table
-    (split + dataset columns) + plots coloured by split. split_samplers from
-    make_diagnostic_samplers (or pass your existing val/test samplers under those keys)."""
+                     wandb_run=None, max_cells: int = 2000, seed: int = 0,
+                     guidance_scales=None):
+    """Predict each (split, dataset) subsample ONCE PER guidance weight → combined
+    per-condition table (w + split + dataset columns) + plots coloured by split, one
+    set per w, plus a guidance-sweep summary curve (metric vs w, line per split).
+
+    ``guidance_scales`` is the list of CFG weights to evaluate (defaults to ``[1.0]`` =
+    plain conditional). Every (split, dataset) is sampled ONCE and reused across all w so
+    the curves are comparable. split_samplers from make_diagnostic_samplers.
+    """
     import jax
+    from functools import partial
 
     output_dir = Path(output_dir)
-    frames = []
+    ws = [float(w) for w in guidance_scales] if guidance_scales else [1.0]
+    # non-CFG model → every w is identical; collapse to a single conditional pass.
+    if not getattr(solver, "cfg_enabled", False):
+        ws = [1.0]
+
+    # sample each (split, dataset) ONCE so every w is compared on the same cells/conditions
+    sampled: dict = {}
     for split, samplers in split_samplers.items():
         for ds, sampler in samplers.items():
             batch = sampler.sample(mode="on_train_end")
-            src, cond, true = batch["source"], batch["condition"], batch["target"]
-            pred = jax.tree.map(solver.predict, src, cond)          # one predict pass
+            sampled[(split, ds)] = (batch["source"], batch["condition"], batch["target"])
+
+    if len(ws) > 1:
+        print(f"  [diagnostics] classifier-free guidance sweep over w = {ws}")
+
+    frames = []
+    for w in ws:
+        for (split, ds), (src, cond, true) in sampled.items():
+            pred = jax.tree.map(partial(solver.predict, guidance_scale=w), src, cond)
             df = condition_diagnostics(src, true, pred, max_cells=max_cells, seed=seed)
             if not df.empty:
                 df.insert(0, "dataset", ds)
                 df.insert(0, "split", split)
+                df.insert(0, "w", w)
                 frames.append(df)
 
     alldf = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -202,23 +223,49 @@ def full_diagnostics(solver, split_samplers: dict, output_dir, name: str = "mode
 
     csv = output_dir / f"{name}_diagnostics.csv"
     alldf.to_csv(csv, index=False)
-    figs = plot_diagnostics(alldf, output_dir, tag=name)
 
-    summary = {sp: scalar_diagnostics(g) for sp, g in alldf.groupby("split")}
+    # per-w scatter plots (coloured by split) + per-(w, split) scalar summary
+    all_figs: dict = {}
+    summary: dict = {}
+    for w in ws:
+        wdf = alldf[alldf["w"] == w]
+        if wdf.empty:
+            continue
+        w_tag = f"w{w:g}"
+        all_figs[w] = plot_diagnostics(wdf, output_dir, tag=f"{name}_{w_tag}")
+        summary[w] = {sp: scalar_diagnostics(g) for sp, g in wdf.groupby("split")}
+
+    # guidance-sweep summary: metric vs w, one line per split (only meaningful for >1 w)
+    sweep_figs = plot_guidance_sweep(summary, output_dir, tag=name) if len(ws) > 1 else {}
+
     print(f"  diagnostics table → {csv}")
-    for sp, sc in summary.items():
-        print(f"  [{sp:5}] " + "  ".join(f"{k}={v:.3f}" for k, v in sc.items()))
+    for w in ws:
+        for sp, sc in summary.get(w, {}).items():
+            print(f"  [w={w:g} {sp:5}] " + "  ".join(f"{k}={v:.3f}" for k, v in sc.items()))
 
     if wandb_run is not None:
         import wandb
-        log = {}
-        for sp, sc in summary.items():
-            log.update({f"{sp}_{k}": v for k, v in sc.items()})          # per-split scalars
-        log.update({f"diagnostics/{nm}": wandb.Image(fig) for nm, fig in figs.items()})  # the plots
-        log["diagnostics/table"] = wandb.Table(dataframe=alldf)          # interactive per-condition table
-        wandb_run.log(log)                                              # single call → all at one step
+        base_w = 1.0 if 1.0 in summary else ws[0]
+        log: dict = {}
+        for w in ws:
+            for sp, sc in summary.get(w, {}).items():
+                log.update({f"{sp}_{k}__w{w:g}": v for k, v in sc.items()})   # per-split, per-w
+                if w == base_w:
+                    log.update({f"{sp}_{k}": v for k, v in sc.items()})       # baseline default keys
+            for nm, fig in all_figs.get(w, {}).items():
+                log[f"diagnostics/w{w:g}/{nm}"] = wandb.Image(fig)             # per-w scatter plots
+        for nm, fig in sweep_figs.items():
+            log[f"diagnostics/guidance_sweep/{nm}"] = wandb.Image(fig)         # metric-vs-w curves
+        log["diagnostics/table"] = wandb.Table(dataframe=alldf)
+        wandb_run.log(log)
 
-    return alldf, summary, figs
+    # close figures to bound matplotlib memory (one set per w + the sweep curves)
+    import matplotlib.pyplot as plt
+    for figs in list(all_figs.values()) + [sweep_figs]:
+        for fig in figs.values():
+            plt.close(fig)
+
+    return alldf, summary, all_figs
 
 
 # ── plots (coloured by split) ────────────────────────────────────────────────
@@ -273,5 +320,38 @@ def plot_diagnostics(df: pd.DataFrame, output_dir, tag: str = "diag", metric: st
         ax.set_title("strength vs error"); ax.legend(fontsize=8)
         fig.tight_layout(); fig.savefig(output_dir / f"{tag}_strength_vs_error.png", dpi=130)
         figs["strength_vs_error"] = fig
+
+    return figs
+
+
+# ── guidance-sweep summary (metric vs w, one line per split) ──────────────────
+def plot_guidance_sweep(summary: dict, output_dir, tag: str = "diag",
+                        metrics=("r_squared_mean", "gap_closure_mean", "effect_ratio_mean")) -> dict:
+    """One line plot per metric: x = guidance weight w, y = mean metric, a line per split.
+
+    ``summary`` is ``{w: {split: {metric: value}}}`` (from full_diagnostics). Shows how each
+    quality metric responds to the CFG weight so the best w is readable at a glance.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_dir)
+    ws = sorted(summary.keys())
+    splits = sorted({sp for w in ws for sp in summary[w]})
+    figs: dict = {}
+
+    for metric in metrics:
+        # only plot if at least one (w, split) reported this metric
+        if not any(metric in summary[w].get(sp, {}) for w in ws for sp in splits):
+            continue
+        fig, ax = plt.subplots(figsize=(5, 4))
+        for sp in splits:
+            ys = [summary[w].get(sp, {}).get(metric, np.nan) for w in ws]
+            ax.plot(ws, ys, marker="o", color=SPLIT_COLORS.get(sp, None), label=sp)
+        ax.set_xlabel("guidance weight  w"); ax.set_ylabel(metric)
+        ax.set_title(f"{metric} vs guidance weight"); ax.legend(fontsize=8)
+        fig.tight_layout(); fig.savefig(output_dir / f"{tag}_sweep_{metric}.png", dpi=130)
+        figs[metric] = fig
 
     return figs

@@ -306,6 +306,14 @@ class OTFlowMatching:
             return np.asarray(cond_mean), np.asarray(cond_logvar)
         return cond_mean, cond_logvar
 
+    @property
+    def cfg_enabled(self) -> bool:
+        """Classifier-free guidance is active only when the model was TRAINED with condition
+        dropout (``condition_dropout_prob > 0``); otherwise the unconditional field ``v_null``
+        was never learned and guidance is undefined. Defaults off, so a model trained without
+        CFG runs the original conditional-only path (no ``v_null`` computation)."""
+        return float(getattr(self.vf, "condition_dropout_prob", 0.0)) > 0.0
+
     def _get_predict_fn(self, kwargs_frozen: frozen_dict.FrozenDict) -> Callable:  # type: ignore[type-arg]
         """Build (and cache) the jitted predict fn for a given set of diffeqsolve kwargs.
 
@@ -318,22 +326,35 @@ class OTFlowMatching:
         kwargs = dict(kwargs_frozen)
         # classifier-free guidance scale (not a diffrax arg → pop it). w=1 → plain conditional.
         guidance_scale = float(kwargs.pop("guidance_scale", 1.0))
-        if guidance_scale != 1.0:
+        # Guidance (v_null path) only runs when CFG is enabled AND a non-trivial w is requested.
+        # When CFG is disabled we keep the ORIGINAL conditional-only code — v_null is never
+        # computed — regardless of any guidance_scale passed in.
+        apply_guidance = self.cfg_enabled and guidance_scale != 1.0
+        if guidance_scale != 1.0 and not self.cfg_enabled:
+            print(f"[predict] guidance_scale (w) = {guidance_scale} IGNORED — model was not trained "
+                  f"with CFG (condition_dropout_prob = 0); using plain conditional v_cond.", flush=True)
+        elif apply_guidance:
             # fires once per unique predict-config (this fn is cached), not per predict call
             print(f"[predict] classifier-free guidance ON — guidance_scale (w) = {guidance_scale}", flush=True)
 
-        def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
-            params, condition, encoder_noise = args
-            v_cond = self.vf_state_inference.apply_fn(
-                {"params": params}, t, x, condition, encoder_noise, train=False
-            )[0]
-            if guidance_scale == 1.0:
-                return v_cond
-            # v = v_null + w·(v_cond − v_null): amplify the condition-specific velocity.
-            v_null = self.vf_state_inference.apply_fn(
-                {"params": params}, t, x, condition, encoder_noise, train=False, force_uncond=True
-            )[0]
-            return v_null + guidance_scale * (v_cond - v_null)
+        if not apply_guidance:
+            # original path: conditional velocity only, no v_null.
+            def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
+                params, condition, encoder_noise = args
+                return self.vf_state_inference.apply_fn(
+                    {"params": params}, t, x, condition, encoder_noise, train=False
+                )[0]
+        else:
+            def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
+                params, condition, encoder_noise = args
+                v_cond = self.vf_state_inference.apply_fn(
+                    {"params": params}, t, x, condition, encoder_noise, train=False
+                )[0]
+                # v = v_null + w·(v_cond − v_null): amplify the condition-specific velocity.
+                v_null = self.vf_state_inference.apply_fn(
+                    {"params": params}, t, x, condition, encoder_noise, train=False, force_uncond=True
+                )[0]
+                return v_null + guidance_scale * (v_cond - v_null)
 
         def solve_ode(
             params: Any, x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray

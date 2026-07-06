@@ -9,4 +9,4 @@ predict_kwargs:
   # graphing/checkpointing. Set to null (or a single-element list) to disable the sweep. Costs one
   # extra ODE solve over the val set per extra w. Only meaningful for a model trained with
   # condition_dropout_prob > 0 (so v_null is learned); w=1.0 is always the safe baseline.
-  guidance_scales: [1.0, 1.05, 1.1, 1.2]
+  guidance_scales: [1.0, 1.5]

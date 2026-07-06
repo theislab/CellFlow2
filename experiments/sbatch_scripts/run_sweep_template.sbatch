@@ -18,9 +18,20 @@ CONTAINER_NAME="jax_container_${SLURM_ARRAY_TASK_ID}"
 rm -rf /localscratch/karthik.viswanathan/enroot/data/${CONTAINER_NAME}/
 mkdir -p /lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/logs
 cd /lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/
+
+# --- DNS fix: some compute nodes hand the container a localhost-only resolver
+# ([::1]:53 / systemd-resolved stub) that enroot cannot reach, so `wandb agent`
+# and wandb online uploads fail to resolve api.wandb.ai and retry forever (the run
+# hangs at finish). Pin the site nameservers into the container so DNS works on any
+# node. Verify with: getent hosts api.wandb.ai
+WANDB_RESOLV="/localscratch/karthik.viswanathan/resolv.conf.wandb"
+mkdir -p /localscratch/karthik.viswanathan
+printf 'search scidom.de helmholtz-muenchen.de helmholtz-munich.de\nnameserver 146.107.8.88\nnameserver 146.107.1.88\n' > "$WANDB_RESOLV"
+
 enroot create --name ${CONTAINER_NAME} jax_container.sqsh
 enroot start --rw \
     --mount /lustre/groups/ml01/workspace/karthik.viswanathan/pancellflow/:/storage/pancellflow \
+    --mount ${WANDB_RESOLV}:/etc/resolv.conf \
     --env WANDB_API_KEY=$WANDB_API_KEY \
     ${CONTAINER_NAME} \
     bash -c "pip3 install hydra-core && cd /storage/pancellflow/CellFlow2 && wandb agent <your_sweep_id>"

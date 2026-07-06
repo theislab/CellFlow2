@@ -1,0 +1,12 @@
+# @package _global_
+# AE_128: 128-dim autoencoder latent (obsm["AE_128"] in sciplex3_with_emb.h5ad).
+# Gene-space recon metrics use dec_AE_128 (the AE's decoder half, decode: 128 -> 2000
+# genes), converted from flax to orbax by flax_to_orbax_ae128.py. h5ad_path and the
+# other recon.* keys are inherited from training/default.yaml (sciplex3_with_emb.h5ad,
+# 2000 genes, control latent read from obsm["AE_128"]). The velocity field auto-detects
+# the 128-dim input from the sample batch, so no hidden/decoder dim changes are needed.
+datasets:
+  sciplex:
+    path: /storage/pancellflow/sciplex3_AE_128.zarr
+recon:
+  decoder_path: /storage/pancellflow/recon_weights/dec_AE_128
