@@ -16,7 +16,7 @@ import jax.numpy as jnp  # noqa: E402
 
 from scaleflow.treesampler import TreeSampler, perturbation_scheme  # noqa: E402
 
-G, EMB = 8, 4
+G, EMB, PCA_D = 8, 4, 5
 DRUG_SHIFT = {"control": np.zeros(G), "d1": np.eye(G)[0] * 4.0, "d2": np.eye(G)[1] * 4.0}
 NOISE_STD = 0.4
 DRUG_EMB = {"control": np.zeros(EMB), "d1": np.eye(EMB)[0], "d2": np.eye(EMB)[1]}
@@ -35,6 +35,7 @@ def _toy_adata(seed: int = 0) -> ad.AnnData:
     for c in ("cell_line", "drug"):
         obs[c] = obs[c].astype("category")
     adata = ad.AnnData(X=np.vstack(blocks), obs=obs)
+    adata.obsm["pca"] = adata.X[:, :PCA_D].copy()  # a lower-dim rep carrying the same conditional signal
     adata.uns["drug_emb"] = DRUG_EMB
     return adata
 
@@ -83,7 +84,9 @@ def _mlp(params, h):
 def _train_losses(sampler, steps: int = 400) -> list[float]:
     """Minimal rectified-flow / conditional-FM training over the sampler's batches. Returns losses."""
     key = jax.random.PRNGKey(0)
-    params = _mlp_init(key, [G + 1 + EMB, 64, 64, G])
+    b0 = next(sampler)  # peek to size the net to the streamed rep (X dim or obsm dim)
+    d, emb = b0["target"].shape[1], b0["condition"].shape[1]
+    params = _mlp_init(key, [d + 1 + emb, 64, 64, d])
     opt = optax.adam(1e-3)
     state = opt.init(params)
 
@@ -141,3 +144,16 @@ def test_flow_matching_training_datasetcollection(tmp_path):
     losses = _train_losses(sampler)
     assert all(np.isfinite(losses))
     assert np.mean(losses[-30:]) < 0.5 * np.mean(losses[:30])  # out-of-core path trains too
+
+
+def test_obsm_streaming_from_collection(tmp_path):
+    """The streamed rep is an OBSM key (not X), read from an on-disk DatasetCollection."""
+    coll = _write_collection(_toy_adata(), tmp_path)
+    scheme = perturbation_scheme(coll, context=["cell_line"], perturbation=["drug"],
+                                 control_values={"drug": "control"}, key="obsm/pca", n_rows_per_leaf=64, seed=0)
+    cols = scheme.nodes["pert"].cols
+    sampler = TreeSampler(scheme, condition_fn=lambda leaf: DRUG_EMB[leaf[cols.index("drug")]])
+    b = next(sampler)
+    assert b["target"].shape[1] == PCA_D and b["source"].shape[1] == PCA_D  # streamed obsm rep, not X (=8)
+    losses = _train_losses(sampler)
+    assert all(np.isfinite(losses)) and np.mean(losses[-30:]) < 0.5 * np.mean(losses[:30])

@@ -112,16 +112,19 @@ class Scheme:
 
 
 # ───────────────────────────────────────────────────────────────── helpers
-def _resolve(adata: ad.AnnData, loc: str) -> np.ndarray:
+def _key_backings(source: Container, loc: str) -> list:
+    """The array(s) backing rep `loc` for a source, ready to feed one annbatch Loader.add_datasets.
+
+    annbatch's add_datasets concatenates on the obs axis and needs equal feature dims, so X and obsm
+    cannot share a loader — instead each key gets its own loader over its own array(s). For a
+    DatasetCollection the per-dataset arrays are gathered in order (matching the global row layout).
+    """
     if loc == "X":
-        x = adata.X
-    elif loc.startswith("obsm/"):
-        x = adata.obsm[loc[len("obsm/") :]]
-    elif loc.startswith("layers/"):
-        x = adata.layers[loc[len("layers/") :]]
-    else:
-        raise ValueError(f"unknown rep location {loc!r}")
-    return np.asarray(x.todense() if hasattr(x, "todense") else x, dtype=np.float32)
+        return [source.X] if isinstance(source, ad.AnnData) else [g["X"] for g in source]
+    field, sub = loc.split("/", 1)  # "obsm/X_pca" | "layers/log1p"
+    if isinstance(source, ad.AnnData):
+        return [getattr(source, field)[sub]]
+    return [g[field][sub] for g in source]  # DatasetCollection: one zarr array per dataset
 
 
 def _leaf_codes(obs: pd.DataFrame, cols: Sequence[str]) -> tuple[np.ndarray, list[tuple]]:
@@ -164,14 +167,13 @@ class _ExplicitRequestSampler(Sampler):
 
 
 def _read_rows(source: Container, loc: str, rows: np.ndarray) -> np.ndarray:
-    """Read `rows` of representation `loc` into memory. AnnData → index; DatasetCollection → annbatch."""
+    """Read `rows` of representation `loc` into memory via one annbatch loader over that key's array(s).
+
+    Uniform across AnnData / DatasetCollection and across X / obsm / layers (via add_datasets).
+    """
     rows = np.asarray(rows, dtype=np.int64)
-    if isinstance(source, ad.AnnData):
-        return _resolve(source, loc)[rows]
-    if loc != "X":  # collections stream X only; obsm/layers reads are the documented gap
-        raise NotImplementedError("DatasetCollection reads support loc='X' only (obsm/layers not wired).")
     loader = Loader(batch_sampler=_ExplicitRequestSampler(rows), return_index=False,
-                    to_torch=False, preload_to_gpu=False).use_collection(source)
+                    to_torch=False, preload_to_gpu=False).add_datasets(_key_backings(source, loc))
     x = next(iter(loader))["X"]
     return np.asarray(x.todense() if hasattr(x, "todense") else x, dtype=np.float32)
 
@@ -216,15 +218,10 @@ class TreeSampler:
             rng=np.random.default_rng(self.s.seed),
         )
         loader = Loader(batch_sampler=sampler, return_index=True, to_torch=False, preload_to_gpu=False)
-        # annbatch streams the root rep as X: add_adata (in-memory) or use_collection (on-disk)
-        if isinstance(src, ad.AnnData):
-            stream = src if node.keys[0] == "X" else ad.AnnData(X=_resolve(src, node.keys[0]), obs=src.obs)
-            self._root_loader = loader.add_adata(stream)
-        else:  # DatasetCollection
-            if node.keys[0] != "X":
-                raise NotImplementedError("root rep must be 'X' for a DatasetCollection (obsm streaming not wired).")
-            self._root_loader = loader.use_collection(src)
+        # stream the primary key (keys[0]); one loader over that key's array(s) — X or obsm alike.
+        self._root_loader = loader.add_datasets(_key_backings(src, node.keys[0]))
         self._root_iter = iter(self._root_loader)
+        self._root_src = src
 
     def _build_child_caches(self) -> None:
         """Bound children: cache their positive-weight cells grouped by the shared-column value."""
@@ -255,12 +252,16 @@ class TreeSampler:
             batch = next(self._root_iter)
 
         st = self._st[self.s.root]
-        row0 = int(np.asarray(batch["index"])[0])
-        leaf = st["leaves"][int(st["codes"][row0])]  # which condition this class-coherent batch is
-        target = np.asarray(batch["X"], dtype=np.float32)
+        node = st["node"]
+        idx = np.asarray(batch["index"])
+        leaf = st["leaves"][int(st["codes"][int(idx[0])])]  # which condition this class-coherent batch is
+        target = np.asarray(batch["X"], dtype=np.float32)  # the primary key (keys[0]) — streamed
         B = target.shape[0]
 
-        out: dict[str, np.ndarray] = {"target": target}
+        out: dict = {"target": target}
+        if len(node.keys) > 1:  # extra keys (e.g. obsm reps) via companion reads by the same rows
+            out["target_reps"] = {node.keys[0]: target,
+                                  **{k: _read_rows(self._root_src, k, idx) for k in node.keys[1:]}}
         if self._cond_fn is not None:
             cond = np.asarray(self._cond_fn(leaf), dtype=np.float32)
             out["condition"] = np.broadcast_to(cond, (B, cond.shape[-1])).copy()
