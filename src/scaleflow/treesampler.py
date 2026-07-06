@@ -19,6 +19,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 from annbatch import DatasetCollection, Loader
+from annbatch.abc import Sampler
 from annbatch.samplers import ClassSampler
 
 Container = ad.AnnData | DatasetCollection  # a cell source: in-memory AnnData or on-disk DatasetCollection
@@ -131,6 +132,50 @@ def _leaf_codes(obs: pd.DataFrame, cols: Sequence[str]) -> tuple[np.ndarray, lis
     return np.array([code_of[t] for t in tuples], dtype=np.int64), leaves
 
 
+def _obs(source: Container, cols: Sequence[str]) -> pd.DataFrame:
+    """obs columns from either container (AnnData attr vs DatasetCollection reader) — no cell matrices."""
+    if isinstance(source, ad.AnnData):
+        return source.obs[list(cols)]
+    return source.obs(columns=list(cols))  # DatasetCollection
+
+
+class _ExplicitRequestSampler(Sampler):
+    """Yields one annbatch request for exactly `rows` — used to read specific rows from a collection."""
+
+    def __init__(self, rows: np.ndarray) -> None:
+        self._rows = np.asarray(rows, dtype=np.int64)
+
+    @property
+    def batch_size(self) -> int | None:
+        return None
+
+    @property
+    def shuffle(self) -> bool:
+        return False
+
+    def n_batches(self, n_obs: int) -> int:  # noqa: ARG002
+        return 1
+
+    def validate(self, n_obs: int) -> None:  # noqa: ARG002
+        return None
+
+    def _sample(self, n_obs: int):  # noqa: ARG002
+        yield {"requests": self._rows, "splits": [np.arange(len(self._rows))]}
+
+
+def _read_rows(source: Container, loc: str, rows: np.ndarray) -> np.ndarray:
+    """Read `rows` of representation `loc` into memory. AnnData → index; DatasetCollection → annbatch."""
+    rows = np.asarray(rows, dtype=np.int64)
+    if isinstance(source, ad.AnnData):
+        return _resolve(source, loc)[rows]
+    if loc != "X":  # collections stream X only; obsm/layers reads are the documented gap
+        raise NotImplementedError("DatasetCollection reads support loc='X' only (obsm/layers not wired).")
+    loader = Loader(batch_sampler=_ExplicitRequestSampler(rows), return_index=False,
+                    to_torch=False, preload_to_gpu=False).use_collection(source)
+    x = next(iter(loader))["X"]
+    return np.asarray(x.todense() if hasattr(x, "todense") else x, dtype=np.float32)
+
+
 # ───────────────────────────────────────────────────────────────── sampler
 class TreeSampler:
     """Yields ``{"source", "target", "condition"}`` batches; the root streams through annbatch."""
@@ -146,7 +191,7 @@ class TreeSampler:
         # per-node leaf partition + weights (obs only — no cell matrices)
         self._st: dict[str, dict] = {}
         for name, node in scheme.nodes.items():
-            obs = scheme.sources[node.source].obs
+            obs = _obs(scheme.sources[node.source], node.cols)
             codes, leaves = _leaf_codes(obs, node.cols)
             self._st[name] = {"node": node, "codes": codes, "leaves": leaves, "w": _weight_vector(node.weights, leaves)}
 
@@ -156,7 +201,7 @@ class TreeSampler:
     def _build_root_loader(self) -> None:
         st = self._st[self.s.root]
         node = st["node"]
-        adata = self.s.sources[node.source]
+        src = self.s.sources[node.source]
         B, K = self.s.n_rows_per_leaf, len(st["leaves"])
         # classes = per-cell leaf id; class_weights = the node's weights (0 ⇒ excluded ⇒ selection)
         classes = pd.Categorical([str(c) for c in st["codes"]], categories=[str(i) for i in range(K)])
@@ -170,11 +215,15 @@ class TreeSampler:
             drop_last=True,
             rng=np.random.default_rng(self.s.seed),
         )
-        # stream the root node's representation as X
-        rep = _resolve(adata, node.keys[0])
-        stream_adata = adata if node.keys[0] == "X" else ad.AnnData(X=rep, obs=adata.obs)
         loader = Loader(batch_sampler=sampler, return_index=True, to_torch=False, preload_to_gpu=False)
-        self._root_loader = loader.add_adata(stream_adata)
+        # annbatch streams the root rep as X: add_adata (in-memory) or use_collection (on-disk)
+        if isinstance(src, ad.AnnData):
+            stream = src if node.keys[0] == "X" else ad.AnnData(X=_resolve(src, node.keys[0]), obs=src.obs)
+            self._root_loader = loader.add_adata(stream)
+        else:  # DatasetCollection
+            if node.keys[0] != "X":
+                raise NotImplementedError("root rep must be 'X' for a DatasetCollection (obsm streaming not wired).")
+            self._root_loader = loader.use_collection(src)
         self._root_iter = iter(self._root_loader)
 
     def _build_child_caches(self) -> None:
@@ -183,8 +232,7 @@ class TreeSampler:
         for b in self._children.get(self.s.root, []):
             st = self._st[b.child]
             node = st["node"]
-            adata = self.s.sources[node.source]
-            rep = _resolve(adata, node.keys[0])
+            src = self.s.sources[node.source]
             positive = {int(i) for i in np.flatnonzero(st["w"] > 0)}
             rows: dict[tuple, list[int]] = {}
             for cell, code in enumerate(st["codes"]):
@@ -192,11 +240,9 @@ class TreeSampler:
                     leaf = st["leaves"][code]
                     key = tuple(leaf[node.cols.index(c)] for c in b.common)
                     rows.setdefault(key, []).append(cell)
-            self._caches[b.child] = {
-                "bind": b,
-                "rep": rep,
-                "rows": {k: np.asarray(v, dtype=np.int64) for k, v in rows.items()},
-            }
+            # read ONLY the (few, reused) positive-weight cells into memory, grouped by shared value
+            cells = {k: _read_rows(src, node.keys[0], np.asarray(v, dtype=np.int64)) for k, v in rows.items()}
+            self._caches[b.child] = {"bind": b, "cells": cells}
 
     def __iter__(self) -> "TreeSampler":
         return self
@@ -222,17 +268,16 @@ class TreeSampler:
         for b in self._children.get(self.s.root, []):
             c = self._caches[b.child]
             key = tuple(leaf[st["node"].cols.index(col)] for col in b.common)
-            rows = c["rows"].get(key)
-            if rows is None or len(rows) == 0:  # empty match → unconditional fallback
-                rows = np.concatenate(list(c["rows"].values()))
-            sel = rows[self._rng.integers(0, len(rows), size=B)]  # with replacement
-            out["source"] = c["rep"][sel]
+            pool = c["cells"].get(key)
+            if pool is None or len(pool) == 0:  # empty match → unconditional fallback
+                pool = np.concatenate(list(c["cells"].values()))
+            out["source"] = pool[self._rng.integers(0, len(pool), size=B)]  # with replacement
         return out
 
 
 # ───────────────────────────────────────────────────────────────── factory (the "above layer")
 def perturbation_scheme(
-    adata: ad.AnnData,
+    source: Container,
     *,
     context: Sequence[str],
     perturbation: Sequence[str],
@@ -243,10 +288,11 @@ def perturbation_scheme(
 ) -> Scheme:
     """Fill a perturbation Scheme from the obs table: root = perturbed combos, child = control combos.
 
-    No `select` — control vs perturbed is encoded purely by which combinations carry weight.
+    ``source`` is an in-memory AnnData or an on-disk DatasetCollection. No `select` — control vs
+    perturbed is encoded purely by which combinations carry weight.
     """
     cols = (*context, *perturbation)
-    combos = [tuple(r) for r in adata.obs[list(cols)].drop_duplicates().to_numpy()]
+    combos = [tuple(r) for r in _obs(source, cols).drop_duplicates().to_numpy()]
 
     def is_control(combo: tuple) -> bool:
         return all(combo[cols.index(c)] == v for c, v in control_values.items())
@@ -254,7 +300,7 @@ def perturbation_scheme(
     pert = [c for c in combos if not is_control(c)]
     ctrl = [c for c in combos if is_control(c)]
     return Scheme(
-        sources={"data": adata},
+        sources={"data": source},
         nodes={
             "pert": Node("data", cols, (key,), uniform(pert)),   # non-control combos weighted; rest excluded
             "ctrl": Node("data", cols, (key,), uniform(ctrl)),   # control combos weighted; rest excluded

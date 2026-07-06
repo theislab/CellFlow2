@@ -80,13 +80,8 @@ def _mlp(params, h):
     return h @ wl + bl
 
 
-def test_flow_matching_training_decreases_loss():
-    adata = _toy_adata()
-    scheme = perturbation_scheme(adata, context=["cell_line"], perturbation=["drug"],
-                                 control_values={"drug": "control"}, n_rows_per_leaf=64, seed=0)
-    cols = scheme.nodes["pert"].cols
-    sampler = TreeSampler(scheme, condition_fn=lambda leaf: DRUG_EMB[leaf[cols.index("drug")]])
-
+def _train_losses(sampler, steps: int = 400) -> list[float]:
+    """Minimal rectified-flow / conditional-FM training over the sampler's batches. Returns losses."""
     key = jax.random.PRNGKey(0)
     params = _mlp_init(key, [G + 1 + EMB, 64, 64, G])
     opt = optax.adam(1e-3)
@@ -96,7 +91,7 @@ def test_flow_matching_training_decreases_loss():
         tt = jax.random.uniform(k, (s.shape[0], 1))
         xt = (1 - tt) * s + tt * t
         v = _mlp(params, jnp.concatenate([xt, tt, c], axis=1))
-        return jnp.mean((v - (t - s)) ** 2)  # rectified-flow / conditional FM target
+        return jnp.mean((v - (t - s)) ** 2)
 
     @jax.jit
     def step(params, state, s, t, c, k):
@@ -105,12 +100,44 @@ def test_flow_matching_training_decreases_loss():
         return optax.apply_updates(params, updates), state, loss
 
     losses = []
-    for i in range(400):
+    for _ in range(steps):
         b = next(sampler)
         key, k = jax.random.split(key)
         params, state, loss = step(params, state, jnp.asarray(b["source"]), jnp.asarray(b["target"]),
                                     jnp.asarray(b["condition"]), k)
         losses.append(float(loss))
+    return losses
 
+
+def _write_collection(adata, tmp_path):
+    ad.settings.zarr_write_format = 3  # annbatch sharding needs zarr v3
+    from annbatch import DatasetCollection
+
+    ap, cp = tmp_path / "a.zarr", tmp_path / "coll.zarr"
+    adata.write_zarr(str(ap))
+    DatasetCollection(str(cp), mode="a").add_adatas(adata_paths=[str(ap)], shuffle=False)  # preserve row order
+    return DatasetCollection(str(cp), mode="r")
+
+
+def test_flow_matching_training_decreases_loss():
+    """In-memory AnnData source."""
+    adata = _toy_adata()
+    scheme = perturbation_scheme(adata, context=["cell_line"], perturbation=["drug"],
+                                 control_values={"drug": "control"}, n_rows_per_leaf=64, seed=0)
+    cols = scheme.nodes["pert"].cols
+    sampler = TreeSampler(scheme, condition_fn=lambda leaf: DRUG_EMB[leaf[cols.index("drug")]])
+    losses = _train_losses(sampler)
     assert all(np.isfinite(losses))
     assert np.mean(losses[-30:]) < 0.5 * np.mean(losses[:30])  # learned the conditional velocity
+
+
+def test_flow_matching_training_datasetcollection(tmp_path):
+    """Same end-to-end training, but the source is an ON-DISK annbatch DatasetCollection."""
+    coll = _write_collection(_toy_adata(), tmp_path)
+    scheme = perturbation_scheme(coll, context=["cell_line"], perturbation=["drug"],
+                                 control_values={"drug": "control"}, n_rows_per_leaf=64, seed=0)
+    cols = scheme.nodes["pert"].cols
+    sampler = TreeSampler(scheme, condition_fn=lambda leaf: DRUG_EMB[leaf[cols.index("drug")]])
+    losses = _train_losses(sampler)
+    assert all(np.isfinite(losses))
+    assert np.mean(losses[-30:]) < 0.5 * np.mean(losses[:30])  # out-of-core path trains too
