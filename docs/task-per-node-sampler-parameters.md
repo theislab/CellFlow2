@@ -82,3 +82,39 @@ data** (is it sorted? does every sampled leaf have `≥ chunk_size` cells? divis
 principles from the design discussion: no hidden settings; one source of truth; conveniences in
 constructors/factories, not in the schema. Design the per-node parameter API + validation, then confirm
 the shape with the user before building it out.
+
+## Resolution — what was built (2026-07-06)
+
+Design settled with the user and implemented in `src/scaleflow/dag_class_loader.py` — the loader class
+is **`DAGClassLoader`** (21 tests green: unit in `tests/test_dag_class_loader.py`, end-to-end training in
+`tests/test_dag_class_loader_train.py`; shared toy data in `tests/_toydata.py`). The hardcoded
+`ClassSampler` block is gone; every node now streams through its own **`ScheduledClassSampler`** — an
+annbatch `ClassSampler` subclass whose per-batch category sequence is *supplied* (`set_schedule`)
+instead of drawn internally. This keeps annbatch's **chunk math** (contiguous `chunk_size` reads, RLE,
+slice sampling — the throughput win) while letting `DAGClassLoader` own *which* category each batch
+draws. Only `_iter_requests` is copied from annbatch, with
+one line changed to source `group_classes` from a `_group_positions(n_groups)` hook → **candidate to
+upstream** (if annbatch adds that hook, the subclass collapses to a one-method override).
+
+Decisions on the open questions:
+1. **Per-node vs derived** → the only genuine per-node knob is **`Node.chunk_size`** (`None`⇒1); every
+   other param is a principled *derivation*, not magic. `chunk_size>1` is validated (run-length rule,
+   wrapped with node context) so opting into throughput is explicit, not hidden.
+2. **`batch_size` location** → **scheme-level** (`Scheme.n_rows_per_leaf`): a yielded batch has one row
+   count (target rows == source rows == B), so it can't vary per node.
+3. **`num_samples`/epoch** → **`Scheme.steps_per_pass`** (default 512); `num_samples = steps_per_pass *
+   batch_size`, `drop_last=True`, loader restarts each pass → effectively infinite with a fixed,
+   reproducible restart cadence. `preload_nchunks = batch_size // chunk_size` (one batch per window).
+4. **Reproducibility** → per-node RNG spawned from one `SeedSequence(seed)` (one stream per node, by
+   sorted name); fixes the old shared-seed correlation bug.
+5. **Sortedness** → **validate only** (run-length rule at build). Producing a sorted source stays a
+   separate concern (not in the schema).
+
+Key constraint (validated): **`chunk_size` divides `batch_size`** ⇒ exactly one category per batch ⇒ a
+schedule is a length-`steps_per_pass` array of leaf codes, and root/child align batch-for-batch
+regardless of each node's own `chunk_size`. **The bind falls out for free**: the root schedule is drawn
+from the root's weights; each bound child's schedule is *derived* from the parent's (parent leaf →
+shared-column value → matching child leaf, child RNG for ties/fallback), so loaders zip with no per-step
+reconfiguration. `DAGClassLoader._start_pass()` draws + pushes all schedules, then rebuilds the iterators
+(order matters: `Loader.__iter__` re-reads `sampler.sample()`, so `set_schedule` must land before
+`iter(loader)`). Bound children are now streamed (their own loader) instead of the old in-memory cache.
