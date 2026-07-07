@@ -114,7 +114,30 @@ Key constraint (validated): **`chunk_size` divides `batch_size`** ⇒ exactly on
 schedule is a length-`steps_per_pass` array of leaf codes, and root/child align batch-for-batch
 regardless of each node's own `chunk_size`. **The bind falls out for free**: the root schedule is drawn
 from the root's weights; each bound child's schedule is *derived* from the parent's (parent leaf →
-shared-column value → matching child leaf, child RNG for ties/fallback), so loaders zip with no per-step
+shared-column value → matching child leaf, child RNG among ties), so loaders zip with no per-step
 reconfiguration. `DAGClassLoader._start_pass()` draws + pushes all schedules, then rebuilds the iterators
 (order matters: `Loader.__iter__` re-reads `sampler.sample()`, so `set_schedule` must land before
 `iter(loader)`). Bound children are now streamed (their own loader) instead of the old in-memory cache.
+
+Two follow-ups from the user (2026-07-06):
+- **Conditioning is required, no silent fallback.** A `Bind` with non-empty `common` whose value has no
+  positive-weight child leaf now **raises** (was: silently sampled the child unconditionally).
+  Unconditional child sampling is opt-in only via `Bind(..., common=())`. (Tests
+  `test_unmatched_context_raises` / `test_empty_common_is_unconditional`.)
+- **Bind-then-sub-sample extra child columns, ∝ weights.** When the child partitions on columns beyond
+  `common` (e.g. child cols `(a, x)` bound on `a`), `a` is fixed by the parent and `x` is drawn among the
+  matching child leaves **∝ the child weights** (was a bug: uniform, ignoring weights — now consistent
+  with the root). So `P(x|a)` is weight-controlled. (Test `test_bind_then_subsample_child_column`:
+  `A(a,b,c)` sample `(b,a)` → bind `B(a,x,y)` on `a` → sub-sample `x`; empirical `P(x|a)` matches.)
+- **Hierarchical sampling is expressible via weights.** Leaves are a *joint* partition, so "a ~ P(a)
+  then c ~ P(c|a)" is not a first-class API — the answer to give users is: set each leaf's weight to
+  `P(a)·P(c|a)`. Verified probabilistically (`test_hierarchical_weights_reproduce_conditional`:
+  empirical marginal ≈ P(a), conditional ≈ P(c|a)). Bind ordering is symmetric — bind on any column,
+  any `cols` order (`test_bind_on_second_col_a_then_b` / `test_bind_on_first_col_b_then_a`).
+
+Standalone no-cellflow end-to-end demos (single source; two-table A/B bind via a column) live in the
+session scratchpad `e2e_demos.py` — both train (loss halves) with a hand-rolled jax flow step.
+**Open design gap: `cond_fn`** is the least-principled part — an opaque root-only callable returning a
+flat vector; can't see bound-child covariates, isn't declarative, and doesn't emit the scaleflow
+`ConditionEncoder`'s `(n, max_combination_length, emb)` set-structured input. Designing a declarative
+condition spec is the natural next step.

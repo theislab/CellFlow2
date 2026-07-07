@@ -112,7 +112,9 @@ class Node:
 class Bind:
     parent: str
     child: str
-    common: tuple[str, ...]  # ⊆ parent.cols ∩ child.cols; child conditions on parent's values
+    common: tuple[str, ...]  # ⊆ parent.cols ∩ child.cols; child conditions on parent's values.
+    # A non-empty `common` is REQUIRED conditioning: an unmatched value raises (no silent fallback).
+    # Pass `common=()` to opt into unconditional sampling of the child explicitly.
 
 
 @dataclass(frozen=True)
@@ -362,18 +364,16 @@ class DAGClassLoader:
         for b in self._children.get(self.s.root, []):
             rst, cst = self._st[b.parent], self._st[b.child]
             rcols, ccols = rst["node"].cols, cst["node"].cols
-            # parent leaf code → shared-column value
+            # parent leaf code → shared-column value (empty tuple when common=() ⇒ unconditional bind)
             root_code_to_cv = {i: tuple(lf[rcols.index(c)] for c in b.common) for i, lf in enumerate(rst["leaves"])}
-            # shared-column value → positive-weight child leaf codes carrying it
-            common_to_child: dict[tuple, list[int]] = {}
+            # shared-column value → positive-weight child leaf codes carrying it (key () holds all when common=())
+            grouped: dict[tuple, list[int]] = {}
             for code, lf in enumerate(cst["leaves"]):
                 if cst["w"][code] > 0:
-                    common_to_child.setdefault(tuple(lf[ccols.index(c)] for c in b.common), []).append(code)
-            self._bindmap[b.child] = {
-                "root_code_to_cv": root_code_to_cv,
-                "common_to_child": common_to_child,
-                "positive_child_codes": np.flatnonzero(cst["w"] > 0).astype(np.int64),
-            }
+                    grouped.setdefault(tuple(lf[ccols.index(c)] for c in b.common), []).append(code)
+            common_to_child = {cv: np.asarray(codes, dtype=np.int64) for cv, codes in grouped.items()}
+            self._bindmap[b.child] = {"bind": b, "root_leaves": rst["leaves"], "child_w": cst["w"],
+                                      "root_code_to_cv": root_code_to_cv, "common_to_child": common_to_child}
 
     # ── per-pass scheduling ────────────────────────────────────────────────
     def _draw_root_schedule(self) -> np.ndarray:
@@ -383,15 +383,33 @@ class DAGClassLoader:
         return self._rngs[self.s.root].choice(pos, size=self._n_batches, p=w[pos] / w[pos].sum()).astype(np.int64)
 
     def _derive_child_schedule(self, child: str, root_sched: np.ndarray) -> np.ndarray:
-        """Map each root batch's category to a matching child leaf (child's RNG for ties/fallback)."""
+        """Map each root batch's category to a matching child leaf.
+
+        When several child leaves share the bound value — i.e. the child partitions on extra columns
+        beyond ``common`` (e.g. child cols ``(a, x)`` bound on ``a``) — one is drawn ∝ the child's leaf
+        weights, so ``P(child extra cols | common)`` is controlled by the child weights, exactly like
+        the root's ``P(leaf)``. Conditioning is required: an unmatched value raises (no silent
+        fallback); declare ``Bind(..., common=())`` for explicit unconditional sampling.
+        """
         m = self._bindmap[child]
+        b = m["bind"]
         rng = self._rngs[child]
+        cw = m["child_w"]
         out = np.empty(len(root_sched), dtype=np.int64)
         for j, rc in enumerate(root_sched):
-            cands = m["common_to_child"].get(m["root_code_to_cv"][int(rc)])
-            if not cands:  # no child leaf shares the parent's value → unconditional fallback
-                cands = m["positive_child_codes"]
-            out[j] = int(cands[0]) if len(cands) == 1 else int(rng.choice(cands))
+            cv = m["root_code_to_cv"][int(rc)]
+            codes = m["common_to_child"].get(cv)
+            if codes is None:  # no positive-weight child leaf carries this value — do NOT silently fall back
+                raise ValueError(
+                    f"bind {b.parent!r}→{b.child!r}: no positive-weight child leaf matches common "
+                    f"{b.common}={cv!r} (root leaf {m['root_leaves'][int(rc)]!r}). Add a child leaf for "
+                    f"it, or declare Bind(..., common=()) to sample {b.child!r} unconditionally."
+                )
+            if len(codes) == 1:
+                out[j] = int(codes[0])
+            else:  # sub-sample the extra child columns ∝ child weights (renormalized over matches)
+                w = cw[codes]
+                out[j] = int(rng.choice(codes, p=w / w.sum()))
         return out
 
     def _start_pass(self) -> None:
