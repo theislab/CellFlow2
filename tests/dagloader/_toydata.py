@@ -1,7 +1,9 @@
-"""Shared toy fixtures for the DAGClassLoader tests (no jax/optax — importable by unit + e2e tests).
+"""Shared toy fixtures for the dagloader tests (no jax/optax — importable by every test file here).
 
 Two cell lines × three drugs, one contiguous block per (cell_line, drug) combination, so the on-disk
-layout is already sorted by condition (each leaf is one run) — which is what ``chunk_size > 1`` needs.
+layout is already sorted by condition (each leaf is one run) — which is what ``chunk_size > 1`` reads
+efficiently. Embeddings for both covariates are provided so a condition can be a *combination* of a
+cell-line embedding and a drug embedding (the sc-flow-tools multi-covariate case).
 """
 
 from __future__ import annotations
@@ -10,10 +12,11 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 
-G, EMB, PCA_D = 8, 4, 5
+G, DRUG_D, CELL_D, PCA_D = 8, 4, 2, 5
 DRUG_SHIFT = {"control": np.zeros(G), "d1": np.eye(G)[0] * 4.0, "d2": np.eye(G)[1] * 4.0}
 NOISE_STD = 0.4
-DRUG_EMB = {"control": np.zeros(EMB), "d1": np.eye(EMB)[0], "d2": np.eye(EMB)[1]}
+DRUG_EMB = {"control": np.zeros(DRUG_D), "d1": np.eye(DRUG_D)[0], "d2": np.eye(DRUG_D)[1]}
+CELL_EMB = {"A": np.eye(CELL_D)[0], "B": np.eye(CELL_D)[1]}
 CELL_LINES = ["A", "B"]
 DRUGS = ["control", "d1", "d2"]
 N_PER_BLOCK = 60
@@ -55,3 +58,13 @@ def write_collection(adata: ad.AnnData, tmp_path):
     adata.write_zarr(str(ap))
     DatasetCollection(str(cp), mode="a").add_adatas(adata_paths=[str(ap)], shuffle=False)  # preserve row order
     return DatasetCollection(str(cp), mode="r")
+
+
+def drug_cond_fn(cols):
+    """Condition = drug embedding (single-covariate condition)."""
+    return lambda leaf: DRUG_EMB[leaf[cols.index("drug")]]
+
+
+def cell_drug_cond_fn(cols):
+    """Condition = [cell-line embedding ‖ drug embedding] (multi-covariate combination)."""
+    return lambda leaf: np.concatenate([CELL_EMB[leaf[cols.index("cell_line")]], DRUG_EMB[leaf[cols.index("drug")]]])

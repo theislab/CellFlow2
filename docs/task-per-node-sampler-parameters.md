@@ -85,36 +85,44 @@ the shape with the user before building it out.
 
 ## Resolution — what was built (2026-07-06)
 
-Design settled with the user and implemented in `src/scaleflow/dag_class_loader.py` — the loader class
-is **`DAGClassLoader`** (21 tests green: unit in `tests/test_dag_class_loader.py`, end-to-end training in
-`tests/test_dag_class_loader_train.py`; shared toy data in `tests/_toydata.py`). The hardcoded
+Design settled with the user and implemented in the **`src/scaleflow/dagloader/`** package (see its
+`README.md`) — the loader class is **`DAGClassLoader`** (27 tests green under `tests/dagloader/`,
+organized by case: `test_scheduled_sampler.py`, `test_sampling_schemes.py`, `test_cellflow_case.py`,
+`test_scflow_cases.py`, `test_train.py`; shared toy data in `tests/dagloader/_toydata.py`). The hardcoded
 `ClassSampler` block is gone; every node now streams through its own **`ScheduledClassSampler`** — an
 annbatch `ClassSampler` subclass whose per-batch category sequence is *supplied* (`set_schedule`)
-instead of drawn internally. This keeps annbatch's **chunk math** (contiguous `chunk_size` reads, RLE,
-slice sampling — the throughput win) while letting `DAGClassLoader` own *which* category each batch
-draws. Only `_iter_requests` is copied from annbatch, with
-one line changed to source `group_classes` from a `_group_positions(n_groups)` hook → **candidate to
-upstream** (if annbatch adds that hook, the subclass collapses to a one-method override).
+instead of drawn internally, letting `DAGClassLoader` own *which* category each batch draws.
+(Superseded 2026-07-07: it no longer **copies** `_iter_requests`. `ClassSampler._iter_requests` makes
+one weighted `rng.choice(n_classes, size=n_groups, p=…)` to pick group classes; `ScheduledClassSampler`
+now runs that method unchanged but temporarily wraps `self._rng` so that single call returns the
+scheduled positions — reusing all of annbatch's chunk/RLE/slice math with zero duplication. Still an
+upstream candidate: a `_group_positions(n_groups)` hook would drop even the rng wrapper.)
 
 Decisions on the open questions:
-1. **Per-node vs derived** → the only genuine per-node knob is **`Node.chunk_size`** (`None`⇒1); every
-   other param is a principled *derivation*, not magic. `chunk_size>1` is validated (run-length rule,
-   wrapped with node context) so opting into throughput is explicit, not hidden.
-2. **`batch_size` location** → **scheme-level** (`Scheme.n_rows_per_leaf`): a yielded batch has one row
-   count (target rows == source rows == B), so it can't vary per node.
+1. **Per-node vs derived** → read params (chunk / preload / batch) live in a **separate
+   `SamplerConfig`**, not on the `Node` and not on the `Scheme`, passed to the loader as one config or
+   a `{node_name: SamplerConfig}` mapping (per-node override allowed). (Superseded 2026-07-07: earlier
+   iterations put `chunk_size` on `Node`, then on `Scheme`; the settled shape is a dedicated config
+   object, decoupled from structure.)
+2. **`batch_size` location** → **`SamplerConfig.batch_size`**, validated equal across nodes (a yielded
+   batch has one row count: target rows == source rows == B).
 3. **`num_samples`/epoch** → **`Scheme.steps_per_pass`** (default 512); `num_samples = steps_per_pass *
    batch_size`, `drop_last=True`, loader restarts each pass → effectively infinite with a fixed,
-   reproducible restart cadence. `preload_nchunks = batch_size // chunk_size` (one batch per window).
+   reproducible restart cadence. `preload_nchunks` defaults to `batch_size // chunk_size` (one batch
+   per window) and is overridable in `SamplerConfig`.
 4. **Reproducibility** → per-node RNG spawned from one `SeedSequence(seed)` (one stream per node, by
    sorted name); fixes the old shared-seed correlation bug.
-5. **Sortedness** → **validate only** (run-length rule at build). Producing a sorted source stays a
-   separate concern (not in the schema).
+5. **Sortedness** → **not policed** (superseded 2026-07-07). Default `chunk_size=1` reads per-row and
+   is indifferent to on-disk order; `chunk_size>1` is a throughput opt-in for a condition-sorted
+   collection, where the loader simply forwards annbatch's own run-length behavior. Ordering never
+   affects *correctness* (matching is recovered from the schedule/columns, not row order). Producing a
+   sorted source stays a separate concern (not in the schema).
 
-Key constraint (validated): **`chunk_size` divides `batch_size`** ⇒ exactly one category per batch ⇒ a
-schedule is a length-`steps_per_pass` array of leaf codes, and root/child align batch-for-batch
-regardless of each node's own `chunk_size`. **The bind falls out for free**: the root schedule is drawn
+Key constraint (validated in `SamplerConfig`): **`chunk_size` divides `batch_size`** ⇒ exactly one
+category per batch ⇒ a schedule is a length-`steps_per_pass` array of leaf codes, and root/child align
+batch-for-batch regardless of `chunk_size`. **The bind falls out for free**: the root schedule is drawn
 from the root's weights; each bound child's schedule is *derived* from the parent's (parent leaf →
-shared-column value → matching child leaf, child RNG among ties), so loaders zip with no per-step
+shared-column value → matching child leaf, drawn ∝ child weights among ties), so loaders zip with no per-step
 reconfiguration. `DAGClassLoader._start_pass()` draws + pushes all schedules, then rebuilds the iterators
 (order matters: `Loader.__iter__` re-reads `sampler.sample()`, so `set_schedule` must land before
 `iter(loader)`). Bound children are now streamed (their own loader) instead of the old in-memory cache.

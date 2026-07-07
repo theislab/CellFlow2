@@ -1,8 +1,8 @@
-"""End-to-end: declarative Scheme → annbatch DAGClassLoader → a real flow-matching training step.
+"""Case: end-to-end — scheme → DAGClassLoader → a real flow-matching training step.
 
 Proves the data path (scheme → ScheduledClassSampler → {source, target, condition}) drives training:
 the loss is finite and decreases. Minimal rectified-flow objective, tiny pure-jax MLP (no model deps).
-Unit tests for the loader/sampler contract live in ``test_dag_class_loader.py``.
+Unit tests for the loader/sampler contract live in the sibling case files.
 """
 
 import numpy as np
@@ -13,18 +13,14 @@ jax = pytest.importorskip("jax")
 optax = pytest.importorskip("optax")
 import jax.numpy as jnp  # noqa: E402
 
-from scaleflow.dag_class_loader import DAGClassLoader, perturbation_scheme  # noqa: E402
+from scaleflow.dagloader import DAGClassLoader, SamplerConfig, perturbation_scheme  # noqa: E402
 
-from _toydata import DRUG_EMB, G, PCA_D, toy_adata, write_collection  # noqa: E402
+from _toydata import PCA_D, drug_cond_fn, toy_adata, write_collection  # noqa: E402
 
 
 def _scheme(source, **kw):
     return perturbation_scheme(source, context=["cell_line"], perturbation=["drug"],
                                control_values={"drug": "control"}, **kw)
-
-
-def _cond_fn(cols):
-    return lambda leaf: DRUG_EMB[leaf[cols.index("drug")]]
 
 
 def _mlp_init(key, dims):
@@ -78,33 +74,34 @@ def _assert_learned(losses):
     assert np.mean(losses[-30:]) < 0.5 * np.mean(losses[:30])  # learned the conditional velocity
 
 
-def test_flow_matching_training_decreases_loss():
+def test_training_decreases_loss_in_memory():
     """In-memory AnnData source."""
-    scheme = _scheme(toy_adata(), n_rows_per_leaf=64, seed=0)
-    loader = DAGClassLoader(scheme, condition_fn=_cond_fn(scheme.nodes["pert"].cols))
+    scheme = _scheme(toy_adata(), seed=0)
+    loader = DAGClassLoader(scheme, SamplerConfig(batch_size=64), condition_fn=drug_cond_fn(scheme.nodes["pert"].cols))
     _assert_learned(_train_losses(loader))
 
 
-def test_flow_matching_training_datasetcollection(tmp_path):
+def test_training_datasetcollection(tmp_path):
     """Same end-to-end training, but the source is an ON-DISK annbatch DatasetCollection."""
     coll = write_collection(toy_adata(), tmp_path)
-    scheme = _scheme(coll, n_rows_per_leaf=64, seed=0)
-    loader = DAGClassLoader(scheme, condition_fn=_cond_fn(scheme.nodes["pert"].cols))
+    scheme = _scheme(coll, seed=0)
+    loader = DAGClassLoader(scheme, SamplerConfig(batch_size=64), condition_fn=drug_cond_fn(scheme.nodes["pert"].cols))
     _assert_learned(_train_losses(loader))
 
 
-def test_obsm_streaming_from_collection(tmp_path):
+def test_training_obsm_from_collection(tmp_path):
     """The streamed rep is an OBSM key (not X), read from an on-disk DatasetCollection."""
     coll = write_collection(toy_adata(), tmp_path)
-    scheme = _scheme(coll, key="obsm/pca", n_rows_per_leaf=64, seed=0)
-    loader = DAGClassLoader(scheme, condition_fn=_cond_fn(scheme.nodes["pert"].cols))
+    scheme = _scheme(coll, key="obsm/pca", seed=0)
+    loader = DAGClassLoader(scheme, SamplerConfig(batch_size=64), condition_fn=drug_cond_fn(scheme.nodes["pert"].cols))
     assert next(loader)["target"].shape[1] == PCA_D  # streamed obsm rep, not X (=8)
     _assert_learned(_train_losses(loader))
 
 
-def test_chunk_size_gt1_trains_on_sorted():
+def test_training_chunk_size_gt1_on_sorted():
     """chunk_size>1 (contiguous chunked reads) on a condition-sorted source still trains."""
-    scheme = _scheme(toy_adata(), n_rows_per_leaf=64, seed=0, chunk_size=8)  # toy blocks are contiguous
-    loader = DAGClassLoader(scheme, condition_fn=_cond_fn(scheme.nodes["pert"].cols))
+    scheme = _scheme(toy_adata(), seed=0)  # toy blocks are contiguous
+    loader = DAGClassLoader(scheme, SamplerConfig(batch_size=64, chunk_size=8),
+                            condition_fn=drug_cond_fn(scheme.nodes["pert"].cols))
     assert loader._samplers["pert"]._chunk_size == 8
     _assert_learned(_train_losses(loader))
