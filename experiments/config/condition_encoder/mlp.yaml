@@ -1,0 +1,9 @@
+# @package _global_
+# Baseline condition encoder = the historical MLP behaviour: per-modality MLP tokens + a single-layer
+# CLS attention pool. Empty pooling_kwargs → TokenAttentionPooling class defaults (num_heads=8,
+# qkv_dim=64, num_layers=1, transformer_block=False), i.e. the original single-MHA path, so
+# pre-refactor MLP checkpoints restore unchanged.
+model:
+  condition_encoder:
+    pooling: attention_token
+    pooling_kwargs: {}

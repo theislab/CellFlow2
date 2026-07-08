@@ -159,7 +159,7 @@ def make_diagnostic_samplers(data: dict, n_conditions: int = 100, transform=None
     for split in ("train", "val", "test"):
         smp = {}
         for ds, gds in data.items():
-            if split not in gds:
+            if gds.get(split) is None:          # all-train datasets (holdout=false) have val/test=None
                 continue
             s = ValidationSampler(
                 gds[split],

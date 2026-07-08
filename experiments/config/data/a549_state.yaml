@@ -1,0 +1,19 @@
+# @package _global_
+# DataManager grouping for the tahoe_a549 + sciplex_a549 transfer run, in the X_state latent (2058-d).
+# batch is a src_dist_key → it becomes a condition token (covariate) so the shared velocity field can
+# absorb the cross-dataset offset. dose is resolved (tgt=[drug, dose]); prophet wired via extra_rep_keys
+# (silently skipped for tahoe, which has no prophet_emb → keep ablation=default). Per-dataset cell_line
+# canonicalization / filter / batch label / dose column come from each dataset's `prep` block.
+data:
+  dist_flag_key: control
+  src_dist_keys: [cell_line, batch]
+  tgt_dist_keys: [drug, dose]
+  rep_keys:
+    cell_line: cell_line_ccle_embeddings
+    drug:      drug_0_embeddings
+    batch:     batch_embeddings          # injected one-hot over batch_labels (prep)
+  extra_rep_keys:
+    prophet: [drug, prophet_emb]         # sciplex only; DataManager skips it for tahoe
+  batch_labels: [tahoe_a549, sciplex3]
+  cell_embedding:
+    key: X_state                         # obsm latent = data_location = flow space (2058-d)
