@@ -201,7 +201,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     val_log_path = str(output_dir / f"{name}_val_metrics.json")
     cbs = [
         Metrics(
-            metrics=["r_squared", "e_distance", "mmd"],
+            metrics=["e_distance", "mmd"],
             metric_aggregations=["mean"],
             use_gpu_optimized=True,
             precision="bfloat16",
@@ -248,14 +248,13 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     monitor_metrics = ["loss"]
     for ds in val_samplers:
         monitor_metrics += [
-            f"{ds}_r_squared_mean",
             f"{ds}_e_distance_mean",
             f"{ds}_mmd_mean",
             f"{ds}_nn_displacement_corr",
             f"{ds}_gap_closure_mean",
         ]
     if dec_path and h5ad_path:
-        monitor_metrics += ["val_recon_r2_delta", "val_recon_pearson_r_delta"]
+        monitor_metrics += ["val_recon_pearson_r_delta"]
 
     print(f"Training {int(cfg.training.num_iterations)} iterations "
           f"(val every {int(cfg.training.valid_freq)} steps) …")
@@ -308,7 +307,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         for w, agg in test_metrics.get("per_w_aggregated", {}).items():
             for k, v in agg.items():
                 test_log[f"test_{k}__w{w}"] = v
-        test_log.update(test_recon)  # test_recon_r2_delta / pearson (+ medians) + __w<w> curves
+        test_log.update(test_recon)  # test_recon_pearson_r_delta / pearson_r (+ medians) + __w<w> curves
         wandb_run.log(test_log)
         for k, v in test_log.items():
             wandb_run.summary[k] = v

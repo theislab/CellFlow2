@@ -1,0 +1,50 @@
+# @package _global_
+# ─────────────────────────────────────────────────────────────────────────────
+# SINGLE (non-sweep) CFG run on the AE_128_opt latent, adaln_zero conditioning.
+# This is a plain training run — no `wandb sweep` / `wandb agent`. Launch with:
+#
+#   python experiments/train_zarr.py +experiment=cfg_ae128opt wandb.run_name=my_run_name
+#
+# Override any field on the CLI, e.g. training.num_iterations=500000, match_fn.epsilon=1.
+# Mirrors exp_config/sciplex_cfg.yaml but aligned to the mentor's healthy recipe
+# (AE_128_opt + match_fn.epsilon=10). Sweeps nothing; condition_dropout_prob=0.15 keeps
+# CFG on, guidance w=[1.0,1.5] is applied at val/test/diagnostics.
+# ─────────────────────────────────────────────────────────────────────────────
+defaults:
+  - override /datasets: zarr_sciplex
+  - override /conditioning: adaln_zero
+  - override /embedding: AE_128_opt
+  - override /ablation: default
+
+selected_datasets: [sciplex]
+output_dir: /storage/pancellflow/outputs/cfg_ae128opt
+
+model:
+  hidden_dims: [256, 256, 256]
+  decoder_dims: [256, 256, 256]          # adaln_zero requires decoder_dims[-1] == hidden_dims[-1]
+  condition_embedding_dim: 256
+  condition_dropout_prob: 0.15           # CFG on (>0). Set 0.0 for a no-CFG baseline.
+  layer_norm_before_concatenation: false
+  probability_path_kwargs:
+    constant_noise: 0.1
+  condition_encoder:
+    cond_output_dropout: 0.2
+
+ablation: 
+  mode: prophet
+
+match_fn:
+  epsilon: 10                            # mentor's healthy value (sciplex_cfg sweep uses 1)
+
+training:
+  peak_lr: 1.0e-4
+  batch_size: 512
+  warmup_iterations: 5000
+  num_iterations: 2000000
+  valid_freq: 200000
+
+wandb:
+  enabled: true
+  entity: pancellflow
+  project: sciplex_cfg
+  run_name: cfg_ae128opt_adaln           # ← set per run (or override: wandb.run_name=...)

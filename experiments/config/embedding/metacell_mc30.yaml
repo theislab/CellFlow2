@@ -1,0 +1,10 @@
+# @package _global_
+# Metacell (cpm=30) gene-space data: src = control SINGLE cells, tgt = perturbed
+# METACELLS, in 2000-HVG gene space (sciplex3_metacell_mc30_X.zarr). The model
+# predicts gene expression directly, so there is NO reconstruction decoder
+# (decoder_path: null → train_zarr skips recon; standard metrics are gene-space).
+datasets:
+  sciplex:
+    path: /storage/pancellflow/sciplex3_metacell_mc30_X.zarr
+recon:
+  decoder_path: null

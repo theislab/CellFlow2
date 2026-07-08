@@ -37,17 +37,19 @@ import numpy as np
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--embedding_key", type=str, default="X_state",
-                    help="obsm key for cell state representation. Foundation-model: "
-                         "X_state, X_scgpt, X_scconcept, X_scimilarity[_correct]. "
-                         "Autoencoder: AE_10, AE_32, AE_128, AE_128_opt.")
+                    help="cell state representation. Pass 'X' to train directly on gene "
+                         "expression (adata.X). Otherwise an obsm key — foundation-model: "
+                         "X_state, X_scgpt, X_scconcept, X_scimilarity[_correct]; "
+                         "autoencoder: AE_10, AE_32, AE_128, AE_128_opt.")
 parser.add_argument("--output_path", type=str, default=None,
                     help="Output zarr path (default: /storage/pancellflow/sciplex3_<embedding_key>.zarr)")
 parser.add_argument("--data_path", type=str, default="/storage/pancellflow/sciplex3_with_emb.h5ad",
-                    help="Input h5ad path (must contain the chosen --embedding_key in obsm; "
-                         "sciplex3_with_emb.h5ad carries both X_* and AE_* embeddings)")
+                    help="Input h5ad path (must contain the chosen --embedding_key in obsm, or X; "
+                         "sciplex3_with_emb.h5ad carries X (2000 HVGs) plus X_* and AE_* embeddings)")
 args = parser.parse_args()
 
 EMBEDDING_KEY = args.embedding_key
+USE_X         = EMBEDDING_KEY in ("X", "genes", "gene")   # train directly on gene expression
 DATA_PATH     = Path(args.data_path)
 OUTPUT_PATH   = Path(args.output_path) if args.output_path else Path(f"/storage/pancellflow/sciplex3_{EMBEDDING_KEY}.zarr")
 
@@ -59,22 +61,35 @@ start_time = time.time()
 print("loading data")
 
 with h5py.File(DATA_PATH, "r") as f:
-    adata = ad.AnnData(
+    elems = dict(
         obs=ad.io.read_elem(f["obs"]),
         obsm=ad.io.read_elem(f["obsm"]),
         uns=ad.io.read_elem(f["uns"]),
     )
+    if USE_X:
+        elems["X"] = ad.io.read_elem(f["X"])   # gene-expression matrix (only loaded when needed)
+    adata = ad.AnnData(**elems)
 
 load_time = time.time() - start_time
 print(f"data loaded (took {load_time:.2f} seconds)")
 
-# ── validate the requested cell representation exists before doing any work ────
-if EMBEDDING_KEY not in adata.obsm:
-    raise KeyError(
-        f"embedding_key '{EMBEDDING_KEY}' not found in adata.obsm of {DATA_PATH}. "
-        f"Available obsm keys: {sorted(adata.obsm.keys())}"
-    )
-print(f"  {EMBEDDING_KEY}: obsm shape {adata.obsm[EMBEDDING_KEY].shape}")
+# ── resolve the cell representation to store: gene space (adata.X) or an obsm embedding ──
+adl = AnnDataLocation()
+if USE_X:
+    if adata.X is None or getattr(adata.X, "shape", (0, 0))[1] == 0:
+        raise KeyError(f"--embedding_key '{EMBEDDING_KEY}' requested but adata.X is empty in {DATA_PATH}")
+    if hasattr(adata.X, "toarray"):        # densify sparse X so the zarr writer gets ndarrays
+        adata.X = np.asarray(adata.X.toarray(), dtype=np.float32)
+    print(f"  X: gene-space matrix shape {adata.X.shape}")
+    cell_location = adl.X
+else:
+    if EMBEDDING_KEY not in adata.obsm:
+        raise KeyError(
+            f"embedding_key '{EMBEDDING_KEY}' not found in adata.obsm of {DATA_PATH}. "
+            f"Available obsm keys: {sorted(adata.obsm.keys())}"
+        )
+    print(f"  {EMBEDDING_KEY}: obsm shape {adata.obsm[EMBEDDING_KEY].shape}")
+    cell_location = adl.obsm[EMBEDDING_KEY]
 
 # ── Dose as a raw scalar condition ────────────────────────────────────────────
 # Rename dose_value -> dose and cast to float. dose is NOT given a rep_key, so
@@ -89,7 +104,6 @@ if n_bad:
     print(f"WARNING: {n_bad:,} perturbed cells have NaN dose (will form a bad group)")
 
 # ── DataManager — dose-resolved: target = (cell_line, drug, dose) ──────────────
-adl = AnnDataLocation()
 dm  = DataManager(
     dist_flag_key="control",
     src_dist_keys=["cell_line"],
@@ -98,7 +112,7 @@ dm  = DataManager(
         "cell_line": "cell_line_ccle_embeddings",
         "drug":      "drug_0_embeddings",
     },
-    data_location=adl.obsm[EMBEDDING_KEY],
+    data_location=cell_location,
     extra_rep_keys={"prophet": ("drug", "prophet_emb")},
 )
 

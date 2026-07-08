@@ -17,16 +17,9 @@ from tqdm import tqdm
 
 from scaleflow.training._callbacks import ComputationCallback
 from scaleflow.metrics._metrics import (
-    compute_r_squared,
     compute_e_distance_fast,
     compute_scalar_mmd,
 )
-
-
-def r_squared_delta(y_true, y_pred, source) -> float:
-    """R² of the perturbation delta: R²(pred - control, gt - control)."""
-    ctrl = np.asarray(source).mean(axis=0)
-    return float(compute_r_squared(np.asarray(y_true) - ctrl, np.asarray(y_pred) - ctrl))
 
 
 def pearson_r_delta(y_true, y_pred, source) -> float:
@@ -96,11 +89,9 @@ def mean_nn_displacement_corr(valid_source_data, valid_true_data, valid_pred_dat
 def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
     yt, yp = np.asarray(y_true), np.asarray(y_pred)
     return {
-        "r_squared":  float(compute_r_squared(yt, yp)),
         "pearson_r":  pearson_r(yt, yp),
         "e_distance": float(compute_e_distance_fast(yt, yp)),
         "mmd":        float(compute_scalar_mmd(yt, yp)),
-        "r_squared_delta":    r_squared_delta(yt, yp, source)    if source is not None else float("nan"),
         "pearson_r_delta":    pearson_r_delta(yt, yp, source)    if source is not None else float("nan"),
         "nn_displacement_corr": nn_displacement_corr(yt, yp, source, debug=debug) if source is not None else float("nan"),
     }
@@ -109,7 +100,7 @@ def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
 class ValMetricsLogger(ComputationCallback):
     """Logs pooled val metrics to JSON + wandb; returns per-dataset nn_displacement_corr for monitoring."""
 
-    METRICS = ("r_squared", "pearson_r", "e_distance", "mmd", "r_squared_delta", "pearson_r_delta", "nn_displacement_corr")
+    METRICS = ("pearson_r", "e_distance", "mmd", "pearson_r_delta", "nn_displacement_corr")
 
     def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False):
         self.save_path   = save_path
@@ -154,8 +145,8 @@ class ValMetricsLogger(ComputationCallback):
         }
 
     def _print_entry(self, entry: dict, tag: str = "") -> None:
-        print(f"    val{tag}  R²={entry['r_squared']:.4f}  r={entry['pearson_r']:.4f}  "
-              f"ΔR²={entry['r_squared_delta']:.4f}  Δr={entry['pearson_r_delta']:.4f}  "
+        print(f"    val{tag}  r={entry['pearson_r']:.4f}  "
+              f"Δr={entry['pearson_r_delta']:.4f}  "
               f"nn_disp_corr={entry['nn_displacement_corr']:.4f}  "
               f"E-dist={entry['e_distance']:.4f}  MMD={entry['mmd']:.4f}  (step {self._step})")
 
@@ -238,7 +229,7 @@ class ValMetricsLogger(ComputationCallback):
 
 
 # Metrics where higher = better. All others (e_distance, mmd) → lower = better.
-_MAXIMIZE_METRICS = {"r_squared", "pearson_r", "r_squared_delta", "pearson_r_delta", "nn_displacement_corr"}
+_MAXIMIZE_METRICS = {"pearson_r", "pearson_r_delta", "nn_displacement_corr"}
 
 
 def _solver_params(solver) -> dict:
@@ -402,7 +393,7 @@ def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = Non
 
 
 class ReconMetricsLogger(ComputationCallback):
-    """Gene-space R²δ and Pearson-rδ via a ReconDecoder.
+    """Gene-space Pearson-rδ via a ReconDecoder.
 
     Decodes predicted latent → genes, compares mean perturbation delta
     (perturbed − ctrl) against ground truth from the raw h5ad.
@@ -524,8 +515,8 @@ class ReconMetricsLogger(ComputationCallback):
         False the result is returned without logging to wandb (used by the CFG w-sweep, which
         logs all w at once afterwards).
         """
-        r2_deltas, pearson_deltas = [], []
-        r2_fulls, pearson_fulls = [], []   # non-delta: decode(pred) vs true genes (no control)
+        pearson_deltas = []
+        pearson_fulls = []   # non-delta: decode(pred) vs true genes (no control)
         n_total = n_unmatched = 0
         first_unmatched = None
         pred_sigs, predgene_sigs = [], []  # diagnostic: do recon's inputs/outputs vary?
@@ -551,21 +542,19 @@ class ReconMetricsLogger(ComputationCallback):
                 ctrl_pred = self._get_ctrl_decoded(cond_key)
                 if ctrl_pred is None:
                     ctrl_pred = ctrl_mean
-                # delta metrics (perturbation effect)
+                # delta metric (perturbation effect)
                 r, _ = pearsonr(true_mean - ctrl_mean, pred_mean - ctrl_pred)
-                r2_deltas.append(float(r ** 2))
                 pearson_deltas.append(float(r))
-                # non-delta metrics (absolute reconstruction): decode(pred) vs true genes
+                # non-delta metric (absolute reconstruction): decode(pred) vs true genes
                 rf, _ = pearsonr(true_mean, pred_mean)
                 pearson_fulls.append(float(rf))
-                r2_fulls.append(float(compute_r_squared(true_genes, pred_genes)))
         if pred_sigs:
             print(f"    {prefix} recon  [diag] pred_latent mean={np.mean(pred_sigs):.6f}  "
                   f"decoded mean={np.mean(predgene_sigs):.6f}  ({step_label})")
 
         # Always emit the keys (NaN when nothing matched) so monitor_metrics never KeyErrors.
-        keys = ["r2_delta", "pearson_r_delta", "r2", "pearson_r"]
-        if not r2_deltas:
+        keys = ["pearson_r_delta", "pearson_r"]
+        if not pearson_deltas:
             ck, no_true, no_ctrl = (first_unmatched or (None, None, None))
             print(f"    {prefix} recon  WARNING: 0/{n_total} conditions matched the h5ad "
                   f"(cond_keys={list(self._cond_keys)}, log_dose_key={self._log_dose_key}). "
@@ -581,16 +570,14 @@ class ReconMetricsLogger(ComputationCallback):
             print(f"    {prefix} recon  note: {n_unmatched}/{n_total} conditions unmatched "
                   f"(e.g. {first_unmatched[0]!r})")
 
-        vals = {"r2_delta": r2_deltas, "pearson_r_delta": pearson_deltas,
-                "r2": r2_fulls, "pearson_r": pearson_fulls}
+        vals = {"pearson_r_delta": pearson_deltas, "pearson_r": pearson_fulls}
         out = {}
         for k, v in vals.items():
             out[f"{prefix}_recon_{k}"]        = float(np.nanmean(v))
             out[f"{prefix}_recon_{k}_median"] = float(np.nanmedian(v))
         print(f"    {prefix} recon  "
-              f"R²δ={out[f'{prefix}_recon_r2_delta']:.4f} rδ={out[f'{prefix}_recon_pearson_r_delta']:.4f}  |  "
-              f"R²={out[f'{prefix}_recon_r2']:.4f} r={out[f'{prefix}_recon_pearson_r']:.4f}  "
-              f"(med R²δ={out[f'{prefix}_recon_r2_delta_median']:.4f} rδ={out[f'{prefix}_recon_pearson_r_delta_median']:.4f}) "
+              f"rδ={out[f'{prefix}_recon_pearson_r_delta']:.4f}  r={out[f'{prefix}_recon_pearson_r']:.4f}  "
+              f"(med rδ={out[f'{prefix}_recon_pearson_r_delta_median']:.4f}) "
               f"({step_label})")
         if emit and self._wandb_run is not None:
             self._wandb_run.log(out)

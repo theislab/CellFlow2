@@ -35,7 +35,6 @@ import pandas as pd
 
 from scaleflow.training._callbacks import ComputationCallback
 from scaleflow.metrics._metrics import (
-    compute_r_squared,
     compute_e_distance_fast,
     compute_scalar_mmd,
 )
@@ -49,8 +48,21 @@ def _subsample(a, n, rng):
     return a if a.shape[0] <= n else a[rng.choice(a.shape[0], n, replace=False)]
 
 
-def _r_squared_delta(true, pred, ctrl_mean):
-    return float(compute_r_squared(np.asarray(true) - ctrl_mean, np.asarray(pred) - ctrl_mean))
+def _pearson(a, b):
+    a, b = np.asarray(a).ravel(), np.asarray(b).ravel()
+    if a.size < 2:
+        return float("nan")
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def _pearson_r(true, pred):
+    """Pearson r of mean profiles (over features): corr(mean(true), mean(pred))."""
+    return _pearson(np.asarray(true).mean(0), np.asarray(pred).mean(0))
+
+
+def _pearson_r_delta(true, pred, ctrl_mean):
+    """Pearson r of mean perturbation deltas: corr(mean(true)-ctrl, mean(pred)-ctrl)."""
+    return _pearson(np.asarray(true).mean(0) - ctrl_mean, np.asarray(pred).mean(0) - ctrl_mean)
 
 
 # ── per-condition diagnostics (operates on PREDICTIONS — never infers) ────────
@@ -78,10 +90,10 @@ def condition_diagnostics(source, true, pred, max_cells: int = 2000, seed: int =
                 effect_ratio=pred_eff / (true_eff + 1e-8),
                 mmd_ctrl_true=mmd_ct, mmd_pred_true=mmd_pt,
                 gap_closure=1.0 - mmd_pt / (mmd_ct + 1e-8),
-                r_squared_delta=_r_squared_delta(t, p, cm),
+                pearson_r_delta=_pearson_r_delta(t, p, cm),
             )
         rec.update(
-            r_squared=float(compute_r_squared(t, p)),
+            pearson_r=_pearson_r(t, p),
             e_distance=float(compute_e_distance_fast(t, p)),
             mmd=float(compute_scalar_mmd(p, t)),
         )
@@ -113,8 +125,10 @@ def scalar_diagnostics(df: pd.DataFrame) -> dict:
             out["effect_calib_slope"] = float(np.polyfit(x[m], y[m], 1)[0])
             out["effect_corr"] = float(np.corrcoef(x[m], y[m])[0, 1])
         out["effect_ratio_mean"] = float(np.nanmean(df["effect_ratio"]))
-    if "r_squared" in df:
-        out["r_squared_mean"] = float(np.nanmean(df["r_squared"]))
+    if "pearson_r" in df:
+        out["pearson_r_mean"] = float(np.nanmean(df["pearson_r"]))
+    if "pearson_r_delta" in df:
+        out["pearson_r_delta_mean"] = float(np.nanmean(df["pearson_r_delta"]))
     return out
 
 
@@ -269,11 +283,11 @@ def full_diagnostics(solver, split_samplers: dict, output_dir, name: str = "mode
 
 
 # ── plots (coloured by split) ────────────────────────────────────────────────
-def plot_diagnostics(df: pd.DataFrame, output_dir, tag: str = "diag", metric: str = "r_squared_delta") -> dict:
+def plot_diagnostics(df: pd.DataFrame, output_dir, tag: str = "diag", metric: str = "pearson_r_delta") -> dict:
     """Three scatters coloured by `split`: effect-vs-metric, calibration, strength-vs-error.
 
-    `metric` defaults to r_squared_delta — plain r_squared is inflated by the control
-    baseline, so effect-size-vs-r²Δ is what reveals weak-effect conditions carrying the score.
+    `metric` defaults to pearson_r_delta — plain pearson_r is inflated by the control
+    baseline, so effect-size-vs-rΔ is what reveals weak-effect conditions carrying the score.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -326,7 +340,7 @@ def plot_diagnostics(df: pd.DataFrame, output_dir, tag: str = "diag", metric: st
 
 # ── guidance-sweep summary (metric vs w, one line per split) ──────────────────
 def plot_guidance_sweep(summary: dict, output_dir, tag: str = "diag",
-                        metrics=("r_squared_mean", "gap_closure_mean", "effect_ratio_mean")) -> dict:
+                        metrics=("pearson_r_delta_mean", "gap_closure_mean", "effect_ratio_mean")) -> dict:
     """One line plot per metric: x = guidance weight w, y = mean metric, a line per split.
 
     ``summary`` is ``{w: {split: {metric: value}}}`` (from full_diagnostics). Shows how each

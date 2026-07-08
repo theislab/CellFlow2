@@ -33,7 +33,7 @@ parameters:
 
   # ── fixed ───────────────────────────────────────────────────────────────────
   embedding:
-    value: AE_128                     # sciplex3_AE_128.zarr + dec_AE_128 recon decoder
+    value: AE_128_opt                 # sciplex3_AE_128_opt.zarr + dec_AE_128_opt recon decoder
   ablation.mode:
     value: prophet
   model.conditioning_key:

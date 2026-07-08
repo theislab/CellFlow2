@@ -1,0 +1,11 @@
+# @package _global_
+# X: train directly on gene expression (adata.X — 2000 HVGs in sciplex3_with_emb.h5ad).
+# The model predicts gene expression itself, so there is NO reconstruction step:
+# decoder_path is null → train_zarr skips the recon callback entirely, and the
+# standard val/test metrics (pearson_r, pearson_r_delta, e_distance, mmd, …) already
+# operate in gene space. The velocity field auto-detects the 2000-dim input.
+datasets:
+  sciplex:
+    path: /storage/pancellflow/sciplex3_X.zarr
+recon:
+  decoder_path: null
