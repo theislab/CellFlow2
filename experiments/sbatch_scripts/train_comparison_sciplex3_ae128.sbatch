@@ -14,7 +14,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nice=0
 #SBATCH --constraint=a100_80gb|h100_80gb
-#SBATCH --exclude=supergpu32
+#SBATCH --exclude=supergpu32,supergpu17
 #SBATCH --output=/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/outputs/train_comparison/logs/cmp_ae128_%j.out
 #SBATCH --error=/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/outputs/train_comparison/logs/cmp_ae128_%j.err
 

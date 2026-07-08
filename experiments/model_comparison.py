@@ -40,22 +40,27 @@ HERE = Path(__file__).resolve().parent
 CFG_DIR = str(HERE / "config")
 OUT = Path("/lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/outputs/train_comparison")
 
-# (label, checkpoint dir under OUT, conditioning group, ablation group)
+# (label, checkpoint dir under OUT, conditioning group, ablation group, condition_encoder group)
+# Transformer (prophet/default @ cond_output_dropout 0.4) vs the best MLP-encoder baselines
+# (prophet @ 0.9 and 0.4). Each run is rebuilt with its own encoder group so the orbax restore
+# matches the trained architecture (mlp → single-MHA pool w/ qkv_dim=64; transformer → 2-layer CLS).
 RUNS = [
-    ("adaln_prophet",   "model_prophet_2xcredxc_best_ckpt", "adaln_zero", "prophet"),
-    ("adaln_noprophet", "model_default_pgzi1ue1_best_ckpt", "adaln_zero", "default"),
-    ("adaln_random",    "model_random_pzpmyram_best_ckpt",  "adaln_zero", "random"),
+    ("tf_prophet_do0.4",  "model_prophet_7y61v13v_best_ckpt", "adaln_zero", "prophet", "transformer"),
+    ("tf_default_do0.4",  "model_default_ace0pr9w_best_ckpt", "adaln_zero", "default", "transformer"),
+    ("mlp_prophet_do0.9", "model_prophet_0olbggwi_best_ckpt", "adaln_zero", "prophet", "mlp"),
+    ("mlp_prophet_do0.4", "model_prophet_lfhyawlu_best_ckpt", "adaln_zero", "prophet", "mlp"),
 ]
 
 
-def load_cfg(conditioning: str, ablation: str):
-    """Compose the train_comparison config with this run's conditioning + ablation groups."""
+def load_cfg(conditioning: str, ablation: str, encoder: str = "transformer"):
+    """Compose the train_comparison config with this run's conditioning + ablation + encoder groups."""
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=CFG_DIR, version_base=None):
         return compose(config_name="train_comparison",
-                       overrides=[f"conditioning={conditioning}", f"ablation={ablation}"])
+                       overrides=[f"conditioning={conditioning}", f"ablation={ablation}",
+                                  f"condition_encoder={encoder}"])
 
 
 def load_solver(cfg, gd_train, transform, ckpt_path: Path):
@@ -150,12 +155,12 @@ def main():
 
     src = true = None
     preds = {}
-    for label, ckpt, cond, abl in RUNS:
+    for label, ckpt, cond, abl, enc in RUNS:
         ckpt_path = OUT / ckpt
         if not ckpt_path.exists():
             print(f"  !! skip {label}: {ckpt_path} missing"); continue
-        print(f"Loading {label}  ({cond}/{abl})  ← {ckpt}", flush=True)
-        cfg = load_cfg(cond, abl)
+        print(f"Loading {label}  ({cond}/{abl}/{enc})  ← {ckpt}", flush=True)
+        cfg = load_cfg(cond, abl, enc)
         transform = utils.ConditionTransform(abl, seed=int(cfg.seed)) if abl != "prophet" else None
         solver, pk = load_solver(cfg, gd_train, transform, ckpt_path)
         tsamp = ValidationSampler(gd_test, n_conditions_on_log_iteration=None,

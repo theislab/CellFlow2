@@ -13,6 +13,7 @@ defaults:
   - datasets: h5ad_drug
   - data: sciplex3_ae
   - model: h5ad
+  - condition_encoder: mlp     # mlp = per-modality MLP + 1-layer CLS pool; transformer = 2-layer CLS transformer
   - match_fn: h5ad
   - split: drug
   - training: default
@@ -30,8 +31,12 @@ datasets:
     path: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights/sciplex3_with_emb.h5ad
 
 # single-drug: one drug slot (model/h5ad.yaml defaults to 2 for drug_0+drug_1 combos)
+# cond_output_dropout 0.4 (scoped here; model/h5ad.yaml stays 0.9 so a549_transfer is unaffected) —
+# lowering 0.9→0.4 ~doubled the gene-space delta (test_recon_r2_delta ~0.09→~0.22).
 model:
   max_combination_length: 1
+  condition_encoder:
+    cond_output_dropout: 0.4
 
 # gene-space recon via the AE_128 decoder. Only override the decoder/latent — condition_obs_keys
 # ([cell_line, drug, dose_value]) + log_dose_obs_key (dose_value) are inherited from training/default.
