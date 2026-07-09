@@ -623,6 +623,10 @@ class ReconMetricsLogger(ComputationCallback):
         config ``guidance_scale`` (base w). No best-w is selected.
         """
         base_pk, ws, base_w = _test_guidance_plan(predict_kwargs)
+        # skip the w-sweep for non-CFG models: every w gives the same conditional prediction
+        # (mirrors evaluate_test). Avoids duplicate recon-test passes when cfg_enabled is False.
+        if not getattr(solver, "cfg_enabled", False):
+            ws = [base_w]
 
         # sample once so all w share the same cells/conditions
         batches = {name: sampler.sample(mode="on_train_end") for name, sampler in test_samplers.items()}
