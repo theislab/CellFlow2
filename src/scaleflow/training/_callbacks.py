@@ -4,8 +4,6 @@ import inspect
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-import jax.tree as jt
-import jax.tree_util as jtu
 import numpy as np
 
 # dedup: re-exported from cellflow (identical implementations)
@@ -18,6 +16,7 @@ from cellflow.training._callbacks import (
 from cellflow.training._callbacks import (
     LoggingCallback as LoggingCallback,
 )
+from cellflow.training._callbacks import Metrics as _BaseMetrics
 from cellflow.training._callbacks import (
     PCADecodedMetrics as PCADecodedMetrics,
 )
@@ -75,13 +74,7 @@ agg_fn_to_func: dict[str, Callable[[ArrayLike], float | ArrayLike]] = {
 }
 
 
-
-
-
-
-
-
-class Metrics(ComputationCallback):
+class Metrics(_BaseMetrics):
     """Callback to compute metrics on validation data during training
 
     Parameters
@@ -112,8 +105,7 @@ class Metrics(ComputationCallback):
         precision: Literal["float32", "bfloat16", "float16"] = "float32",
         max_samples_mmd: int = 5000,
     ):
-        self.metrics = metrics
-        self.metric_aggregation = ["mean"] if metric_aggregations is None else metric_aggregations
+        super().__init__(metrics, metric_aggregations)
         self.use_gpu_optimized = use_gpu_optimized
         self.precision = precision
         self.max_samples_mmd = max_samples_mmd
@@ -123,84 +115,11 @@ class Metrics(ComputationCallback):
             import jax
 
             self.rng_key = jax.random.PRNGKey(42)
-
-        for metric in metrics:
-            if metric not in metric_to_func:
-                raise ValueError(f"Metric {metric} not supported. Supported metrics are {list(metric_to_func.keys())}")
-            if use_gpu_optimized and metric not in metric_to_func_gpu:
-                raise ValueError(
-                    f"GPU-optimized metric {metric} not available. Available: {list(metric_to_func_gpu.keys())}"
-                )
-
-    def on_train_begin(self, *args: Any, **kwargs: Any) -> Any:
-        """Called at the beginning of training."""
-        pass
-
-    def on_log_iteration(
-        self,
-        valid_source_data: dict[str, dict[str, ArrayLike]],
-        valid_true_data: dict[str, dict[str, ArrayLike]],
-        valid_pred_data: dict[str, dict[str, ArrayLike]],
-        solver: _otfm.OTFlowMatching | _genot.GENOT,
-    ) -> dict[str, float]:
-        """Called at each validation/log iteration to compute metrics
-
-        Parameters
-        ----------
-        valid_source_data
-            Source data in nested dictionary format with same keys as ``valid_true_data``
-        valid_true_data
-            Validation data in nested dictionary format with same keys as ``valid_pred_data``
-        valid_pred_data
-            Predicted data in nested dictionary format with same keys as ``valid_true_data``
-        solver
-            :class:`~scaleflow.solvers.OTFlowMatching` solver or :class:`~scaleflow.solvers.GENOT`
-            solver with a conditional velocity field.
-
-        Returns
-        -------
-            Computed metrics between the true validation data and predicted validation data as a dictionary
-        """
-        metrics = {}
-        for metric in self.metrics:
-            for k in valid_true_data.keys():
-                out = jtu.tree_map(metric_to_func[metric], valid_true_data[k], valid_pred_data[k])
-                out_flattened = jt.flatten(out)[0]
-                for agg_fn in self.metric_aggregation:
-                    metrics[f"{k}_{metric}_{agg_fn}"] = agg_fn_to_func[agg_fn](out_flattened)
-
-        return metrics  # type: ignore[return-value]
-
-    def on_train_end(
-        self,
-        valid_source_data: dict[str, dict[str, ArrayLike]],
-        valid_true_data: dict[str, dict[str, ArrayLike]],
-        valid_pred_data: dict[str, dict[str, ArrayLike]],
-        solver: _otfm.OTFlowMatching | _genot.GENOT,
-    ) -> dict[str, float]:
-        """Called at the end of training to compute metrics
-
-        Parameters
-        ----------
-        valid_source_data
-            Source data in nested dictionary format with same keys as ``valid_true_data``
-        valid_true_data
-            Validation data in nested dictionary format with same keys as ``valid_pred_data``
-        valid_pred_data
-            Predicted data in nested dictionary format with same keys as ``valid_true_data``
-        solver
-            :class:`~scaleflow.solvers.OTFlowMatching` solver or :class:`~scaleflow.solvers.GENOT`
-            solver with a conditional velocity field.
-
-        Returns
-        -------
-            Computed metrics between the true validation data and predicted validation data as a dictionary
-        """
-        return self.on_log_iteration(valid_source_data, valid_true_data, valid_pred_data, solver)
-
-
-
-
+            for metric in metrics:
+                if metric not in metric_to_func_gpu:
+                    raise ValueError(
+                        f"GPU-optimized metric {metric} not available. Available: {list(metric_to_func_gpu.keys())}"
+                    )
 
 
 class LearningRateMonitor(LoggingCallback):
@@ -238,8 +157,6 @@ class LearningRateMonitor(LoggingCallback):
         pass
 
 
-
-
 def _guidance_kwarg(fn: Callable, pred_data_by_w: Any) -> dict[str, Any]:
     """Return ``{"pred_data_by_w": ...}`` only if ``fn`` accepts that kwarg.
 
@@ -252,9 +169,7 @@ def _guidance_kwarg(fn: Callable, pred_data_by_w: Any) -> dict[str, Any]:
         params = inspect.signature(fn).parameters
     except (ValueError, TypeError):
         return {}
-    accepts = "pred_data_by_w" in params or any(
-        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-    )
+    accepts = "pred_data_by_w" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
     return {"pred_data_by_w": pred_data_by_w} if accepts else {}
 
 
