@@ -25,6 +25,7 @@
 EXPERIMENT="${EXPERIMENT:-cfg_ae128opt}"
 RUN_NAME="${RUN_NAME:-cfg_ae128opt_adaln}"
 PROJECT="${PROJECT:-sciplex_cfg}"
+EXTRA="${EXTRA:-}"   # extra hydra overrides, e.g. EXTRA="training.num_iterations=200000 training.valid_freq=20000"
 
 # WANDB_API_KEY is loaded from ~/.wandb_key (untracked) — never hardcode secrets in the repo.
 #   echo "export WANDB_API_KEY='<your_key>'" > ~/.wandb_key && chmod 600 ~/.wandb_key
@@ -47,7 +48,7 @@ enroot start --rw \
     --mount ${WANDB_RESOLV}:/etc/resolv.conf \
     --env WANDB_API_KEY=$WANDB_API_KEY \
     ${CONTAINER_NAME} \
-    bash -c "pip3 install -q hydra-core && cd /storage/pancellflow/CellFlow2 && PYTHONUNBUFFERED=1 python experiments/train_zarr.py +experiment=${EXPERIMENT} wandb.run_name=${RUN_NAME} wandb.project=${PROJECT}"
+    bash -c "pip3 install -q hydra-core && cd /storage/pancellflow/CellFlow2 && PYTHONUNBUFFERED=1 python experiments/train_zarr.py +experiment=${EXPERIMENT} wandb.run_name=${RUN_NAME} wandb.project=${PROJECT} ${EXTRA}"
 
 enroot remove ${CONTAINER_NAME} 2>/dev/null || true
 

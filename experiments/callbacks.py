@@ -12,7 +12,7 @@ import shutil
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, ttest_ind
 from tqdm import tqdm
 
 from scaleflow.training._callbacks import ComputationCallback
@@ -86,21 +86,96 @@ def mean_nn_displacement_corr(valid_source_data, valid_true_data, valid_pred_dat
     return float(np.nanmean(scores))
 
 
+# ── differential-expression (DE) metrics ─────────────────────────────────────
+def _bh_fdr_reject(pvals, alpha: float) -> np.ndarray:
+    """Benjamini–Hochberg: boolean 'is significant' mask at FDR ≤ alpha."""
+    p = np.nan_to_num(np.asarray(pvals, dtype=float), nan=1.0)
+    n = p.size
+    reject = np.zeros(n, dtype=bool)
+    if n == 0:
+        return reject
+    order = np.argsort(p)
+    ranked = p[order]
+    passed = ranked <= alpha * (np.arange(1, n + 1) / n)
+    if passed.any():
+        cutoff = ranked[np.nonzero(passed)[0].max()]   # largest p below its BH threshold
+        reject = p <= cutoff
+    return reject
+
+
+def _de_vs_control(perturbed, control, fdr: float):
+    """Per-gene (logFC, BH-significant mask) for `perturbed` vs `control`.
+
+    Expression is log1p-normalized, so logFC = mean(perturbed) − mean(control).
+    Significance is a per-gene Welch t-test (perturbed vs control), BH-corrected.
+    """
+    perturbed = np.asarray(perturbed)
+    control = np.asarray(control)
+    logfc = perturbed.mean(axis=0) - control.mean(axis=0)
+    if perturbed.shape[0] < 2 or control.shape[0] < 2:
+        return logfc, np.zeros(logfc.shape, dtype=bool)   # too few cells to test
+    _, pvals = ttest_ind(perturbed, control, axis=0, equal_var=False)
+    return logfc, _bh_fdr_reject(pvals, fdr)
+
+
+def de_metrics(y_true, y_pred, source, fdr: float = 0.05) -> dict:
+    """DE-based condition metrics (all in [0, 1], higher = better).
+
+    Significant DE genes are called (FDR ≤ `fdr`, default 0.05) separately for the
+    true perturbed cells and the predicted perturbed cells, each vs the control
+    distribution; genes are ranked by |logFC|.
+
+    DEOver (DE overlap)     — |predTop-N ∩ trueSig| / N, where N = #true-significant
+                              genes and predTop-N = the N predicted-significant genes
+                              with the largest |logFC|. Recovery of the top true DE genes.
+    DEPrec (DE precision)   — |predSig ∩ trueSig| / |predSig|: of predicted-significant
+                              genes, the fraction that are truly significant.
+    DirAgr (direction agr.) — over predSig ∩ trueSig, the fraction whose logFC sign
+                              matches the true logFC sign (up/down-regulation agreement).
+    """
+    ctrl = np.asarray(source)
+    logfc_t, sig_t = _de_vs_control(y_true, ctrl, fdr)
+    logfc_p, sig_p = _de_vs_control(y_pred, ctrl, fdr)
+
+    true_genes = np.nonzero(sig_t)[0]
+    pred_genes = np.nonzero(sig_p)[0]
+    N, nP = int(true_genes.size), int(pred_genes.size)
+    inter = sig_t & sig_p
+
+    if N == 0:                                    # no true DE genes → overlap undefined
+        de_over = float("nan")
+    else:                                         # top-N predicted (by |logFC|) ∩ true set
+        pred_topN = pred_genes[np.argsort(-np.abs(logfc_p[pred_genes]))][:N]
+        de_over = float(np.isin(pred_topN, true_genes).sum() / N)
+
+    de_prec = float(inter.sum() / nP) if nP > 0 else float("nan")
+    dir_agr = (float((np.sign(logfc_t[inter]) == np.sign(logfc_p[inter])).mean())
+               if inter.any() else float("nan"))
+
+    return {"de_overlap": de_over, "de_precision": de_prec, "dir_agreement": dir_agr}
+
+
+_DE_NAN = {"de_overlap": float("nan"), "de_precision": float("nan"), "dir_agreement": float("nan")}
+
+
 def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
     yt, yp = np.asarray(y_true), np.asarray(y_pred)
-    return {
+    m = {
         "pearson_r":  pearson_r(yt, yp),
         "e_distance": float(compute_e_distance_fast(yt, yp)),
         "mmd":        float(compute_scalar_mmd(yt, yp)),
         "pearson_r_delta":    pearson_r_delta(yt, yp, source)    if source is not None else float("nan"),
         "nn_displacement_corr": nn_displacement_corr(yt, yp, source, debug=debug) if source is not None else float("nan"),
     }
+    m.update(de_metrics(yt, yp, source) if source is not None else _DE_NAN)
+    return m
 
 
 class ValMetricsLogger(ComputationCallback):
     """Logs pooled val metrics to JSON + wandb; returns per-dataset nn_displacement_corr for monitoring."""
 
-    METRICS = ("pearson_r", "e_distance", "mmd", "pearson_r_delta", "nn_displacement_corr")
+    METRICS = ("pearson_r", "e_distance", "mmd", "pearson_r_delta", "nn_displacement_corr",
+               "de_overlap", "de_precision", "dir_agreement")
 
     def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False):
         self.save_path   = save_path
@@ -229,7 +304,8 @@ class ValMetricsLogger(ComputationCallback):
 
 
 # Metrics where higher = better. All others (e_distance, mmd) → lower = better.
-_MAXIMIZE_METRICS = {"pearson_r", "pearson_r_delta", "nn_displacement_corr"}
+_MAXIMIZE_METRICS = {"pearson_r", "pearson_r_delta", "nn_displacement_corr",
+                     "de_overlap", "de_precision", "dir_agreement"}
 
 
 def _solver_params(solver) -> dict:
@@ -623,6 +699,10 @@ class ReconMetricsLogger(ComputationCallback):
         config ``guidance_scale`` (base w). No best-w is selected.
         """
         base_pk, ws, base_w = _test_guidance_plan(predict_kwargs)
+        # skip the w-sweep for non-CFG models: every w gives the same conditional prediction
+        # (mirrors evaluate_test). Avoids duplicate recon-test passes when cfg_enabled is False.
+        if not getattr(solver, "cfg_enabled", False):
+            ws = [base_w]
 
         # sample once so all w share the same cells/conditions
         batches = {name: sampler.sample(mode="on_train_end") for name, sampler in test_samplers.items()}

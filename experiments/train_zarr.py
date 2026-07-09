@@ -318,6 +318,9 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     max_cells = int(diag_cfg.get("max_cells", 2000))
     # sweep the SAME guidance weights as validation/test so diagnostics has per-w plots
     diag_ws = test_predict_kwargs.get("guidance_scales") or [test_predict_kwargs.get("guidance_scale", 1.0)]
+    # non-CFG model → every w is identical; collapse so the log + work reflect a single w
+    if not getattr(best_solver, "cfg_enabled", False):
+        diag_ws = [float(test_predict_kwargs.get("guidance_scale", 1.0))]
     print(f"Running effect-size diagnostics ({n_diag} conditions/split, w={diag_ws}) …")
     diag_samplers = temp_edit.make_diagnostic_samplers(
         data, n_conditions=n_diag, transform=transform, seed=int(cfg.seed)
