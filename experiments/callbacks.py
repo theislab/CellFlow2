@@ -118,12 +118,15 @@ def _de_vs_control(perturbed, control, fdr: float):
     return logfc, _bh_fdr_reject(pvals, fdr)
 
 
-def de_metrics(y_true, y_pred, source, fdr: float = 0.05) -> dict:
-    """DE-based condition metrics (all in [0, 1], higher = better).
+def de_metrics(y_true, y_pred, source, source_pred=None, fdr: float = 0.05) -> dict:
+    """DE-based condition metrics (all in [0, 1], higher = better). ALWAYS gene-space:
+    callers must pass gene-expression arrays (decode a latent to genes first).
 
     Significant DE genes are called (FDR ≤ `fdr`, default 0.05) separately for the
     true perturbed cells and the predicted perturbed cells, each vs the control
-    distribution; genes are ranked by |logFC|.
+    distribution; genes are ranked by |logFC|. ``source_pred`` (optional) is the control
+    used for the PREDICTED side — pass decoded control cells so the decoder offset cancels
+    (decode(pred) − decode(ctrl)); defaults to ``source`` (the observed control).
 
     DEOver (DE overlap)     — |predTop-N ∩ trueSig| / N, where N = #true-significant
                               genes and predTop-N = the N predicted-significant genes
@@ -133,9 +136,10 @@ def de_metrics(y_true, y_pred, source, fdr: float = 0.05) -> dict:
     DirAgr (direction agr.) — over predSig ∩ trueSig, the fraction whose logFC sign
                               matches the true logFC sign (up/down-regulation agreement).
     """
-    ctrl = np.asarray(source)
-    logfc_t, sig_t = _de_vs_control(y_true, ctrl, fdr)
-    logfc_p, sig_p = _de_vs_control(y_pred, ctrl, fdr)
+    ctrl_t = np.asarray(source)
+    ctrl_p = np.asarray(source_pred) if source_pred is not None else ctrl_t
+    logfc_t, sig_t = _de_vs_control(y_true, ctrl_t, fdr)
+    logfc_p, sig_p = _de_vs_control(y_pred, ctrl_p, fdr)
 
     true_genes = np.nonzero(sig_t)[0]
     pred_genes = np.nonzero(sig_p)[0]
@@ -155,10 +159,14 @@ def de_metrics(y_true, y_pred, source, fdr: float = 0.05) -> dict:
     return {"de_overlap": de_over, "de_precision": de_prec, "dir_agreement": dir_agr}
 
 
-_DE_NAN = {"de_overlap": float("nan"), "de_precision": float("nan"), "dir_agreement": float("nan")}
+_DE_KEYS = ("de_overlap", "de_precision", "dir_agreement")
+_DE_NAN = {k: float("nan") for k in _DE_KEYS}
 
 
-def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
+def _condition_metrics(y_true, y_pred, source, debug: bool = False, compute_de: bool = True) -> dict:
+    """Per-condition metrics on the model's OUTPUT space. DE metrics are only meaningful
+    in gene space, so `compute_de` must be False for latent-output runs (the gene-space DE
+    is computed instead in ReconMetricsLogger on decoded genes)."""
     yt, yp = np.asarray(y_true), np.asarray(y_pred)
     m = {
         "pearson_r":  pearson_r(yt, yp),
@@ -167,7 +175,8 @@ def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
         "pearson_r_delta":    pearson_r_delta(yt, yp, source)    if source is not None else float("nan"),
         "nn_displacement_corr": nn_displacement_corr(yt, yp, source, debug=debug) if source is not None else float("nan"),
     }
-    m.update(de_metrics(yt, yp, source) if source is not None else _DE_NAN)
+    if compute_de:
+        m.update(de_metrics(yt, yp, source) if source is not None else _DE_NAN)
     return m
 
 
@@ -177,12 +186,19 @@ class ValMetricsLogger(ComputationCallback):
     METRICS = ("pearson_r", "e_distance", "mmd", "pearson_r_delta", "nn_displacement_corr",
                "de_overlap", "de_precision", "dir_agreement")
 
-    def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False):
+    def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False,
+                 compute_de: bool = True):
         self.save_path   = save_path
         self._valid_freq = valid_freq
         self._step       = 0
         self._wandb_run  = wandb_run
         self._debug      = debug
+        # DE metrics are gene-space only; for latent-output runs pass compute_de=False
+        # (the gene-space DE is logged by ReconMetricsLogger on decoded genes instead).
+        self._compute_de = compute_de
+        self.METRICS = ValMetricsLogger.METRICS if compute_de else tuple(
+            m for m in ValMetricsLogger.METRICS if m not in _DE_KEYS
+        )
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self._step = 0
@@ -196,7 +212,8 @@ class ValMetricsLogger(ComputationCallback):
                     continue
                 src_arr = valid_source_data.get(ds, {}).get(cond_key)
                 per_ds.setdefault(ds, []).append(
-                    _condition_metrics(true_arr, pred_arr, src_arr, debug=self._debug)
+                    _condition_metrics(true_arr, pred_arr, src_arr, debug=self._debug,
+                                       compute_de=self._compute_de)
                 )
         return per_ds
 
@@ -351,7 +368,7 @@ class BestModelCheckpoint(ComputationCallback):
                 if pred_arr is None:
                     continue
                 src_arr = valid_source_data.get(ds, {}).get(cond_key)
-                m = _condition_metrics(true_arr, pred_arr, src_arr)
+                m = _condition_metrics(true_arr, pred_arr, src_arr, compute_de=self._metric in _DE_KEYS)
                 scores.append(m[self._metric])
         return float(np.nanmean(scores)) if scores else float("nan")
 
@@ -413,19 +430,21 @@ def _test_guidance_plan(predict_kwargs: dict | None) -> tuple[dict, list[float],
     return base_pk, ws, base_w
 
 
-def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = None) -> dict:
+def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = None,
+                  compute_de: bool = True) -> dict:
     """Per-condition and aggregated test metrics for each dataset.
 
     When ``predict_kwargs`` carries a ``guidance_scales`` list (the CFG w-sweep used at
     validation), the SAME sampled test batch is predicted once per w. The returned dict holds
     the default-w (config ``guidance_scale``) results plus ``per_w_aggregated`` = {w: aggregated}
-    so every w can be plotted; no best-w is selected.
+    so every w can be plotted; no best-w is selected. ``compute_de`` False for latent-output
+    runs (gene-space DE is computed by ReconMetricsLogger on decoded genes instead).
     """
     base_pk, ws, base_w = _test_guidance_plan(predict_kwargs)
     # skip the w-sweep for non-CFG models: every w gives the same conditional prediction.
     if not getattr(solver, "cfg_enabled", False):
         ws = [base_w]
-    keys = list(ValMetricsLogger.METRICS)
+    keys = [k for k in ValMetricsLogger.METRICS if compute_de or k not in _DE_KEYS]
 
     # sample each dataset ONCE so all w are compared on the same cells/conditions
     batches = {}
@@ -449,7 +468,7 @@ def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = Non
             per_condition = {}
             for cond_key in tqdm(sorted(true.keys(), key=str), desc=f"  test metrics [{name}] w={w}"):
                 src_arr = src.get(cond_key) if isinstance(src, dict) else None
-                per_condition[str(cond_key)] = _condition_metrics(true[cond_key], pred[cond_key], src_arr)
+                per_condition[str(cond_key)] = _condition_metrics(true[cond_key], pred[cond_key], src_arr, compute_de=compute_de)
                 all_per_condition[f"{name}/{cond_key}"] = per_condition[str(cond_key)]
             per_dataset[name] = {
                 "per_condition": per_condition,
@@ -504,6 +523,7 @@ class ReconMetricsLogger(ComputationCallback):
         self._step = 0
         self._ctrl_cache: dict[str, np.ndarray] = {}
         self._ctrl_decoded_cache: dict[str, np.ndarray] = {}
+        self._ctrl_decoded_cells_cache: dict[str, np.ndarray] = {}
         # precompute column indices for decoder's var_names
         var_names = decoder.var_names
         if var_names is not None:
@@ -516,6 +536,7 @@ class ReconMetricsLogger(ComputationCallback):
         self._step = 0
         self._ctrl_cache = {}
         self._ctrl_decoded_cache = {}
+        self._ctrl_decoded_cells_cache = {}
 
     @staticmethod
     def _to_dense(X) -> np.ndarray:
@@ -584,6 +605,27 @@ class ReconMetricsLogger(ComputationCallback):
             self._ctrl_decoded_cache[cell_line] = self._decoder.decode(Z).mean(axis=0)
         return self._ctrl_decoded_cache[cell_line]
 
+    def _get_ctrl_decoded_cells(self, cond_key: tuple) -> np.ndarray | None:
+        """Full decode(control-cell latents) matrix (cells × genes), cached per cell line.
+
+        Used as the pred-side control for gene-space DE so the decoder offset cancels
+        (DE-pred = decode(pred) vs decode(ctrl_latent)). Falls back to None when no latent
+        is available, in which case DE uses the observed control cells instead.
+        """
+        if self._emb_key is None or self._emb_key not in self._adata.obsm:
+            return None
+        cond_key = self._normalize_key(cond_key)
+        cl_idx = self._cond_keys.index(self._cl_key)
+        cell_line = str(cond_key[cl_idx])
+        if cell_line not in self._ctrl_decoded_cells_cache:
+            obs = self._adata.obs
+            mask = obs[self._ctrl_key].astype(bool) & (obs[self._cl_key].astype(str) == cell_line)
+            if mask.sum() == 0:
+                return None
+            Z = np.asarray(self._adata[mask].obsm[self._emb_key], dtype=np.float32)
+            self._ctrl_decoded_cells_cache[cell_line] = np.asarray(self._decoder.decode(Z), dtype=np.float32)
+        return self._ctrl_decoded_cells_cache[cell_line]
+
     def _compute_recon(self, pred_data: dict, prefix: str, step_label: str, emit: bool = True) -> dict:
         """Gene-space delta metrics over ``pred_data`` ({ds: {cond_key: pred_latent}}).
 
@@ -593,6 +635,7 @@ class ReconMetricsLogger(ComputationCallback):
         """
         pearson_deltas = []
         pearson_fulls = []   # non-delta: decode(pred) vs true genes (no control)
+        de_over, de_prec, de_dir = [], [], []   # gene-space DE on decoded genes
         n_total = n_unmatched = 0
         first_unmatched = None
         pred_sigs, predgene_sigs = [], []  # diagnostic: do recon's inputs/outputs vary?
@@ -624,12 +667,19 @@ class ReconMetricsLogger(ComputationCallback):
                 # non-delta metric (absolute reconstruction): decode(pred) vs true genes
                 rf, _ = pearsonr(true_mean, pred_mean)
                 pearson_fulls.append(float(rf))
+                # gene-space DE (decoded cells): DE-true = perturbed vs observed control,
+                # DE-pred = decode(pred) vs decode(control latent) so the decoder offset cancels.
+                ctrl_pred_cells = self._get_ctrl_decoded_cells(cond_key)
+                de = de_metrics(true_genes, pred_genes, ctrl_genes, source_pred=ctrl_pred_cells)
+                de_over.append(de["de_overlap"])
+                de_prec.append(de["de_precision"])
+                de_dir.append(de["dir_agreement"])
         if pred_sigs:
             print(f"    {prefix} recon  [diag] pred_latent mean={np.mean(pred_sigs):.6f}  "
                   f"decoded mean={np.mean(predgene_sigs):.6f}  ({step_label})")
 
         # Always emit the keys (NaN when nothing matched) so monitor_metrics never KeyErrors.
-        keys = ["pearson_r_delta", "pearson_r"]
+        keys = ["pearson_r_delta", "pearson_r", *_DE_KEYS]
         if not pearson_deltas:
             ck, no_true, no_ctrl = (first_unmatched or (None, None, None))
             print(f"    {prefix} recon  WARNING: 0/{n_total} conditions matched the h5ad "
@@ -646,14 +696,17 @@ class ReconMetricsLogger(ComputationCallback):
             print(f"    {prefix} recon  note: {n_unmatched}/{n_total} conditions unmatched "
                   f"(e.g. {first_unmatched[0]!r})")
 
-        vals = {"pearson_r_delta": pearson_deltas, "pearson_r": pearson_fulls}
+        vals = {"pearson_r_delta": pearson_deltas, "pearson_r": pearson_fulls,
+                "de_overlap": de_over, "de_precision": de_prec, "dir_agreement": de_dir}
         out = {}
         for k, v in vals.items():
             out[f"{prefix}_recon_{k}"]        = float(np.nanmean(v))
             out[f"{prefix}_recon_{k}_median"] = float(np.nanmedian(v))
         print(f"    {prefix} recon  "
               f"rδ={out[f'{prefix}_recon_pearson_r_delta']:.4f}  r={out[f'{prefix}_recon_pearson_r']:.4f}  "
-              f"(med rδ={out[f'{prefix}_recon_pearson_r_delta_median']:.4f}) "
+              f"(med rδ={out[f'{prefix}_recon_pearson_r_delta_median']:.4f})  "
+              f"DEover={out[f'{prefix}_recon_de_overlap']:.3f} DEprec={out[f'{prefix}_recon_de_precision']:.3f} "
+              f"DirAgr={out[f'{prefix}_recon_dir_agreement']:.3f} "
               f"({step_label})")
         if emit and self._wandb_run is not None:
             self._wandb_run.log(out)

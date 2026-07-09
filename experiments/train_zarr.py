@@ -199,6 +199,13 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     print(f"  total parameters: {n_params:,}")
 
     val_log_path = str(output_dir / f"{name}_val_metrics.json")
+    # gene-space DE lives wherever the model outputs genes: directly in ValMetricsLogger for
+    # gene-space runs, or (for latent runs) in ReconMetricsLogger on DECODED genes. When recon
+    # is enabled the model predicts a latent, so suppress the (meaningless) latent DE here.
+    recon_cfg = cfg.get("recon", {})
+    dec_path  = recon_cfg.get("decoder_path")
+    h5ad_path = recon_cfg.get("h5ad_path")
+    recon_enabled = bool(dec_path and h5ad_path)
     cbs = [
         Metrics(
             metrics=["e_distance", "mmd"],
@@ -206,17 +213,14 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             use_gpu_optimized=True,
             precision="bfloat16",
         ),
-        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
+        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False)), compute_de=not recon_enabled),
         callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),
         temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
     ]
 
     # ── optional gene-space reconstruction metrics ──
     recon_cb  = None
-    recon_cfg = cfg.get("recon", {})
-    dec_path  = recon_cfg.get("decoder_path")
-    h5ad_path = recon_cfg.get("h5ad_path")
-    if dec_path and h5ad_path:
+    if recon_enabled:
         import scanpy as sc
         print(f"Loading ReconDecoder from {dec_path} …")
         recon_dec = callbacks.load_recon_decoder(str(dec_path))
@@ -253,7 +257,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             f"{ds}_nn_displacement_corr",
             f"{ds}_gap_closure_mean",
         ]
-    if dec_path and h5ad_path:
+    if recon_enabled:
         monitor_metrics += ["val_recon_pearson_r_delta"]
 
     print(f"Training {int(cfg.training.num_iterations)} iterations "
@@ -285,7 +289,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     # re-read predict_kwargs from cfg (the earlier dict was mutated when the trainer popped
     # guidance_scales); test sweeps the SAME guidance_scales as validation, plotting all w.
     test_predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
-    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs)
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs, compute_de=not recon_enabled)
 
     # ── gene-space recon metrics on the test set (test_recon_*) ──
     test_recon = {}
