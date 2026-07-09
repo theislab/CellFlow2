@@ -14,6 +14,7 @@ import numpy as np
 import optax
 import pandas as pd
 from cellflow.model._utils import _write_predictions
+from cellflow.training import BaseCallback
 
 from scaleflow import _constants
 from scaleflow._compat import BrownianBridge, ConstantNoiseFlow
@@ -22,7 +23,6 @@ from scaleflow.data import DataManager, GroupedDistribution, SamplerABC
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
 from scaleflow.solvers import _eqm, _genot, _otfm
-from scaleflow.training._callbacks import BaseCallback
 from scaleflow.training._trainer import CellFlowTrainer
 from scaleflow.utils import match_linear
 

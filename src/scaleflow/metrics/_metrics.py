@@ -2,59 +2,17 @@ from collections.abc import Sequence
 
 import jax
 import numpy as np
-
-# dedup: re-exported from cellflow (identical implementations)
-from cellflow.metrics._metrics import (
-    compute_e_distance as compute_e_distance,
-)
-from cellflow.metrics._metrics import (
-    compute_e_distance_fast as compute_e_distance_fast,
-)
-from cellflow.metrics._metrics import (
-    compute_mean_metrics as compute_mean_metrics,
-)
-from cellflow.metrics._metrics import (
-    compute_metrics as compute_metrics,
-)
-from cellflow.metrics._metrics import (
-    compute_metrics_fast as compute_metrics_fast,
-)
-from cellflow.metrics._metrics import (
-    compute_r_squared as compute_r_squared,
-)
-from cellflow.metrics._metrics import (
-    compute_scalar_mmd as compute_scalar_mmd_cf,
-)
-from cellflow.metrics._metrics import (
-    compute_sinkhorn_div as compute_sinkhorn_div,
-)
-from cellflow.metrics._metrics import (
-    maximum_mean_discrepancy as maximum_mean_discrepancy,
-)
-from cellflow.metrics._metrics import (
-    pairwise_squeuclidean as pairwise_squeuclidean,
-)
-from cellflow.metrics._metrics import (
-    rbf_kernel_fast as rbf_kernel_fast,
-)
+from cellflow.metrics._metrics import maximum_mean_discrepancy, pairwise_squeuclidean, rbf_kernel_fast
 from jax import numpy as jnp
 from jax.typing import ArrayLike
 
 __all__ = [
-    "compute_metrics",
-    "compute_metrics_fast",
-    "compute_metrics_fast_gpu",
-    "compute_mean_metrics",
-    "compute_scalar_mmd_cf",
     "compute_scalar_mmd_sf",
-    "compute_scalar_mmd_gpu",
-    "compute_r_squared",
     "compute_r_squared_gpu",
-    "compute_sinkhorn_div",
-    "compute_e_distance",
-    "compute_e_distance_fast",
+    "subsample_on_gpu",
+    "compute_scalar_mmd_gpu",
     "compute_e_distance_gpu",
-    "maximum_mean_discrepancy",
+    "compute_metrics_fast_gpu",
 ]
 
 

@@ -4,12 +4,13 @@ from typing import Any, Literal
 
 import jax
 import numpy as np
+from cellflow.training import BaseCallback
 from numpy.typing import ArrayLike
 from tqdm import tqdm
 
 from scaleflow.data import SamplerABC
 from scaleflow.solvers import _eqm, _genot, _otfm
-from scaleflow.training._callbacks import BaseCallback, CallbackRunner
+from scaleflow.training._callbacks import CallbackRunner
 
 
 class CellFlowTrainer:

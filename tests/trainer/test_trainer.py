@@ -5,11 +5,12 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+from cellflow.training import ComputationCallback
 
 import scaleflow
 from scaleflow._compat import ConstantNoiseFlow
 from scaleflow.solvers import _otfm
-from scaleflow.training import CellFlowTrainer, ComputationCallback, Metrics
+from scaleflow.training import CellFlowTrainer, Metrics
 from scaleflow.utils import match_linear
 
 x_test = jnp.ones((10, 5)) * 10

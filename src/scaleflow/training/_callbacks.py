@@ -4,38 +4,14 @@ import inspect
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-import numpy as np
-
-# dedup: re-exported from cellflow (identical implementations)
-from cellflow.training._callbacks import (
-    BaseCallback as BaseCallback,
-)
-from cellflow.training._callbacks import (
-    ComputationCallback as ComputationCallback,
-)
-from cellflow.training._callbacks import (
-    LoggingCallback as LoggingCallback,
-)
+from cellflow.training._callbacks import BaseCallback, ComputationCallback, LoggingCallback
 from cellflow.training._callbacks import Metrics as _BaseMetrics
-from cellflow.training._callbacks import (
-    PCADecodedMetrics as PCADecodedMetrics,
-)
-from cellflow.training._callbacks import (
-    VAEDecodedMetrics as VAEDecodedMetrics,
-)
-from cellflow.training._callbacks import (
-    WandbLogger as WandbLogger,
-)
 
 from scaleflow._types import ArrayLike
 from scaleflow.metrics._metrics import (
-    compute_e_distance_fast,
     compute_e_distance_gpu,
-    compute_r_squared,
     compute_r_squared_gpu,
-    compute_scalar_mmd_cf,
     compute_scalar_mmd_gpu,
-    compute_sinkhorn_div,
 )
 
 if TYPE_CHECKING:
@@ -43,34 +19,16 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "BaseCallback",
-    "LoggingCallback",
-    "ComputationCallback",
     "Metrics",
-    "WandbLogger",
     "LearningRateMonitor",
     "CallbackRunner",
-    "PCADecodedMetrics",
-    "VAEDecodedMetrics",
 ]
 
-
-metric_to_func: dict[str, Callable[[ArrayLike, ArrayLike], float | ArrayLike]] = {
-    "r_squared": compute_r_squared,
-    "mmd": compute_scalar_mmd_cf,
-    "sinkhorn_div": compute_sinkhorn_div,
-    "e_distance": compute_e_distance_fast,
-}
 
 metric_to_func_gpu: dict[str, Callable] = {
     "r_squared": compute_r_squared_gpu,
     "mmd": compute_scalar_mmd_gpu,
     "e_distance": compute_e_distance_gpu,
-}
-
-agg_fn_to_func: dict[str, Callable[[ArrayLike], float | ArrayLike]] = {
-    "mean": lambda x: np.mean(x, axis=0),
-    "median": lambda x: np.median(x, axis=0),
 }
 
 

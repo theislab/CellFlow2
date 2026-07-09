@@ -24,15 +24,12 @@ os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
 import cloudpickle
 import jax
 import numpy as np
+from cellflow.metrics import compute_e_distance_fast, compute_r_squared
 from tqdm import tqdm
 
 from scaleflow.data import GroupedDistribution, split_datasets
 from scaleflow.data._dataloader import ValidationSampler
-from scaleflow.metrics._metrics import (
-    compute_r_squared,
-    compute_e_distance_fast,
-    compute_scalar_mmd_sf,
-)
+from scaleflow.metrics._metrics import compute_scalar_mmd_sf
 
 # ── Config — must match train_comparison.py exactly ──────────────────────────
 ZARR_PATH   = Path("/storage/pancellflow/tahoe.zarr")
