@@ -39,7 +39,7 @@ from scaleflow.data import GroupedDistribution, split_datasets
 from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
 from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
-from scaleflow.utils import match_linear
+from cellflow.utils import match_linear
 
 import utils
 import callbacks
