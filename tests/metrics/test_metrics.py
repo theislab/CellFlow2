@@ -36,7 +36,7 @@ class TestMetrics:
         sinkhorn_div = scaleflow.metrics.compute_sinkhorn_div(x_test, y_test, epsilon=epsilon)
         e_distance = scaleflow.metrics.compute_e_distance(x_test, y_test)
         e_distance_fast = scaleflow.metrics.compute_e_distance_fast(x_test, y_test)
-        scalar_mmd = scaleflow.metrics.compute_scalar_mmd(x_test, y_test)
+        scalar_mmd = scaleflow.metrics.compute_scalar_mmd_sf(x_test, y_test)
         mmd_fast = scaleflow.metrics.maximum_mean_discrepancy(x_test, y_test, exact=False)
 
         assert -1000 <= r_squared <= 1

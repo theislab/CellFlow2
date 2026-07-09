@@ -34,7 +34,7 @@ from scaleflow.metrics._metrics import (
     compute_e_distance_gpu,
     compute_r_squared,
     compute_r_squared_gpu,
-    compute_scalar_mmd,
+    compute_scalar_mmd_cf,
     compute_scalar_mmd_gpu,
     compute_sinkhorn_div,
 )
@@ -58,7 +58,7 @@ __all__ = [
 
 metric_to_func: dict[str, Callable[[ArrayLike, ArrayLike], float | ArrayLike]] = {
     "r_squared": compute_r_squared,
-    "mmd": compute_scalar_mmd,
+    "mmd": compute_scalar_mmd_cf,
     "sinkhorn_div": compute_sinkhorn_div,
     "e_distance": compute_e_distance_fast,
 }

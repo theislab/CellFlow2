@@ -23,6 +23,9 @@ from cellflow.metrics._metrics import (
     compute_r_squared as compute_r_squared,
 )
 from cellflow.metrics._metrics import (
+    compute_scalar_mmd as compute_scalar_mmd_cf,
+)
+from cellflow.metrics._metrics import (
     compute_sinkhorn_div as compute_sinkhorn_div,
 )
 from cellflow.metrics._metrics import (
@@ -42,7 +45,8 @@ __all__ = [
     "compute_metrics_fast",
     "compute_metrics_fast_gpu",
     "compute_mean_metrics",
-    "compute_scalar_mmd",
+    "compute_scalar_mmd_cf",
+    "compute_scalar_mmd_sf",
     "compute_scalar_mmd_gpu",
     "compute_r_squared",
     "compute_r_squared_gpu",
@@ -72,7 +76,7 @@ __all__ = [
 
 
 
-def compute_scalar_mmd(
+def compute_scalar_mmd_sf(
     x: ArrayLike, y: ArrayLike, gammas: Sequence[float] | None = None, max_samples: int = 5000
 ) -> float:
     """Compute the Mean Maximum Discrepancy (MMD) across different length scales

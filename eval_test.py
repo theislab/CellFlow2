@@ -31,7 +31,7 @@ from scaleflow.data._dataloader import ValidationSampler
 from scaleflow.metrics._metrics import (
     compute_r_squared,
     compute_e_distance_fast,
-    compute_scalar_mmd,
+    compute_scalar_mmd_sf,
 )
 
 # ── Config — must match train_comparison.py exactly ──────────────────────────
@@ -149,7 +149,7 @@ for cond_key in tqdm(sorted(true.keys()), desc="  test metrics"):
     per_condition[cond_key] = {
         "r_squared":  float(compute_r_squared(y_true, y_pred)),
         "e_distance": float(compute_e_distance_fast(y_true, y_pred)),
-        "mmd":        float(compute_scalar_mmd(y_true, y_pred)),
+        "mmd":        float(compute_scalar_mmd_sf(y_true, y_pred)),
     }
 
 metrics     = ["r_squared", "e_distance", "mmd"]
