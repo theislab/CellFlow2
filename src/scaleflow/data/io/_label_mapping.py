@@ -33,7 +33,7 @@ class CSRLabelMapping:
     _lookup: dict[int, int] | None = None  # lazy-built: dist_idx -> position
 
     @classmethod
-    def from_dict(cls, mapping: dict[int, Any]) -> "CSRLabelMapping":
+    def from_dict(cls, mapping: dict[int, Any]) -> CSRLabelMapping:
         """Create CSRLabelMapping from a dict.
 
         Parameters
@@ -118,7 +118,7 @@ class CSRLabelMapping:
         subgroup.create_array("json_labels", data=self.json_labels.astype(str))
 
     @classmethod
-    def read_zarr(cls, group: zarr.Group) -> "CSRLabelMapping":
+    def read_zarr(cls, group: zarr.Group) -> CSRLabelMapping:
         """Read from zarr group."""
         indices = np.asarray(group["indices"])
         json_labels = np.asarray(group["json_labels"]).astype(object)

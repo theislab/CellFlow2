@@ -1,820 +1,447 @@
+"""Train a CellFlow2 model from raw .h5ad files (in-memory GroupedDistributions via DataManager).
+
+Concise Hydra entrypoint that MIRRORS train_zarr.py and reuses callbacks.py / utils.py / temp_edit.py.
+The only difference vs train_zarr.py: a dataset whose path ends in ``.h5ad`` is grouped in memory via
+the DataManager (config in ``cfg.data``; ``data_location = obsm[cfg.data.cell_embedding.key]`` = the
+flow latent, e.g. ``AE_128_opt``) instead of read from a prebuilt zarr. Everything after loading —
+per-dataset samplers/metrics, gene-space ReconMetricsLogger, EffectSizeMonitor, wandb — is shared.
+
+    python experiments/train_comparison.py                          # sciplex3_with_emb + AE_128 latent
+    python experiments/train_comparison.py wandb.enabled=true
+    python experiments/train_comparison.py training.num_iterations=300 training.valid_freq=150
 """
-train_comparison.py
-
-Trains a CellFlow2 model on Tahoe data.
-
-All defaults live in experiments/base.yaml (the single source of truth); it is
-always loaded first. An optional --config file overlays it, then --set CLI
-overrides, then wandb sweep params.
-
-Run from the repo root:
-─────
-  # Use base config as-is:
-  python experiments/train_comparison.py
-
-  # Override specific keys:
-  python experiments/train_comparison.py --model prophet
-  python experiments/train_comparison.py --model random --split.by cell_line
-  python experiments/train_comparison.py --set arch.hidden_dims=[1024] optimizer.peak_lr=2e-4
-
-  # Overlay another YAML on top of base.yaml (path resolved next to the script):
-  python experiments/train_comparison.py --config multi_dataset.yaml
-
-  # Enable wandb logging:
-  python experiments/train_comparison.py --wandb
-
-  # Run as wandb sweep agent (agent passes params automatically):
-  wandb sweep experiments/sweep_single.yaml
-  wandb agent <sweep_id>
-"""
-
-import argparse
-import ast
-import json
 import os
-import time
-from pathlib import Path
-from typing import Any
 
-import yaml
-
-# ── JAX persistent compilation cache ─────────────────────────────────────────
+# set JAX env before importing jax (pulled in by scaleflow / utils)
+os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/storage/jax_cache")
 os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
-# ─────────────────────────────────────────────────────────────────────────────
 
+# allow wandb up to 2 hours to upload at the end of a long training run
+os.environ.setdefault("WANDB_HTTP_TIMEOUT", "7200")
+os.environ.setdefault("WANDB_INIT_TIMEOUT", "7200")
+# retry failed uploads instead of dropping data
+os.environ.setdefault("WANDB_RETRY_MAX", "10")
+# write logs offline if network drops mid-run; sync manually later
+os.environ.setdefault("WANDB_SILENT", "true")  # suppress wandb spam to stdout
+
+import time
 from functools import partial
+from pathlib import Path
 
 import cloudpickle
+import hydra
 import jax
 import numpy as np
-import optax
-from tqdm import tqdm
+from omegaconf import DictConfig, OmegaConf
 
 from scaleflow.data import GroupedDistribution, split_datasets
 from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
 from scaleflow.model import ScaleFlow
 from scaleflow.training import Metrics
-from scaleflow.training._callbacks import ComputationCallback
 from scaleflow.utils import match_linear
-from scaleflow.metrics._metrics import (
-    compute_r_squared,
-    compute_e_distance_fast,
-    compute_scalar_mmd,
-)
+
+import utils
+import callbacks
+import temp_edit
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Config helpers
-#
-# All defaults live in experiments/base.yaml — the single source of truth.
-# There are no hardcoded config values in this file. base.yaml (resolved next to
-# this script) is always loaded first, then an optional --config overlay, then
-# CLI --set overrides.
-# ─────────────────────────────────────────────────────────────────────────────
-CONFIG_DIR       = Path(__file__).resolve().parent          # experiments/
-BASE_CONFIG_PATH = CONFIG_DIR / "base.yaml"
+def mark_control(adata, flag_key: str):
+    """Ensure a boolean control column. No-op if ``flag_key`` already present (e.g. sciplex3_with_emb),
+    else derive control = every drug slot == 'control' (unipert/tahoe: drug_0[/drug_1])."""
+    if flag_key in adata.obs:
+        adata.obs[flag_key] = adata.obs[flag_key].astype(bool)
+        return adata
+    drug_col = "drug_0" if "drug_0" in adata.obs else "drug"
+    ctrl = adata.obs[drug_col].astype(str) == "control"
+    if "drug_1" in adata.obs:
+        ctrl &= adata.obs["drug_1"].astype(str) == "control"
+    adata.obs[flag_key] = ctrl
+    return adata
 
 
-def deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override into base (override wins)."""
-    result = base.copy()
-    for k, v in override.items():
-        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-            result[k] = deep_merge(result[k], v)
-        else:
-            result[k] = v
-    return result
+def prep_adata(adata, prep, data_cfg: DictConfig):
+    """Per-dataset harmonization (config-driven, for cross-dataset runs). Reusable for the recon adata.
+      - ``cell_line_map`` {old: new}  → canonicalize obs['cell_line'] (e.g. CVCL_0023→A549) AND copy the
+        CCLE embedding to the new key so rep_keys['cell_line'] resolves across datasets.
+      - ``cell_line_keep`` <name>     → filter to one cell line (e.g. sciplex → A549).
+      - ``batch`` <label>             → obs['batch']=label + inject uns['batch_embeddings'] = one-hot over
+        data.batch_labels, so both datasets share one batch space (batch is a src_dist_key → a covariate)."""
+    prep = OmegaConf.to_container(prep, resolve=True) if prep is not None else {}
+    cmap = prep.get("cell_line_map")
+    if cmap:
+        adata.obs["cell_line"] = adata.obs["cell_line"].astype(str).replace(cmap).astype("category")
+        cl_uns = (OmegaConf.to_container(data_cfg.rep_keys, resolve=True) or {}).get("cell_line")
+        if cl_uns and cl_uns in adata.uns:
+            d = dict(adata.uns[cl_uns])
+            for old, new in cmap.items():
+                if old in d and new not in d:
+                    d[new] = d[old]
+            adata.uns[cl_uns] = d
+    keep = prep.get("cell_line_keep")
+    if keep:
+        adata = adata[adata.obs["cell_line"].astype(str) == str(keep)].copy()
+    batch = prep.get("batch")
+    if batch:
+        adata.obs["batch"] = str(batch)
+        labels = list(data_cfg.get("batch_labels", [batch]))
+        eye = np.eye(len(labels), dtype=np.float32)
+        adata.uns["batch_embeddings"] = {lab: eye[i] for i, lab in enumerate(labels)}
+    return adata
 
 
-def _resolve_config(config_path: str) -> Path:
-    """Resolve an overlay path: as given, else relative to this script's dir."""
-    p = Path(config_path)
-    if p.exists():
-        return p
-    alt = CONFIG_DIR / config_path
-    if alt.exists():
-        return alt
-    raise FileNotFoundError(f"Config overlay not found: {config_path} (also tried {alt})")
-
-
-def load_config(config_path: str | None, overrides: dict) -> dict:
-    """Load config: base.yaml → optional --config overlay → CLI overrides."""
-    if not BASE_CONFIG_PATH.exists():
-        raise FileNotFoundError(
-            f"Base config not found at {BASE_CONFIG_PATH}. "
-            f"It is the single source of truth for all defaults — it must exist."
-        )
-    with open(BASE_CONFIG_PATH) as f:
-        cfg = yaml.safe_load(f) or {}
-
-    if config_path:
-        with open(_resolve_config(config_path)) as f:
-            file_cfg = yaml.safe_load(f)
-        cfg = deep_merge(cfg, file_cfg or {})
-    cfg = deep_merge(cfg, overrides)
-    return cfg
-
-
-def set_nested(d: dict, dotkey: str, value: Any) -> None:
-    """Set d['a']['b'] from dotkey='a.b'."""
-    keys = dotkey.split(".")
-    for k in keys[:-1]:
-        d = d.setdefault(k, {})
-    d[keys[-1]] = value
-
-
-def build_optimizer(cfg: dict) -> optax.GradientTransformation:
-    """Warmup-cosine-decay Adam, optionally wrapped in MultiSteps grad accumulation.
-
-    Schedule units: `num_iterations` / `warmup_iterations` are given in *training*
-    steps; since MultiSteps applies one real update every `grad_accumulation`
-    micro-steps, the schedule is expressed in optimizer-update units (divide by
-    grad_accumulation) so the cosine completes over the actual number of updates.
-    """
-    ocfg     = cfg["optimizer"]
-    num_iter = cfg["training"]["num_iterations"]
-    accum    = int(ocfg.get("grad_accumulation", 1)) or 1
-
-    opt_steps  = max(num_iter // accum, 1)
-    warmup_opt = max(min(int(ocfg["warmup_iterations"]) // accum, opt_steps - 1), 1)
-
-    lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=float(ocfg.get("init_lr", 0.0)),
-        peak_value=float(ocfg["peak_lr"]),
-        warmup_steps=warmup_opt,
-        decay_steps=opt_steps,
-        end_value=float(ocfg["end_lr"]),
+def build_gd_from_h5ad(path: str, data_cfg: DictConfig, ds_cfg: DictConfig | None = None) -> GroupedDistribution:
+    """Group a raw .h5ad into an in-memory GroupedDistribution via the DataManager, mirroring
+    scripts/prepare_sciplex_prophet.py. ``data_location = obsm[data_cfg.cell_embedding.key]`` is the
+    flow latent (e.g. AE_128_opt / X_state). ``ds_cfg.prep`` applies per-dataset harmonization
+    (cell_line canonicalization/filter, batch covariate). Optional ``log1p_dose_from`` (per-dataset via
+    prep, else data_cfg) adds a log1p 'dose' scalar condition; ``extra_rep_keys`` (e.g. prophet) adds
+    condition tokens looked up from uns — kept or dropped at sample time by the ablation's ConditionTransform."""
+    import scanpy as sc
+    from scaleflow.data import AnnDataLocation, DataManager
+    prep = ds_cfg.get("prep", None) if ds_cfg is not None else None
+    adata = prep_adata(sc.read_h5ad(path), prep, data_cfg)
+    flag_key = str(data_cfg.dist_flag_key)
+    adata = mark_control(adata, flag_key)
+    # dose as a log1p scalar condition (obs['dose'] = log1p(<dose col>)); NOT given a rep_key, so
+    # DataManager stores it as a raw scalar. Per-dataset dose column (tahoe 'dosage' / sciplex 'dose_value').
+    dose_src = (OmegaConf.to_container(prep, resolve=True) or {}).get("log1p_dose_from") if prep else None
+    dose_src = dose_src or data_cfg.get("log1p_dose_from", None)
+    if dose_src and dose_src in adata.obs:
+        adata.obs["dose"] = np.log1p(adata.obs[dose_src].astype("float32"))
+    extra = data_cfg.get("extra_rep_keys", None)
+    extra = {k: tuple(v) for k, v in OmegaConf.to_container(extra, resolve=True).items()} if extra else None
+    dm = DataManager(
+        dist_flag_key=flag_key,
+        src_dist_keys=list(data_cfg.src_dist_keys),
+        tgt_dist_keys=list(data_cfg.tgt_dist_keys),
+        rep_keys=OmegaConf.to_container(data_cfg.rep_keys, resolve=True),
+        data_location=AnnDataLocation().obsm[str(data_cfg.cell_embedding.key)],
+        extra_rep_keys=extra,
     )
-    base_opt = optax.adam(learning_rate=lr_schedule)
-    return optax.MultiSteps(base_opt, accum) if accum > 1 else base_opt
+    return dm.prepare_data(adata, verbose=True)
 
 
-def _parse_cli_value(val: str) -> Any:
-    """Parse a CLI --set value into int/float/bool/list/None, else keep as string.
-
-    Handles: 256, 0.1, true/false, null/none, [1024], [1024,1024,1024].
-    """
-    low = val.strip().lower()
-    if low in ("null", "none"):
-        return None
-    if low == "true":
-        return True
-    if low == "false":
-        return False
-    # list / tuple literals, e.g. [1024] or [1024,1024]
-    if val.strip().startswith(("[", "(")):
+def run(cfg: DictConfig, gds: dict | None = None) -> dict:
+    # ── wandb sweep is dominant: init first, then overlay its params onto cfg ──
+    # In sweep mode, project is set by the sweep yaml; pass None to avoid overriding.
+    wandb_run = None
+    if cfg.wandb.enabled or os.environ.get("WANDB_SWEEP_ID"):
         try:
-            return list(ast.literal_eval(val))
-        except (ValueError, SyntaxError):
-            return val
-    for cast in (int, float):
-        try:
-            return cast(val)
-        except ValueError:
-            pass
-    return val
+            import wandb
+            project = cfg.wandb.project if not os.environ.get("WANDB_SWEEP_ID") else None
+            wandb_run = wandb.init(
+                project=project,
+                entity=cfg.wandb.get("entity"),
+                name=cfg.wandb.get("run_name"),
+                config=OmegaConf.to_container(cfg, resolve=True),
+                settings=wandb.Settings(init_timeout=7200),
+            )
+            OmegaConf.set_struct(cfg, False)
+            for k, v in dict(wandb_run.config).items():
+                if "." in k or not isinstance(v, dict):
+                    OmegaConf.update(cfg, k, v)
+            OmegaConf.set_struct(cfg, True)
+            print(f"  wandb run: {wandb_run.url}")
+        except ImportError:
+            print("  wandb not installed — skipping")
 
+    # ── log resolved config so sweep overrides are visible in the run output ──
+    m_cfg = cfg.model
+    for ds_name in cfg.selected_datasets:
+        ds = cfg.datasets[ds_name]
+        print(f"  datasets.{ds_name}.path       = {ds.path}")
+    print(f"  data.cell_embedding.key    = {cfg.data.cell_embedding.key}")
+    print(f"  ablation.mode              = {cfg.ablation.mode}")
+    print(f"  model.hidden_dims          = {list(m_cfg.hidden_dims)}")
+    print(f"  model.decoder_dims         = {list(m_cfg.decoder_dims)}")
+    print(f"  model.conditioning_key     = {m_cfg.conditioning_key}")
+    print(f"  training.peak_lr           = {cfg.training.peak_lr}")
+    print(f"  training.num_iterations    = {cfg.training.num_iterations}")
+    print(f"  match_fn.epsilon           = {cfg.match_fn.epsilon}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ConditionTransform — replaces wrapper sampler classes
-# Passed directly into ReservoirSampler and ValidationSampler.
-# ─────────────────────────────────────────────────────────────────────────────
-class ConditionTransform:
-    """Transforms condition dicts at sample time.
-
-    mode="default" : drops the 'prophet' key entirely.
-    mode="prophet" : no-op, returns condition unchanged.
-    mode="random"  : replaces 'prophet' values with random vectors.
-                     Training (cond_key=None)  → new random each call.
-                     Validation (cond_key=str) → fixed random per condition.
-    """
-
-    def __init__(self, mode: str, seed: int = 42):
-        self.mode            = mode
-        self._rng            = np.random.default_rng(seed)
-        self._seed           = seed
-        self._cache: dict    = {}   # (cond_key, emb_key, shape) → fixed array
-
-    def __call__(self, cond: dict, cond_key: str | None = None) -> dict:
-        if self.mode == "prophet":
-            return cond
-
-        result = {}
-        for k, v in cond.items():
-            if k == "prophet":
-                if self.mode == "default":
-                    continue                          # drop key entirely
-                elif self.mode == "random":
-                    if cond_key is not None:
-                        # Fixed per condition across val steps
-                        cache_key = (cond_key, k, v.shape)
-                        if cache_key not in self._cache:
-                            int_seed = abs(hash(cond_key + k + str(self._seed))) % (2 ** 31)
-                            self._cache[cache_key] = (
-                                np.random.default_rng(int_seed)
-                                .standard_normal(v.shape)
-                                .astype(v.dtype)
-                            )
-                        result[k] = self._cache[cache_key]
-                    else:
-                        # New random each training step
-                        result[k] = self._rng.standard_normal(v.shape).astype(v.dtype)
+    # ── loading: must happen AFTER sweep overlay so path/latent is correct.
+    #    .h5ad → in-memory GroupedDistribution via DataManager; .zarr → read_zarr. ──
+    if gds is None:
+        gds = {}
+        for ds_name in cfg.selected_datasets:
+            path = str(cfg.datasets[ds_name].path)
+            print(f"Reading [{ds_name}] ← {path}")
+            if path.endswith(".h5ad"):
+                gds[ds_name] = build_gd_from_h5ad(path, cfg.data, cfg.datasets[ds_name])
             else:
-                result[k] = v
-        return result
+                gds[ds_name] = GroupedDistribution.read_zarr(Path(path))
 
+    mode       = cfg.ablation.mode
+    output_dir = Path(cfg.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    run_tag    = wandb_run.id if wandb_run is not None else "local"
+    name       = f"model_{mode}_{run_tag}"
+    ckpt_path  = output_dir / f"{name}_best_ckpt"
+    transform  = utils.ConditionTransform(mode, seed=int(cfg.seed)) if mode != "prophet" else None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Dataset statistics
-# ─────────────────────────────────────────────────────────────────────────────
-def print_dataset_stats(gd: GroupedDistribution, label: str = "Full dataset") -> None:
-    ann  = gd.annotation
-    data = gd.data
+    print(f"\n{'='*64}")
+    print(f"  {name}  |  mode={mode}  split_by={list(cfg.split.by)}  "
+          f"solver={cfg.solver.solver_key}  conditioning={cfg.model.conditioning_key}")
+    print(f"{'='*64}")
 
-    n_src = len(data.src_data)
-    n_tgt = len(data.tgt_data)
-
-    src_labels = list(ann.src_dist_idx_to_labels.values())
-    tgt_labels = list(ann.tgt_dist_idx_to_labels.values())
-
-    cell_lines = sorted({
-        str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
-        for lbl in src_labels
-    })
-    drugs = sorted({
-        str(lbl[1]) if isinstance(lbl, (list, tuple)) and len(lbl) > 1
-        else str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
-        for lbl in tgt_labels
-    })
-
-    src_sizes = [v.shape[0] for v in data.src_data.values()]
-    tgt_sizes = [v.shape[0] for v in data.tgt_data.values()]
-    cond_keys = list(next(iter(data.conditions.values())).keys()) if data.conditions else []
-
-    print(f"\n{'─'*60}")
-    print(f"  {label}")
-    print(f"{'─'*60}")
-    print(f"  Cell lines      : {len(cell_lines)}  →  {', '.join(cell_lines)}")
-    print(f"  Drugs           : {len(drugs)}")
-    print(f"  Conditions      : {n_tgt}  (cell_line × drug pairs)")
-    print(f"  Src dists       : {n_src}  (one control pool per cell line)")
-    print(f"  Control cells   : {sum(src_sizes):,}  "
-          f"(min={min(src_sizes):,}  max={max(src_sizes):,}  "
-          f"mean={int(np.mean(src_sizes)):,})")
-    print(f"  Treated cells   : {sum(tgt_sizes):,}  "
-          f"(min={min(tgt_sizes):,}  max={max(tgt_sizes):,}  "
-          f"mean={int(np.mean(tgt_sizes)):,})")
-    print(f"  Condition keys  : {cond_keys}")
-    print(f"{'─'*60}")
-
-
-def print_split_stats(train_gd, val_gd, test_gd, split_by: str) -> None:
-    def label_sets(gd):
-        tgt_labels = list(gd.annotation.tgt_dist_idx_to_labels.values())
-        src_labels = list(gd.annotation.src_dist_idx_to_labels.values())
-        drugs = {
-            str(lbl[1]) if isinstance(lbl, (list, tuple)) and len(lbl) > 1
-            else str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
-            for lbl in tgt_labels
-        }
-        cell_lines = {
-            str(lbl[0]) if isinstance(lbl, (list, tuple)) else str(lbl)
-            for lbl in src_labels
-        }
-        return drugs, cell_lines
-
-    tr_drugs, tr_cls = label_sets(train_gd)
-    va_drugs, va_cls = label_sets(val_gd)
-    te_drugs, te_cls = label_sets(test_gd)
-
-    print(f"\n  Split (by {split_by})")
-    print(f"    {'':8}  {'conditions':>10}  {'drugs':>6}  {'cell lines':>10}")
-    print(f"    {'Train':8}  {len(train_gd.data.tgt_data):>10}  {len(tr_drugs):>6}  "
-          f"{len(tr_cls):>10}  {sorted(tr_cls)}")
-    print(f"    {'Val':8}  {len(val_gd.data.tgt_data):>10}  {len(va_drugs):>6}  "
-          f"{len(va_cls):>10}  {sorted(va_cls)}")
-    print(f"    {'Test':8}  {len(test_gd.data.tgt_data):>10}  {len(te_drugs):>6}  "
-          f"{len(te_cls):>10}  {sorted(te_cls)}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Logging helpers
-# ─────────────────────────────────────────────────────────────────────────────
-def save_logs(name: str, logs: dict, output_dir: Path) -> None:
-    path = output_dir / f"{name}_training_logs.json"
-    serialisable = {k: [float(v) for v in vals] for k, vals in logs.items() if vals}
-    with open(path, "w") as f:
-        json.dump(serialisable, f, indent=2)
-    print(f"  logs saved  → {path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Callbacks
-# ─────────────────────────────────────────────────────────────────────────────
-class ValMetricsLogger(ComputationCallback):
-    """Appends val metrics to a JSON file immediately after each validation step."""
-
-    def __init__(self, save_path: str, valid_freq: int, wandb_run=None):
-        self.save_path   = save_path
-        self._valid_freq = valid_freq
-        self._step       = 0
-        self._wandb_run  = wandb_run
-
-    def on_train_begin(self, *args, **kwargs) -> None:
-        self._step = 0
-
-    def _compute_and_save(self, valid_true_data, valid_pred_data) -> dict:
-        r2s, eds, mmds = [], [], []
-        for dataset_key in valid_true_data:
-            for cond_key, true_arr in valid_true_data[dataset_key].items():
-                pred_arr = valid_pred_data[dataset_key].get(cond_key)
-                if pred_arr is None:
-                    continue
-                y_true = np.array(true_arr)
-                y_pred = np.array(pred_arr)
-                r2s.append(float(compute_r_squared(y_true, y_pred)))
-                eds.append(float(compute_e_distance_fast(y_true, y_pred)))
-                mmds.append(float(compute_scalar_mmd(y_true, y_pred)))
-
-        if not r2s:
-            return {}
-
-        entry = {
-            "step":         self._step,
-            "n_conditions": len(r2s),
-            "r_squared":    float(np.mean(r2s)),
-            "e_distance":   float(np.mean(eds)),
-            "mmd":          float(np.mean(mmds)),
-        }
-
-        if os.path.exists(self.save_path):
-            with open(self.save_path) as f:
-                entries = json.load(f)
+    # ── per-dataset split: `holdout: false` (e.g. tahoe) → all conditions to train (no val/test);
+    #    `holdout: true` (default, e.g. sciplex) → split by drug → validation/recon land on it only. ──
+    print("Splitting datasets …")
+    data = {}
+    for ds in gds:
+        if bool(cfg.datasets[ds].get("holdout", True)):
+            data[ds] = split_datasets(
+                {ds: gds[ds]},
+                holdout_combinations=bool(cfg.split.holdout_combinations),
+                split_by=list(cfg.split.by),
+                split_key="split",
+                ratios=list(cfg.split.ratios),
+                random_state=int(cfg.split.random_state),
+            )[ds]
         else:
-            entries = []
-        entries.append(entry)
-        with open(self.save_path, "w") as f:
-            json.dump(entries, f, indent=2)
+            data[ds] = {"train": gds[ds], "val": None, "test": None}
+        print(f"  [{ds}] holdout={bool(cfg.datasets[ds].get('holdout', True))}")
 
-        print(f"    val metrics saved → step={self._step}  "
-              f"R²={entry['r_squared']:.4f}  "
-              f"E-dist={entry['e_distance']:.4f}  "
-              f"MMD={entry['mmd']:.4f}")
+    print("Creating samplers …")
+    bs    = int(cfg.training.batch_size)
+    n_val = cfg.training.get("n_val_conditions", None)
+    n_val = int(n_val) if n_val is not None else None
 
-        import wandb as _wandb
-        print(f"    [val diag] self._wandb_run={self._wandb_run!r}  "
-              f"global wandb.run={_wandb.run!r}  "
-              f"same={self._wandb_run is _wandb.run}")
-        if self._wandb_run is not None:
-            self._wandb_run.log({
-                "val_r_squared":  entry["r_squared"],
-                "val_e_distance": entry["e_distance"],
-                "val_mmd":        entry["mmd"],
-            })
-            print(f"    [val diag] logged val metrics, run._step={getattr(self._wandb_run, '_step', '?')}")
-
-        return {}
-
-    def on_log_iteration(self, valid_source_data, valid_true_data,
-                         valid_pred_data, solver, **kwargs) -> dict:
-        self._step += self._valid_freq
-        self._compute_and_save(valid_true_data, valid_pred_data)
-        return {}
-
-    def on_train_end(self, valid_source_data, valid_true_data,
-                     valid_pred_data, solver, **kwargs) -> dict:
-        self._compute_and_save(valid_true_data, valid_pred_data)
-        return {}
-
-
-class BestModelCheckpoint(ComputationCallback):
-    def __init__(self, save_path: str, wandb_run=None):
-        self.save_path  = save_path
-        self.best_r2    = -np.inf
-        self._wandb_run = wandb_run
-
-    def on_train_begin(self, *args, **kwargs) -> None:
-        self.best_r2 = -np.inf
-
-    def on_log_iteration(self, valid_source_data, valid_true_data,
-                         valid_pred_data, solver, **kwargs) -> dict:
-        scores = []
-        for dataset_key in valid_true_data:
-            for cond_key, true_arr in valid_true_data[dataset_key].items():
-                pred_arr = valid_pred_data[dataset_key].get(cond_key)
-                if pred_arr is None:
-                    continue
-                scores.append(compute_r_squared(np.array(true_arr), np.array(pred_arr)))
-        if not scores:
-            return {}
-        mean_r2 = float(np.mean(scores))
-        if mean_r2 > self.best_r2:
-            self.best_r2 = mean_r2
-            with open(self.save_path, "wb") as f:
-                cloudpickle.dump(solver, f)
-            print(f"    ✓ checkpoint saved  (val R²={mean_r2:.4f})")
-        if self._wandb_run is not None:
-            self._wandb_run.log({"best_val_r2": self.best_r2})
-        return {"best_val_r2": self.best_r2}
-
-    def on_train_end(self, valid_source_data, valid_true_data,
-                     valid_pred_data, solver, **kwargs) -> dict:
-        return self.on_log_iteration(valid_source_data, valid_true_data,
-                                     valid_pred_data, solver)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Data helpers
-# ─────────────────────────────────────────────────────────────────────────────
-def _dataset_specs(cfg: dict) -> list[tuple[str, str, int, float]]:
-    """Return [(name, zarr_path, seed, weight), ...].
-
-    Datasets are declared in cfg['datasets'] = {name: {path, seed?, weight?}}
-    and chosen by name via cfg['selected_datasets'] = [name, ...]. This holds
-    for both single- and multi-dataset training (single = one entry).
-    A legacy single 'zarr_path' is still honoured as a last-resort fallback.
-    """
-    sel = cfg.get("selected_datasets")
-    if sel:
-        specs = []
-        for name in sel:
-            if name not in (cfg.get("datasets") or {}):
-                raise KeyError(
-                    f"selected_datasets includes '{name}' but it is not in "
-                    f"cfg['datasets'] (have: {list((cfg.get('datasets') or {}).keys())})"
-                )
-            info = cfg["datasets"][name]
-            specs.append((
-                str(name),
-                str(info["path"]),
-                int(info.get("seed", cfg["seed"])),
-                float(info.get("weight", 1.0)),
-            ))
-        return specs
-    # legacy fallback: a single bare zarr_path
-    zarr_path = cfg.get("zarr_path")
-    if not zarr_path:
-        raise ValueError(
-            "No datasets configured. Set 'selected_datasets' (+ 'datasets' registry) "
-            "in experiments/base.yaml, or provide a single 'zarr_path'."
-        )
-    return [("gd", str(zarr_path), int(cfg["seed"]), 1.0)]
-
-
-def make_split(cfg: dict) -> dict:
-    """Read & split each selected dataset.
-
-    Returns {name: {"train": gd, "val": gd, "test": gd, "seed": int, "weight": float}}.
-    """
-    split_by = cfg["split"]["by"]
-    ratios   = cfg["split"]["ratios"]
-
-    out: dict = {}
-    for name, path, seed, weight in _dataset_specs(cfg):
-        print(f"  reading [{name}] ← {path}")
-        gd = GroupedDistribution.read_zarr(Path(path))
-        print_dataset_stats(gd, f"Full dataset [{name}]")
-        splits = split_datasets(
-            {name: gd},
-            split_by=[split_by],
-            split_key="split",
-            ratios=ratios,
-            random_state=seed,
-            holdout_combinations=False,
-        )
-        train_gd = splits[name]["train"]
-        val_gd   = splits[name]["val"]
-        test_gd  = splits[name]["test"]
-        print_split_stats(train_gd, val_gd, test_gd, split_by)
-        out[name] = {"train": train_gd, "val": val_gd, "test": test_gd,
-                     "seed": seed, "weight": weight}
-    return out
-
-
-def make_samplers(splits: dict, cfg: dict, transform: ConditionTransform | None):
-    """Build one combined train sampler + per-dataset val/test sampler dicts."""
-    tcfg  = cfg["training"]
-    rng   = np.random.default_rng(cfg["seed"])
-    n_val = tcfg["n_val_conditions"]
-
-    train_samplers: dict = {}
-    weights: dict = {}
-    for name, d in splits.items():
-        train_samplers[name] = ReservoirSampler(
-            d["train"], np.random.default_rng(d["seed"]),
-            batch_size=tcfg["batch_size"],
-            pool_fraction=tcfg["pool_fraction"],
-            replacement_prob=tcfg["replacement_prob"],
+    train_samplers, val_samplers, test_samplers = {}, {}, {}
+    for ds in gds:
+        seed = int(cfg.datasets[ds].get("seed", cfg.seed))
+        train_samplers[ds] = ReservoirSampler(
+            data[ds]["train"], np.random.default_rng(seed),
+            batch_size=bs,
+            pool_fraction=float(cfg.training.pool_fraction),
+            replacement_prob=float(cfg.training.replacement_prob),
             condition_transform=transform,
         )
-        weights[name] = d["weight"]
-    # weights all-equal → CombinedSampler normalizes to uniform (same as before)
-    train_sampler = CombinedSampler(samplers=train_samplers, rng=rng, weights=weights)
+        if data[ds].get("val") is not None:
+            val_samplers[ds] = ValidationSampler(
+                data[ds]["val"],
+                n_conditions_on_log_iteration=n_val,
+                n_conditions_on_train_end=n_val,
+                seed=seed,
+                condition_transform=transform,
+            )
+        if data[ds].get("test") is not None:
+            test_samplers[ds] = ValidationSampler(
+                data[ds]["test"],
+                n_conditions_on_log_iteration=None,
+                n_conditions_on_train_end=None,
+                seed=seed,
+                condition_transform=transform,
+            )
 
-    val_samplers = {
-        name: ValidationSampler(
-            d["val"],
-            n_conditions_on_log_iteration=n_val,
-            n_conditions_on_train_end=n_val,
-            seed=d["seed"],
-            condition_transform=transform,
-        )
-        for name, d in splits.items()
-    }
-    test_samplers = {
-        name: ValidationSampler(
-            d["test"],
-            n_conditions_on_log_iteration=None,
-            n_conditions_on_train_end=None,
-            seed=d["seed"],
-            condition_transform=transform,
-        )
-        for name, d in splits.items()
-    }
-
+    train_sampler = CombinedSampler(
+        samplers=train_samplers,
+        rng=np.random.default_rng(int(cfg.split.random_state)),
+    )
     train_sampler.init_sampler()
     for s in val_samplers.values():
         s.init_sampler()
     for s in test_samplers.values():
         s.init_sampler()
-    return train_sampler, val_samplers, test_samplers
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Test evaluation
-# ─────────────────────────────────────────────────────────────────────────────
-def evaluate_test(solver, test_samplers: dict) -> dict:
-    """Evaluate the solver on each dataset's test split.
-
-    Returns {"per_dataset": {name: {per_condition, aggregated}},
-             "per_condition": {name/cond: metrics},   # flat, dataset-prefixed
-             "aggregated": {metric: overall_mean}}.
-    """
-    metrics = ["r_squared", "e_distance", "mmd"]
-    per_dataset: dict = {}
-    all_per_condition: dict = {}
-
-    for name, sampler in test_samplers.items():
-        batch = sampler.sample(mode="on_train_end")
-        src, cond, true = batch["source"], batch["condition"], batch["target"]
-
-        print(f"  [{name}] predicting {len(src)} test conditions …")
-        pred = jax.tree.map(solver.predict, src, cond)
-
-        per_condition = {}
-        for cond_key in tqdm(sorted(true.keys(), key=str), desc=f"  test metrics [{name}]"):
-            y_true = np.array(true[cond_key])
-            y_pred = np.array(pred[cond_key])
-            m = {
-                "r_squared":  float(compute_r_squared(y_true, y_pred)),
-                "e_distance": float(compute_e_distance_fast(y_true, y_pred)),
-                "mmd":        float(compute_scalar_mmd(y_true, y_pred)),
-            }
-            per_condition[str(cond_key)] = m
-            all_per_condition[f"{name}/{cond_key}"] = m
-
-        per_dataset[name] = {
-            "per_condition": per_condition,
-            "aggregated": {mm: float(np.mean([v[mm] for v in per_condition.values()]))
-                           for mm in metrics},
-        }
-
-    aggregated = {mm: float(np.mean([v[mm] for v in all_per_condition.values()]))
-                  for mm in metrics}
-    return {"per_dataset": per_dataset, "per_condition": all_per_condition,
-            "aggregated": aggregated}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Train
-# ─────────────────────────────────────────────────────────────────────────────
-def train_model(cfg: dict, wandb_run=None) -> dict:
-    mode       = cfg["model"]
-    output_dir = Path(cfg["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    name_map = {"default": "model_default", "prophet": "model_prophet", "random": "model_random"}
-    name     = name_map[mode]
-    ckpt_path = str(output_dir / f"{name}_best.pkl")
-
-    print(f"\n{'='*64}")
-    print(f"  {name}  |  mode={mode}  split_by={cfg['split']['by']}")
-    print(f"{'='*64}")
-
-    # Build condition transform (None = no-op for prophet)
-    transform = ConditionTransform(mode, seed=cfg["seed"]) if mode != "prophet" else None
-
-    t0 = time.perf_counter()
-    print("Loading & splitting data …")
-    splits = make_split(cfg)
-    print(f"  done in {time.perf_counter() - t0:.1f}s")
-
-    print("Building samplers …")
-    train_sampler, val_samplers, test_samplers = make_samplers(splits, cfg, transform)
-
-    sample_batch    = train_sampler.sample()
-    cond_keys       = list(sample_batch["condition"].keys())
-    data_dim        = sample_batch["src_cell_data"].shape[-1]
-    cond_input_dims = {k: sample_batch["condition"][k].shape[-1] for k in cond_keys}
-    print(f"  data_dim={data_dim}  condition_keys={cond_keys}")
+    sample_batch = train_sampler.sample()
+    print(f"  latent dim (src_cell_data): {np.asarray(sample_batch['src_cell_data']).shape[-1]}")
+    print(f"  condition keys: {[(k, tuple(np.asarray(v).shape)) for k, v in sample_batch['condition'].items()]}")
 
     print("Building model …")
-    arch = cfg["arch"]
-    sf = ScaleFlow(solver=cfg["solver"])
-    prepare_kwargs = dict(
+    m            = cfg.model
+    cond_key     = m.conditioning_key
+    hidden_dims  = tuple(int(x) for x in m.hidden_dims)
+    decoder_dims = tuple(int(x) for x in m.decoder_dims)
+    if cond_key == "adaln_zero" and decoder_dims[-1] != hidden_dims[-1]:
+        raise ValueError(
+            f"adaln_zero requires decoder_dims[-1] == hidden_dims[-1]; "
+            f"got {decoder_dims[-1]} vs {hidden_dims[-1]}."
+        )
+
+    # set-encoder: one pre-pool MLP per condition key (incl. cell_line)
+    ce           = m.condition_encoder
+    encoder_arch = OmegaConf.to_container(ce.encoder_arch, resolve=True)
+    layers_before_pool = {k: encoder_arch for k in sample_batch["condition"]}
+    layers_after_pool  = OmegaConf.to_container(ce.layers_after_pool, resolve=True)
+    print(f"  set-encoder layers per modality: {list(layers_before_pool)}")
+
+    optimizer, _ = utils.build_optimizer(cfg)
+    predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
+    sf = ScaleFlow(solver=cfg.solver.solver_key)
+    sf._validation_data["predict_kwargs"] = predict_kwargs
+    sf.prepare_model(
         sample_batch=sample_batch,
-        max_combination_length=arch["max_combination_length"],
-        conditioning=arch["conditioning"],
-        hidden_dims=tuple(arch["hidden_dims"]),
-        decoder_dims=tuple(arch["decoder_dims"]),
-        condition_embedding_dim=arch["condition_embedding_dim"],
-        match_fn=partial(match_linear, epsilon=arch["match_fn_epsilon"]),
-        optimizer=build_optimizer(cfg),
+        max_combination_length=int(m.max_combination_length),
+        conditioning=cond_key,
+        conditioning_kwargs=OmegaConf.to_container(m.conditioning_kwargs, resolve=True),
+        pooling=ce.pooling,
+        pooling_kwargs=OmegaConf.to_container(ce.pooling_kwargs, resolve=True),
+        layers_before_pool=layers_before_pool,
+        layers_after_pool=layers_after_pool,
+        cond_output_dropout=float(ce.cond_output_dropout),
+        hidden_dims=hidden_dims,
+        decoder_dims=decoder_dims,
+        condition_embedding_dim=int(m.condition_embedding_dim),
+        match_fn=partial(match_linear, epsilon=float(cfg.match_fn.epsilon)),
+        probability_path=OmegaConf.to_container(m.probability_path_kwargs, resolve=True),
+        optimizer=optimizer,
     )
-    if arch.get("constant_noise") is not None:
-        prepare_kwargs["probability_path"] = {"constant_noise": arch["constant_noise"]}
-    sf.prepare_model(**prepare_kwargs)
-
-    ocfg = cfg["optimizer"]
-    print(f"  optimizer: adam warmup-cosine  peak={ocfg['peak_lr']:.1e}  "
-          f"end={ocfg['end_lr']:.1e}  warmup={ocfg['warmup_iterations']}  "
-          f"grad_accum={ocfg.get('grad_accumulation', 1)}")
-
-    vf       = sf.solver.vf
     n_params = sum(x.size for x in jax.tree.leaves(sf.solver.vf_state.params))
+    print(f"  total parameters: {n_params:,}")
 
-    prophet_status = {"default": "NO  ✗", "prophet": "YES ✓", "random": "RANDOM ✓"}[mode]
-    print(f"\n{'─'*60}")
-    print(f"  Model architecture")
-    print(f"{'─'*60}")
-    print(f"  Total parameters      : {n_params:,}")
-    print(f"  Data dim              : {data_dim}")
-    print(f"  Prophet embedding     : {prophet_status}")
-    print(f"  Solver                : {cfg['solver']}")
-    print(f"  Conditioning          : {arch['conditioning']}")
-    print(f"  Hidden dims           : {list(arch['hidden_dims'])}")
-    print(f"  Decoder dims          : {list(arch['decoder_dims'])}")
-    print(f"  Condition emb dim     : {arch['condition_embedding_dim']}")
-    print(f"  Max combination length: {arch['max_combination_length']}")
-    print(f"  Match fn epsilon      : {arch['match_fn_epsilon']}")
-    print(f"  Constant noise        : {arch.get('constant_noise')}")
-    for k, d in cond_input_dims.items():
-        print(f"  Input dim [{k:<10}]: {d}")
-    print(f"{'─'*60}")
-
-    tcfg         = cfg["training"]
-    valid_freq   = tcfg["valid_freq"]
     val_log_path = str(output_dir / f"{name}_val_metrics.json")
-
-    callbacks = [
+    cbs = [
         Metrics(
             metrics=["r_squared", "e_distance", "mmd"],
             metric_aggregations=["mean"],
             use_gpu_optimized=True,
             precision="bfloat16",
         ),
-        ValMetricsLogger(save_path=val_log_path, valid_freq=valid_freq, wandb_run=wandb_run),
-        BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
+        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
+        callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),
+        temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
     ]
 
-    # Metrics callback names keys "{val_dataset}_{metric}_mean", so monitor must
-    # follow the actual dataset names (single fallback dataset is named "gd").
-    monitor_metrics = ["loss"]
-    for ds_name in val_samplers:
-        monitor_metrics += [
-            f"{ds_name}_r_squared_mean",
-            f"{ds_name}_e_distance_mean",
-            f"{ds_name}_mmd_mean",
-        ]
+    # ── optional gene-space reconstruction metrics (decode latent → genes) ──
+    recon_cb  = None
+    recon_cfg = cfg.get("recon", {})
+    dec_path  = recon_cfg.get("decoder_path")
+    h5ad_path = recon_cfg.get("h5ad_path")
+    if dec_path and h5ad_path:
+        import scanpy as sc
+        from scaleflow.model._recon import ReconDecoder
+        print(f"Loading ReconDecoder from {dec_path} …")
+        # decoders under recon_weights/ are saved in the cloudpickle .pkl format (ReconDecoder.save),
+        # not the orbax params/ dir that callbacks.load_recon_decoder expects → use ReconDecoder.load.
+        recon_dec = ReconDecoder.load(str(dec_path))
+        # apply the same per-dataset prep (cell_line filter + batch inject) so obs matches the cond_key
+        # (cell_line, [batch], drug, dose) for the evaluated (holdout) dataset.
+        adata_recon = prep_adata(sc.read_h5ad(str(h5ad_path)), recon_cfg.get("prep", None), cfg.data)
+        log_dose_key = recon_cfg.get("log_dose_obs_key", None)
+        # obsm key of the latent the model predicts — used to decode the control latent so the pred
+        # delta is decode(pred) − decode(ctrl_latent) (convention B; offset cancels). Resolve from GD.
+        emb_obsm_key = recon_cfg.get("emb_obsm_key")
+        if not emb_obsm_key:
+            try:
+                emb_obsm_key = gds[cfg.selected_datasets[0]].annotation.data_location.to_path()[-1][1]
+            except Exception:  # noqa: BLE001
+                emb_obsm_key = None
+        recon_cb = callbacks.ReconMetricsLogger(
+            decoder=recon_dec,
+            adata=adata_recon,
+            condition_obs_keys=list(recon_cfg.condition_obs_keys),
+            cell_line_obs_key=str(recon_cfg.cell_line_obs_key),
+            control_obs_key=str(recon_cfg.get("control_obs_key", "control")),
+            log_dose_obs_key=str(log_dose_key) if log_dose_key else None,
+            emb_obsm_key=str(emb_obsm_key) if emb_obsm_key else None,
+            valid_freq=int(cfg.training.valid_freq),
+            wandb_run=wandb_run,
+        )
+        cbs.append(recon_cb)
+        print(f"  recon metrics enabled: {recon_dec.input_key} → {len(recon_dec.var_names or [])} genes "
+              f"(pred delta vs decode(ctrl latent '{emb_obsm_key}'))")
 
-    print(f"Training {tcfg['num_iterations']} iterations "
-          f"(val every {valid_freq} steps, {tcfg['n_val_conditions']} conditions) …")
+    monitor_metrics = ["loss"]
+    for ds in val_samplers:
+        monitor_metrics += [
+            f"{ds}_r_squared_mean",
+            f"{ds}_e_distance_mean",
+            f"{ds}_mmd_mean",
+            f"{ds}_nn_displacement_corr",
+            f"{ds}_gap_closure_mean",
+        ]
+    if dec_path and h5ad_path:
+        monitor_metrics += ["val_recon_r2_delta", "val_recon_pearson_r_delta"]
+
+    print(f"Training {int(cfg.training.num_iterations)} iterations "
+          f"(val every {int(cfg.training.valid_freq)} steps) …")
     t0 = time.perf_counter()
     sf.train(
         train_dataloader=train_sampler,
         val_dataloader=val_samplers,
-        num_iterations=tcfg["num_iterations"],
-        valid_freq=valid_freq,
-        callbacks=callbacks,
+        num_iterations=int(cfg.training.num_iterations),
+        valid_freq=int(cfg.training.valid_freq),
+        log_every=int(cfg.training.get("log_every", 1000)),
+        callbacks=cbs,
         monitor_metrics=monitor_metrics,
     )
-    elapsed = (time.perf_counter() - t0) / 60
-    print(f"  training done in {elapsed:.1f} min")
+    print(f"  training done in {(time.perf_counter() - t0) / 60:.1f} min")
+    callbacks.save_logs(name, sf.trainer.training_logs, output_dir)
 
-    save_logs(name, sf.trainer.training_logs, output_dir)
-
-
-    if os.path.exists(ckpt_path):
+    if ckpt_path.exists():
         print(f"Loading best checkpoint from {ckpt_path} …")
-        with open(ckpt_path, "rb") as f:
-            best_solver = cloudpickle.load(f)
+        import orbax.checkpoint as ocp
+        target      = callbacks._solver_params(sf.solver)
+        best_params = ocp.PyTreeCheckpointer().restore(str(ckpt_path), item=target)
+        callbacks.restore_solver_params(sf.solver, best_params)
     else:
-        print("  no checkpoint found – using final iterate")
-        best_solver = sf.solver
+        print("  no checkpoint found — using final iterate")
+    best_solver = sf.solver
 
     print("Evaluating on test set …")
-    test_metrics = evaluate_test(best_solver, test_samplers)
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers)
+
+    # ── gene-space recon metrics on the test set (test_recon_*) ──
+    test_recon = {}
+    if recon_cb is not None:
+        print("Evaluating gene-space recon on test set …")
+        test_recon = recon_cb.evaluate_test(best_solver, test_samplers)
 
     result_path = output_dir / f"{name}_results.pkl"
     with open(result_path, "wb") as f:
-        cloudpickle.dump(test_metrics, f)
+        cloudpickle.dump({**test_metrics, "recon": test_recon}, f)
     print(f"  test results saved → {result_path}")
 
     if wandb_run is not None:
-        test_log = {f"test_{metric}": val for metric, val in test_metrics["aggregated"].items()}
-        # per-dataset breakdown
+        test_log = {f"test_{k}": v for k, v in test_metrics["aggregated"].items()}
         for dsname, dsres in test_metrics["per_dataset"].items():
-            for metric, val in dsres["aggregated"].items():
-                test_log[f"test_{dsname}_{metric}"] = val
-        wandb_run.log(test_log)                      # shows up as a chart point
+            for k, v in dsres["aggregated"].items():
+                test_log[f"test_{dsname}_{k}"] = v
+        test_log.update(test_recon)  # test_recon_r2_delta / pearson (+ medians)
+        wandb_run.log(test_log)
         for k, v in test_log.items():
-            wandb_run.summary[k] = v                 # also pinned in Summary panel
+            wandb_run.summary[k] = v
+
+    # ── effect-size diagnostics over train / val / test (one predict pass each) ──
+    diag_cfg  = cfg.get("diagnostics", {})
+    n_diag    = int(diag_cfg.get("n_conditions", 100))
+    max_cells = int(diag_cfg.get("max_cells", 2000))
+    print(f"Running effect-size diagnostics ({n_diag} conditions/split) …")
+    diag_samplers = temp_edit.make_diagnostic_samplers(
+        data, n_conditions=n_diag, transform=transform, seed=int(cfg.seed)
+    )
+    temp_edit.full_diagnostics(
+        best_solver, diag_samplers, output_dir, name,
+        wandb_run=wandb_run, max_cells=max_cells, seed=int(cfg.seed),
+    )
+
+    print(f"\n{'='*64}")
+    print(f"  Final test metrics — {name}")
+    print(f"{'='*64}")
+    for k, v in test_metrics["aggregated"].items():
+        print(f"  {k:<18} {v:.4f}")
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
     return {"solver": best_solver, "test_metrics": test_metrics}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default=None,
-                        help="Optional YAML overlay on top of experiments/base.yaml "
-                             "(e.g. multi_dataset.yaml — resolved next to the script)")
-    parser.add_argument("--model", choices=["default", "prophet", "random"],
-                        help="Override config model")
-    parser.add_argument("--split.by", dest="split_by",
-                        choices=["drug", "cell_line"],
-                        help="Override config split.by")
-    parser.add_argument("--wandb", action="store_true",
-                        help="Enable wandb logging")
-    # Generic override: --set training.batch_size=2048
-    parser.add_argument("--set", nargs="*", metavar="KEY=VALUE",
-                        help="Override any config key using dot notation, e.g. training.batch_size=2048")
-    args, _ = parser.parse_known_args()  # ignore extra args passed by wandb agent
-
-    # ── Build config ─────────────────────────────────────────────────────────
-    overrides: dict = {}
-    if args.model:
-        overrides["model"] = args.model
-    if args.split_by:
-        overrides.setdefault("split", {})["by"] = args.split_by
-    if args.set:
-        for kv in args.set:
-            key, _, val = kv.partition("=")
-            val = _parse_cli_value(val)
-            set_nested(overrides, key, val)
-    if args.wandb:
-        overrides.setdefault("wandb", {})["enabled"] = True
-
-    cfg = load_config(args.config, overrides)
-
-    # ── Optional wandb ────────────────────────────────────────────────────────
-    import os
-    wandb_run = None
-    if cfg["wandb"]["enabled"] or os.environ.get("WANDB_SWEEP_ID"):
+@hydra.main(config_path="config", config_name="train_comparison", version_base=None)
+def main(cfg: DictConfig) -> None:
+    try:
+        run(cfg)  # loading happens inside run() after wandb overlay
+    except Exception:
         try:
             import wandb
-            wcfg = cfg["wandb"]
-            # Flatten config for wandb (sweep may override values)
-            flat_cfg = {
-                "model":                    cfg["model"],
-                "split.by":                 cfg["split"]["by"],
-                "training.batch_size":      cfg["training"]["batch_size"],
-                "training.pool_fraction":   cfg["training"]["pool_fraction"],
-                "training.replacement_prob":cfg["training"]["replacement_prob"],
-                "training.num_iterations":  cfg["training"]["num_iterations"],
-                "training.valid_freq":      cfg["training"]["valid_freq"],
-                "training.n_val_conditions":cfg["training"]["n_val_conditions"],
-                "seed":                     cfg["seed"],
-            }
-            # If wandb agent already initialized a run (sweep mode), reuse it
             if wandb.run is not None:
-                wandb_run = wandb.run
-                wandb_run.config.update(flat_cfg, allow_val_change=True)
-            else:
-                wandb_run = wandb.init(
-                    project=wcfg.get("project", "pancellflow"),
-                    entity=wcfg.get("entity"),
-                    name=wcfg.get("run_name"),
-                    config=flat_cfg,
-                )
-            # Sweep may override config — read back
-            sweep_cfg = dict(wandb_run.config)
-            for flat_key, val in sweep_cfg.items():
-                set_nested(cfg, flat_key, val)
-            print(f"  wandb run: {wandb_run.url}")
-        except ImportError:
-            print("  wandb not installed — skipping")
+                wandb.run.finish(exit_code=1)
+        except Exception:
+            pass
+        raise
 
-    result = train_model(cfg, wandb_run=wandb_run)
 
-    print(f"\n{'='*64}")
-    print(f"  Final test metrics — {cfg['model']}")
-    print(f"{'='*64}")
-    for metric, val in result["test_metrics"]["aggregated"].items():
-        print(f"  {metric:<20} {val:.4f}")
-
-    if wandb_run is not None:
-        wandb_run.finish()
+if __name__ == "__main__":
+    main()

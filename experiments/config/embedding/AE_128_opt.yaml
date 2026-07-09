@@ -1,0 +1,12 @@
+# @package _global_
+# AE_128_opt: 128-dim *optimized* autoencoder latent (obsm["AE_128_opt"] in
+# sciplex3_with_emb.h5ad) — the latent the mentor's healthy runs use. Gene-space
+# recon uses dec_AE_128_opt (the AE's decoder half, decode: 128 -> 2000 genes),
+# converted from flax to orbax by flax_to_orbax_ae128.py --name AE_128_opt.
+# h5ad_path and the other recon.* keys are inherited from training/default.yaml
+# (sciplex3_with_emb.h5ad, 2000 genes, control latent read from obsm["AE_128_opt"]).
+datasets:
+  sciplex:
+    path: /storage/pancellflow/sciplex3_AE_128_opt.zarr
+recon:
+  decoder_path: /storage/pancellflow/recon_weights/dec_AE_128_opt

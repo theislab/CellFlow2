@@ -1184,15 +1184,25 @@ class TestSplitReconstruction:
                 # Get the label for this tgt_dist_idx
                 tgt_label = split_annotation.tgt_dist_idx_to_labels[tgt_idx]
 
-                # The label should be a tuple of (drug, gene) values
-                assert len(tgt_label) == len(original_annotation.tgt_dist_keys), (
-                    f"Label {tgt_label} should have same length as tgt_dist_keys"
+                # The label is the full condition: src_dist_keys + tgt_dist_keys values
+                # (here (cell_line, drug, gene)), identifying a target distribution within
+                # its source context.
+                expected_len = len(original_annotation.src_dist_keys) + len(original_annotation.tgt_dist_keys)
+                assert len(tgt_label) == expected_len, (
+                    f"Label {tgt_label} should have length len(src_dist_keys)+len(tgt_dist_keys)"
                 )
 
                 # Verify the label exists in original adata
-                drug_val, gene_val = tgt_label
-                matching = adata_test.obs[(adata_test.obs["drug"] == drug_val) & (adata_test.obs["gene"] == gene_val)]
-                assert len(matching) > 0, f"Could not find cells with drug={drug_val}, gene={gene_val} in {split_name}"
+                cell_line_val, drug_val, gene_val = tgt_label
+                matching = adata_test.obs[
+                    (adata_test.obs["cell_line"] == cell_line_val)
+                    & (adata_test.obs["drug"] == drug_val)
+                    & (adata_test.obs["gene"] == gene_val)
+                ]
+                assert len(matching) > 0, (
+                    f"Could not find cells with cell_line={cell_line_val}, drug={drug_val}, "
+                    f"gene={gene_val} in {split_name}"
+                )
 
     def test_split_src_tgt_df_rows_map_to_original(self, sample_grouped_distribution):
         """Test that all rows in split src_tgt_dist_df exist in original."""
@@ -1518,10 +1528,17 @@ class TestRoundTripAdataToSplitAndBack:
         for split_name, split_gd in result.items():
             # For each target distribution, verify labels exist in adata
             for _tgt_idx, tgt_label in split_gd.annotation.tgt_dist_idx_to_labels.items():
-                drug_val, gene_val = tgt_label
+                # Label is the full condition: (cell_line, drug, gene) = src + tgt keys.
+                cell_line_val, drug_val, gene_val = tgt_label
                 # Find matching rows in adata
-                matching = adata_test.obs[(adata_test.obs["drug"] == drug_val) & (adata_test.obs["gene"] == gene_val)]
-                assert len(matching) > 0, f"No cells found for drug={drug_val}, gene={gene_val} in {split_name}"
+                matching = adata_test.obs[
+                    (adata_test.obs["cell_line"] == cell_line_val)
+                    & (adata_test.obs["drug"] == drug_val)
+                    & (adata_test.obs["gene"] == gene_val)
+                ]
+                assert len(matching) > 0, (
+                    f"No cells found for cell_line={cell_line_val}, drug={drug_val}, gene={gene_val} in {split_name}"
+                )
 
     def test_roundtrip_data_dimensions_preserved(self, sample_grouped_distribution):
         """Test that data dimensions are preserved through split."""

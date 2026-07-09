@@ -1,0 +1,49 @@
+# @package _global_
+# ─────────────────────────────────────────────────────────────────────────────
+# SINGLE (non-sweep) run directly on GENE EXPRESSION (adata.X, 2000 HVGs), with
+# CFG OFF. condition_dropout_prob=0.0 → solver.cfg_enabled is False, so the model
+# runs the original conditional-only path (no v_null), and val/test/diagnostics do
+# NOT sweep guidance weights (single w=1.0 pass). This is the plain no-CFG baseline
+# counterpart to gene_x.yaml. No reconstruction (embedding=X sets decoder_path=null;
+# the model predicts genes directly, so the standard metrics are already gene-space).
+#
+#   python experiments/train_zarr.py +experiment=gene_x_nocfg wandb.run_name=my_run_name
+# ─────────────────────────────────────────────────────────────────────────────
+defaults:
+  - override /datasets: zarr_sciplex
+  - override /conditioning: adaln_zero
+  - override /embedding: X
+  - override /ablation: default
+
+selected_datasets: [sciplex]
+output_dir: /storage/pancellflow/outputs/gene_x_nocfg
+
+model:
+  hidden_dims: [256, 256, 256]x
+  decoder_dims: [256, 256, 256]          # adaln_zero requires decoder_dims[-1] == hidden_dims[-1]
+  condition_embedding_dim: 256
+  condition_dropout_prob: 0.0            # CFG OFF → original conditional-only path, no w-sweep
+  layer_norm_before_concatenation: false
+  probability_path_kwargs:
+    constant_noise: 0.1
+  condition_encoder:
+    cond_output_dropout: 0.2
+
+ablation:
+  mode: prophet
+
+match_fn:
+  epsilon: 10                            # gene-space value (matches gene_x.yaml)
+
+training:
+  peak_lr: 1.0e-4
+  batch_size: 512
+  warmup_iterations: 5000
+  num_iterations: 2000000
+  valid_freq: 200000
+
+wandb:
+  enabled: true
+  entity: pancellflow
+  project: sciplex_cfg
+  run_name: gene_x_nocfg

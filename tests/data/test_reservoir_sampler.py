@@ -468,8 +468,8 @@ class TestReservoirSamplerPoolMode:
         for _ in range(10):
             sampler.sample()
 
-        # Usage count should have increased
-        assert sampler._pool_usage_count.sum() > initial_usage.sum()
+        # Usage count should have increased (_pool_usage_count is a dict idx -> count)
+        assert sum(sampler._pool_usage_count.values()) > sum(initial_usage.values())
 
     def test_high_replacement_prob(self, sample_grouped_distribution):
         """Test sampling with high replacement probability."""
@@ -626,9 +626,9 @@ class TestTwoReservoirSamplersIndependent:
             assert r1["src_cell_data"].shape[0] == 32
             assert r2["src_cell_data"].shape[0] == 32
 
-        # Each sampler should have tracked its own usage
-        assert sampler1._pool_usage_count.sum() == 30
-        assert sampler2._pool_usage_count.sum() == 30
+        # Each sampler should have tracked its own usage (dict idx -> count)
+        assert sum(sampler1._pool_usage_count.values()) == 30
+        assert sum(sampler2._pool_usage_count.values()) == 30
 
 
 # =============================================================================

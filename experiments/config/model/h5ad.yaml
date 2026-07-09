@@ -12,6 +12,6 @@ model:
   condition_encoder:
     pooling:             attention_token
     pooling_kwargs:      {}
-    cond_output_dropout: 0.9
+    cond_output_dropout: 0.9    # shared h5ad default (train_comparison overrides to 0.4)
     encoder_arch:        [{layer_type: mlp, dims: [1024, 1024], dropout_rate: 0.0}]
     layers_after_pool:   [{layer_type: mlp, dims: [1024, 1024], dropout_rate: 0.0}]

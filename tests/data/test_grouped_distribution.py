@@ -710,12 +710,14 @@ class TestConditionsStringEdgeCases:
 
     def test_full_roundtrip_with_weird_keys(self, tmp_path):
         """Test full GroupedDistribution roundtrip with weird condition keys."""
-        src_tgt_dist_df = pd.DataFrame({
-            "src_dist_idx": [0, 0, 1],
-            "tgt_dist_idx": [0, 1, 2],
-            "drug": ["a", "b", "c"],
-            "gene": ["x", "y", "z"],
-        })
+        src_tgt_dist_df = pd.DataFrame(
+            {
+                "src_dist_idx": [0, 0, 1],
+                "tgt_dist_idx": [0, 1, 2],
+                "drug": ["a", "b", "c"],
+                "gene": ["x", "y", "z"],
+            }
+        )
 
         conditions = {
             0: {"α-blocker": np.array([1.0]), "日本語": np.array([2.0])},
@@ -755,7 +757,6 @@ class TestConditionsStringEdgeCases:
                     read_gd.data.conditions[dist_id][key],
                     conditions[dist_id][key],
                 )
-
 
 
 class TestWriteNestedDistData:

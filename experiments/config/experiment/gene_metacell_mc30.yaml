@@ -1,0 +1,49 @@
+# @package _global_
+# ─────────────────────────────────────────────────────────────────────────────
+# CellFlow2 on METACELL-paired data, GENE SPACE (adata.X, 2000 HVGs), CFG OFF.
+#   source = control SINGLE cells   →   target = perturbed METACELLS (cpm=30)
+# Data: sciplex3_metacell_mc30_X.zarr (embedding=metacell_mc30, recon off).
+# condition_dropout_prob=0.0 → cfg_enabled False (conditional-only, single w=1.0,
+# no guidance hang). match_fn.epsilon=10 smooths the many-controls→few-metacells
+# OT coupling (the metacell pairing-redundancy fix).
+#
+#   python experiments/train_zarr.py +experiment=gene_metacell_mc30 wandb.run_name=my_run
+# ─────────────────────────────────────────────────────────────────────────────
+defaults:
+  - override /datasets: zarr_sciplex
+  - override /conditioning: adaln_zero
+  - override /embedding: metacell_mc30
+  - override /ablation: default
+
+selected_datasets: [sciplex]
+output_dir: /storage/pancellflow/outputs/gene_metacell_mc30
+
+model:
+  hidden_dims: [256, 256, 256]
+  decoder_dims: [256, 256, 256]          # adaln_zero requires decoder_dims[-1] == hidden_dims[-1]
+  condition_embedding_dim: 256
+  condition_dropout_prob: 0.0            # CFG OFF → conditional-only, single w=1.0
+  layer_norm_before_concatenation: false
+  probability_path_kwargs:
+    constant_noise: 0.1
+  condition_encoder:
+    cond_output_dropout: 0.2
+
+ablation:
+  mode: prophet
+
+match_fn:
+  epsilon: 10                            # smooths control→metacell OT coupling (pairing redundancy)
+
+training:
+  peak_lr: 1.0e-4
+  batch_size: 512
+  warmup_iterations: 5000
+  num_iterations: 2000000
+  valid_freq: 200000
+
+wandb:
+  enabled: true
+  entity: pancellflow
+  project: sciplex_cfg
+  run_name: gene_metacell_mc30

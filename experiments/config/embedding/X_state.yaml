@@ -1,0 +1,7 @@
+# @package _global_
+# X_state: pair the X_state zarr with its matching ReconDecoder.
+datasets:
+  sciplex:
+    path: /storage/pancellflow/sciplex3_X_state.zarr
+recon:
+  decoder_path: /storage/pancellflow/recon_weights/dec_X_state

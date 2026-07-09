@@ -17,7 +17,7 @@ method:  grid
 
 metric:
   goal: maximize
-  name: val_r_squared          # also: val_r_squared_delta (perturbation-effect R²)
+  name: val_r_squared_delta          # also: val_r_squared_delta (perturbation-effect R²)
 
 command:
   - ${env}
@@ -32,7 +32,7 @@ parameters:
 
   # ── swept (3 × 2 × 3 × 4 = 72 runs) ───────────────────────────────────────
   ablation.mode:
-    values: [default, prophet, random]
+    values: [prophet, random]
   solver.solver_key:
     values: [otfm, eqm]
   model.hidden_dims:                      # consistent depth, width ladder
@@ -67,4 +67,4 @@ parameters:
   training.num_iterations:
     value: 500000
   training.valid_freq:
-    value: 25000
+    value: 50000

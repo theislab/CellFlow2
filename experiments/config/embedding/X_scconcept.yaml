@@ -1,0 +1,7 @@
+# @package _global_
+# X_scconcept: pair the X_scconcept zarr with its matching ReconDecoder.
+datasets:
+  sciplex:
+    path: /storage/pancellflow/sciplex3_X_scconcept.zarr
+recon:
+  decoder_path: /storage/pancellflow/recon_weights/dec_X_scconcept

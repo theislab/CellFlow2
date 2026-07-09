@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -6,10 +7,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax.training import train_state
-from ott.neural.methods.flows import dynamics
 from ott.solvers import utils as solver_utils
 
 from scaleflow import utils
+from scaleflow._compat import BaseFlow
 from scaleflow._types import ArrayLike
 from scaleflow.networks._velocity_field import MultiTaskConditionalVelocityField
 from scaleflow.solvers.utils import ema_update
@@ -45,7 +46,7 @@ class MultiTaskOTFlowMatching:
     def __init__(
         self,
         vf: MultiTaskConditionalVelocityField,
-        probability_path: dynamics.BaseFlow,
+        probability_path: BaseFlow,
         match_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = None,
         time_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
         phenotype_loss_weight: float = 1.0,
@@ -267,7 +268,6 @@ class MultiTaskOTFlowMatching:
         x: ArrayLike | dict[str, ArrayLike],
         condition: dict[str, ArrayLike] | dict[str, dict[str, ArrayLike]],
         rng: jax.Array | None = None,
-        batched: bool = False,
         task: str = "flow_matching",
         show_progress: bool = False,
         **kwargs: Any,
@@ -282,8 +282,6 @@ class MultiTaskOTFlowMatching:
             Condition dictionary.
         rng
             Random number generator.
-        batched
-            Whether to use batched prediction.
         task
             Either "flow_matching" or "phenotype".
         show_progress
@@ -295,10 +293,20 @@ class MultiTaskOTFlowMatching:
         -------
         Predictions based on the specified task.
         """
+        if "batched" in kwargs:
+            warnings.warn(
+                "The `batched` argument is deprecated and ignored. Dictionary input is "
+                "predicted per condition; the lazy per-condition path provides the same "
+                "parallelism without eagerly materializing arrays.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            kwargs.pop("batched")
+
         if task == "phenotype":
             return self._predict_phenotype(condition, rng)
         else:
-            return self._predict_flow_matching(x, condition, rng, batched, show_progress, **kwargs)
+            return self._predict_flow_matching(x, condition, rng, show_progress, **kwargs)
 
     def _predict_phenotype(self, condition: dict[str, ArrayLike], rng: jax.Array | None = None) -> ArrayLike:
         """Predict phenotype values."""
@@ -329,29 +337,14 @@ class MultiTaskOTFlowMatching:
         x: ArrayLike | dict[str, ArrayLike],
         condition: dict[str, ArrayLike] | dict[str, dict[str, ArrayLike]],
         rng: jax.Array | None = None,
-        batched: bool = False,
         show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
         """Predict flow matching outcomes (same as original OTFM)."""
-        if batched and not x:
+        if isinstance(x, dict) and not x:
             return {}
 
-        if batched:
-            keys = sorted(x.keys())
-            condition_keys = sorted(set().union(*(condition[k].keys() for k in keys)))
-            _predict_jit = jax.jit(lambda x, condition: self._predict_jit(x, condition, rng, **kwargs))
-            batched_predict = jax.vmap(_predict_jit, in_axes=(0, dict.fromkeys(condition_keys, 0)))
-            n_cells = x[keys[0]].shape[0]
-            for k in keys:
-                assert x[k].shape[0] == n_cells, "The number of cells must be the same for each condition"
-            src_inputs = jnp.stack([x[k] for k in keys], axis=0)
-            batched_conditions = {}
-            for cond_key in condition_keys:
-                batched_conditions[cond_key] = jnp.stack([condition[k][cond_key] for k in keys])
-            pred_targets = batched_predict(src_inputs, batched_conditions)
-            return {k: pred_targets[i] for i, k in enumerate(keys)}
-        elif isinstance(x, dict):
+        if isinstance(x, dict):
             if show_progress:
                 from tqdm import tqdm
 

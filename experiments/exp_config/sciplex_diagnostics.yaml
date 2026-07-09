@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 2-run embedding comparison — X_state vs X_scconcept at fixed lr=1e-4.
+#
+#   wandb sweep experiments/sweep_state_vs_scconcept.yaml   → prints sweep_id
+#   wandb agent <entity>/sciplex_state_vs_scconcept/<sweep_id>
+# ─────────────────────────────────────────────────────────────────────────────
+
+project: sciplex_diagnostics
+program: experiments/train_zarr.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_nn_displacement_corr
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - datasets=zarr_sciplex
+  - selected_datasets=[sciplex]
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # ── swept (2 runs) ────────────────────────────────────────────────────────
+  datasets.sciplex.path:
+    values:
+      - /storage/pancellflow/sciplex3_X_state.zarr
+      - /storage/pancellflow/sciplex3_X_scconcept.zarr
+
+  # ── fixed ─────────────────────────────────────────────────────────────────
+  ablation.mode:
+    value: prophet
+
+  model.conditioning_key:
+    value: concatenation
+  model.hidden_dims:
+    value: [256, 256, 256]
+  model.decoder_dims:
+    value: [256, 256, 256]
+  model.condition_embedding_dim:
+    value: 256
+  model.probability_path_kwargs.constant_noise:
+    value: 0.1
+
+  match_fn.epsilon:
+    value: 1.0
+
+  training.peak_lr:
+    value: 1.0e-4
+  training.batch_size:
+    value: 512
+  training.warmup_iterations:
+    value: 5000
+  training.grad_accumulation:
+    value: 20
+  training.pool_fraction:
+    value: 0.7
+  training.replacement_prob:
+    value: 0.5
+  training.num_iterations:
+    value: 500000
+  training.valid_freq:
+    value: 25000

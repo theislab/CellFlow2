@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import inspect
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -550,6 +551,24 @@ class WandbLogger(LoggingCallback):
         self.wandb.log(dict_to_log)
 
 
+def _guidance_kwarg(fn: Callable, pred_data_by_w: Any) -> dict[str, Any]:
+    """Return ``{"pred_data_by_w": ...}`` only if ``fn`` accepts that kwarg.
+
+    Lets w-aware callbacks (classifier-free guidance sweep) receive the per-w
+    predictions while leaving built-in callbacks (no such parameter) untouched.
+    """
+    if pred_data_by_w is None:
+        return {}
+    try:
+        params = inspect.signature(fn).parameters
+    except (ValueError, TypeError):
+        return {}
+    accepts = "pred_data_by_w" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    return {"pred_data_by_w": pred_data_by_w} if accepts else {}
+
+
 class CallbackRunner:
     """Runs a set of computational and logging callbacks in the :class:`~scaleflow.training.CellFlowTrainer`
 
@@ -593,6 +612,7 @@ class CallbackRunner:
         solver: _otfm.OTFlowMatching | _genot.GENOT,
         additional_metrics: dict[str, Any] | None = None,
         iteration: int | None = None,
+        pred_data_by_w: dict[float, dict[str, dict[str, ArrayLike]]] | None = None,
     ) -> dict[str, Any]:
         """Called at each validation/log iteration to run callbacks. First computes metrics with computation callbacks and then logs data with logging callbacks.
 
@@ -623,7 +643,8 @@ class CallbackRunner:
             dict_to_log.update(additional_metrics)
 
         for callback in self.computation_callbacks:
-            results = callback.on_log_iteration(valid_source_data, valid_data, pred_data, solver)
+            extra = _guidance_kwarg(callback.on_log_iteration, pred_data_by_w)
+            results = callback.on_log_iteration(valid_source_data, valid_data, pred_data, solver, **extra)
             dict_to_log.update(results)
 
         for callback in self.logging_callbacks:
@@ -637,6 +658,7 @@ class CallbackRunner:
         valid_data: dict[str, dict[str, ArrayLike]],
         pred_data: dict[str, dict[str, ArrayLike]],
         solver: _otfm.OTFlowMatching | _genot.GENOT,
+        pred_data_by_w: dict[float, dict[str, dict[str, ArrayLike]]] | None = None,
     ) -> dict[str, Any]:
         """Called at the end of training to run callbacks. First computes metrics with computation callbacks and then logs data with logging callbacks.
 
@@ -659,7 +681,8 @@ class CallbackRunner:
         dict_to_log: dict[str, Any] = {}
 
         for callback in self.computation_callbacks:
-            results = callback.on_train_end(valid_source_data, valid_data, pred_data, solver)
+            extra = _guidance_kwarg(callback.on_train_end, pred_data_by_w)
+            results = callback.on_train_end(valid_source_data, valid_data, pred_data, solver, **extra)
             dict_to_log.update(results)
 
         for callback in self.logging_callbacks:

@@ -12,6 +12,14 @@ os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", "/storage/jax_cache")
 os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "5")
 
+# allow wandb up to 2 hours to upload at the end of a long training run
+os.environ.setdefault("WANDB_HTTP_TIMEOUT", "7200")
+os.environ.setdefault("WANDB_INIT_TIMEOUT", "7200")
+# retry failed uploads instead of dropping data
+os.environ.setdefault("WANDB_RETRY_MAX", "10")
+# write logs offline if network drops mid-run; sync manually later
+os.environ.setdefault("WANDB_SILENT", "true")  # suppress wandb spam to stdout
+
 import time
 from functools import partial
 from pathlib import Path
@@ -30,40 +38,62 @@ from scaleflow.utils import match_linear
 
 import utils
 import callbacks
+import temp_edit
 
 
-def run(cfg: DictConfig, gds: dict) -> dict:
+def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     # ── wandb sweep is dominant: init first, then overlay its params onto cfg ──
-    # The agent sets WANDB_SWEEP_ID, so we init even if wandb.enabled wasn't set.
-    # wandb.config (incl. sweep overrides) wins over the composed Hydra cfg, and
-    # values arrive as real Python objects — so list params (hidden_dims, …) work.
+    # In sweep mode, project is set by the sweep yaml; pass None to avoid overriding.
     wandb_run = None
     if cfg.wandb.enabled or os.environ.get("WANDB_SWEEP_ID"):
         try:
             import wandb
+            project = cfg.wandb.project if not os.environ.get("WANDB_SWEEP_ID") else None
             wandb_run = wandb.init(
-                project=cfg.wandb.project,
+                project=project,
                 entity=cfg.wandb.get("entity"),
                 name=cfg.wandb.get("run_name"),
                 config=OmegaConf.to_container(cfg, resolve=True),
+                settings=wandb.Settings(init_timeout=7200),
             )
             OmegaConf.set_struct(cfg, False)
             for k, v in dict(wandb_run.config).items():
-                if "." in k or not isinstance(v, dict):   # sweep overrides; skip echoed nested dicts
+                if "." in k or not isinstance(v, dict):
                     OmegaConf.update(cfg, k, v)
             OmegaConf.set_struct(cfg, True)
             print(f"  wandb run: {wandb_run.url}")
         except ImportError:
             print("  wandb not installed — skipping")
 
+    # ── log resolved config so sweep overrides are visible in the run output ──
+    m_cfg = cfg.model
+    for ds_name in cfg.selected_datasets:
+        ds = cfg.datasets[ds_name]
+        print(f"  datasets.{ds_name}.path       = {ds.path}")
+    print(f"  ablation.mode              = {cfg.ablation.mode}")
+    print(f"  model.hidden_dims          = {list(m_cfg.hidden_dims)}")
+    print(f"  model.decoder_dims         = {list(m_cfg.decoder_dims)}")
+    print(f"  model.conditioning_key     = {m_cfg.conditioning_key}")
+    print(f"  cond_output_dropout        = {m_cfg.condition_encoder.cond_output_dropout}")
+    print(f"  condition_dropout_prob     = {m_cfg.get('condition_dropout_prob', 0.0)}  (CFG null-drop)")
+    print(f"  training.peak_lr           = {cfg.training.peak_lr}")
+    print(f"  training.num_iterations    = {cfg.training.num_iterations}")
+    print(f"  match_fn.epsilon           = {cfg.match_fn.epsilon}")
+
+    # ── lazy zarr loading: must happen AFTER sweep overlay so path is correct ──
+    if gds is None:
+        gds = {}
+        for ds_name in cfg.selected_datasets:
+            path = str(cfg.datasets[ds_name].path)
+            print(f"Reading [{ds_name}] ← {path}")
+            gds[ds_name] = GroupedDistribution.read_zarr(Path(path))
+
     mode       = cfg.ablation.mode
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    # tag outputs with the wandb run id so concurrent sweep runs don't overwrite
-    # each other's checkpoint / results (filename was previously only mode-based).
     run_tag    = wandb_run.id if wandb_run is not None else "local"
     name       = f"model_{mode}_{run_tag}"
-    ckpt_path  = str(output_dir / f"{name}_best.pkl")
+    ckpt_path  = output_dir / f"{name}_best_ckpt"
     transform  = utils.ConditionTransform(mode, seed=int(cfg.seed)) if mode != "prophet" else None
 
     print(f"\n{'='*64}")
@@ -143,7 +173,9 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     print(f"  set-encoder layers per modality: {list(layers_before_pool)}")
 
     optimizer, _ = utils.build_optimizer(cfg)
+    predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
     sf = ScaleFlow(solver=cfg.solver.solver_key)
+    sf._validation_data["predict_kwargs"] = predict_kwargs
     sf.prepare_model(
         sample_batch=sample_batch,
         max_combination_length=int(m.max_combination_length),
@@ -154,9 +186,11 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         layers_before_pool=layers_before_pool,
         layers_after_pool=layers_after_pool,
         cond_output_dropout=float(ce.cond_output_dropout),
+        condition_dropout_prob=float(m.get("condition_dropout_prob", 0.0)),  # CFG: null-drop prob
         hidden_dims=hidden_dims,
         decoder_dims=decoder_dims,
         condition_embedding_dim=int(m.condition_embedding_dim),
+        layer_norm_before_concatenation=bool(m.get("layer_norm_before_concatenation", False)),
         match_fn=partial(match_linear, epsilon=float(cfg.match_fn.epsilon)),
         probability_path=OmegaConf.to_container(m.probability_path_kwargs, resolve=True),
         optimizer=optimizer,
@@ -165,25 +199,66 @@ def run(cfg: DictConfig, gds: dict) -> dict:
     print(f"  total parameters: {n_params:,}")
 
     val_log_path = str(output_dir / f"{name}_val_metrics.json")
+    # gene-space DE lives wherever the model outputs genes: directly in ValMetricsLogger for
+    # gene-space runs, or (for latent runs) in ReconMetricsLogger on DECODED genes. When recon
+    # is enabled the model predicts a latent, so suppress the (meaningless) latent DE here.
+    recon_cfg = cfg.get("recon", {})
+    dec_path  = recon_cfg.get("decoder_path")
+    h5ad_path = recon_cfg.get("h5ad_path")
+    recon_enabled = bool(dec_path and h5ad_path)
     cbs = [
         Metrics(
-            metrics=["r_squared", "e_distance", "mmd"],
+            metrics=["e_distance", "mmd"],
             metric_aggregations=["mean"],
             use_gpu_optimized=True,
             precision="bfloat16",
         ),
-        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
-        callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run),
+        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False)), compute_de=not recon_enabled),
+        callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),
+        temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
     ]
+
+    # ── optional gene-space reconstruction metrics ──
+    recon_cb  = None
+    if recon_enabled:
+        import scanpy as sc
+        print(f"Loading ReconDecoder from {dec_path} …")
+        recon_dec = callbacks.load_recon_decoder(str(dec_path))
+        adata_recon = sc.read_h5ad(str(h5ad_path))
+        log_dose_key = recon_cfg.get("log_dose_obs_key", None)
+        # obsm key of the latent the model predicts — used to decode the control latent so
+        # the pred delta is decode(pred) − decode(ctrl_latent). Resolve from the zarr itself.
+        emb_obsm_key = recon_cfg.get("emb_obsm_key")
+        if not emb_obsm_key:
+            try:
+                emb_obsm_key = gds[cfg.selected_datasets[0]].annotation.data_location.to_path()[-1][1]
+            except Exception:  # noqa: BLE001
+                emb_obsm_key = None
+        recon_cb = callbacks.ReconMetricsLogger(
+            decoder=recon_dec,
+            adata=adata_recon,
+            condition_obs_keys=list(recon_cfg.condition_obs_keys),
+            cell_line_obs_key=str(recon_cfg.cell_line_obs_key),
+            control_obs_key=str(recon_cfg.get("control_obs_key", "control")),
+            log_dose_obs_key=str(log_dose_key) if log_dose_key else None,
+            emb_obsm_key=str(emb_obsm_key) if emb_obsm_key else None,
+            valid_freq=int(cfg.training.valid_freq),
+            wandb_run=wandb_run,
+        )
+        cbs.append(recon_cb)
+        print(f"  recon metrics enabled: {recon_dec.input_key} → {len(recon_dec.var_names or [])} genes "
+              f"(pred delta vs decode(ctrl latent '{emb_obsm_key}'))")
 
     monitor_metrics = ["loss"]
     for ds in val_samplers:
         monitor_metrics += [
-            f"{ds}_r_squared_mean",
             f"{ds}_e_distance_mean",
             f"{ds}_mmd_mean",
-            f"{ds}_r_squared_delta_mean",
+            f"{ds}_nn_displacement_corr",
+            f"{ds}_gap_closure_mean",
         ]
+    if recon_enabled:
+        monitor_metrics += ["val_recon_pearson_r_delta"]
 
     print(f"Training {int(cfg.training.num_iterations)} iterations "
           f"(val every {int(cfg.training.valid_freq)} steps) …")
@@ -193,26 +268,38 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         val_dataloader=val_samplers,
         num_iterations=int(cfg.training.num_iterations),
         valid_freq=int(cfg.training.valid_freq),
+        log_every=int(cfg.training.get("log_every", 1000)),
         callbacks=cbs,
         monitor_metrics=monitor_metrics,
     )
     print(f"  training done in {(time.perf_counter() - t0) / 60:.1f} min")
     callbacks.save_logs(name, sf.trainer.training_logs, output_dir)
 
-    if os.path.exists(ckpt_path):
+    if ckpt_path.exists():
         print(f"Loading best checkpoint from {ckpt_path} …")
-        with open(ckpt_path, "rb") as f:
-            best_solver = cloudpickle.load(f)
+        import orbax.checkpoint as ocp
+        target      = callbacks._solver_params(sf.solver)
+        best_params = ocp.PyTreeCheckpointer().restore(str(ckpt_path), item=target)
+        callbacks.restore_solver_params(sf.solver, best_params)
     else:
         print("  no checkpoint found — using final iterate")
-        best_solver = sf.solver
+    best_solver = sf.solver
 
     print("Evaluating on test set …")
-    test_metrics = callbacks.evaluate_test(best_solver, test_samplers)
+    # re-read predict_kwargs from cfg (the earlier dict was mutated when the trainer popped
+    # guidance_scales); test sweeps the SAME guidance_scales as validation, plotting all w.
+    test_predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs, compute_de=not recon_enabled)
+
+    # ── gene-space recon metrics on the test set (test_recon_*) ──
+    test_recon = {}
+    if recon_cb is not None:
+        print("Evaluating gene-space recon on test set …")
+        test_recon = recon_cb.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs)
 
     result_path = output_dir / f"{name}_results.pkl"
     with open(result_path, "wb") as f:
-        cloudpickle.dump(test_metrics, f)
+        cloudpickle.dump({**test_metrics, "recon": test_recon}, f)
     print(f"  test results saved → {result_path}")
 
     if wandb_run is not None:
@@ -220,9 +307,33 @@ def run(cfg: DictConfig, gds: dict) -> dict:
         for dsname, dsres in test_metrics["per_dataset"].items():
             for k, v in dsres["aggregated"].items():
                 test_log[f"test_{dsname}_{k}"] = v
+        # per-w test curves (CFG sweep): test_<metric>__w<w> for every guidance scale
+        for w, agg in test_metrics.get("per_w_aggregated", {}).items():
+            for k, v in agg.items():
+                test_log[f"test_{k}__w{w}"] = v
+        test_log.update(test_recon)  # test_recon_pearson_r_delta / pearson_r (+ medians) + __w<w> curves
         wandb_run.log(test_log)
         for k, v in test_log.items():
             wandb_run.summary[k] = v
+
+    # ── effect-size diagnostics over train / val / test (one predict pass each) ──
+    diag_cfg  = cfg.get("diagnostics", {})
+    n_diag    = int(diag_cfg.get("n_conditions", 100))
+    max_cells = int(diag_cfg.get("max_cells", 2000))
+    # sweep the SAME guidance weights as validation/test so diagnostics has per-w plots
+    diag_ws = test_predict_kwargs.get("guidance_scales") or [test_predict_kwargs.get("guidance_scale", 1.0)]
+    # non-CFG model → every w is identical; collapse so the log + work reflect a single w
+    if not getattr(best_solver, "cfg_enabled", False):
+        diag_ws = [float(test_predict_kwargs.get("guidance_scale", 1.0))]
+    print(f"Running effect-size diagnostics ({n_diag} conditions/split, w={diag_ws}) …")
+    diag_samplers = temp_edit.make_diagnostic_samplers(
+        data, n_conditions=n_diag, transform=transform, seed=int(cfg.seed)
+    )
+    temp_edit.full_diagnostics(
+        best_solver, diag_samplers, output_dir, name,
+        wandb_run=wandb_run, max_cells=max_cells, seed=int(cfg.seed),
+        guidance_scales=diag_ws,
+    )
 
     print(f"\n{'='*64}")
     print(f"  Final test metrics — {name}")
@@ -238,12 +349,16 @@ def run(cfg: DictConfig, gds: dict) -> dict:
 
 @hydra.main(config_path="config", config_name="train_zarr", version_base=None)
 def main(cfg: DictConfig) -> None:
-    gds = {}
-    for name in cfg.selected_datasets:
-        path = str(cfg.datasets[name].path)
-        print(f"Reading [{name}] ← {path}")
-        gds[name] = GroupedDistribution.read_zarr(Path(path))
-    run(cfg, gds)
+    try:
+        run(cfg)  # zarr loading happens inside run() after wandb overlay
+    except Exception:
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.run.finish(exit_code=1)
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":

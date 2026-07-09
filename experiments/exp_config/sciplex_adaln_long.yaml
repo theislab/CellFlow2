@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Ablation sweep — sciPlex, adaln_zero conditioning.
+# 3 modes × 3 LRs = 9 runs (grid). 2M steps, val every 200k steps.
+# adaln_zero is sensitive to LR — use smaller values than concatenation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+entity: pancellflow
+project: sciplex-long-run
+program: experiments/train_zarr.py
+method:  grid
+
+metric:
+  goal: maximize
+  name: val_r_squared_delta
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - datasets=zarr_sciplex
+  - selected_datasets=[sciplex]
+
+parameters:
+  wandb.enabled:
+    value: true
+
+  # ── swept (3 × 3 = 9 runs) ───────────────────────────────────────────────
+  ablation.mode:
+    values: [default, random, prophet]
+  training.peak_lr:
+    values: [1.0e-6, 5.0e-6, 8.0e-6]
+
+  # ── fixed architecture ────────────────────────────────────────────────────
+  model.hidden_dims:
+    value: [2048, 2048, 2048]
+  model.decoder_dims:
+    value: [2048, 2048, 2048]
+  model.condition_embedding_dim:
+    value: 256
+  model.conditioning_key:
+    value: adaln_zero
+  model.conditioning_kwargs:
+    value: {num_heads: 8, mlp_ratio: 4}
+  match_fn.epsilon:
+    value: 1.0
+  model.probability_path_kwargs.constant_noise:
+    value: 0.1
+
+  # ── fixed optimizer ───────────────────────────────────────────────────────
+  training.warmup_iterations:
+    value: 10000
+  training.grad_accumulation:
+    value: 20
+  training.batch_size:
+    value: 512
+  training.pool_fraction:
+    value: 0.7
+  training.replacement_prob:
+    value: 0.5
+
+  # ── fixed training bounds ─────────────────────────────────────────────────
+  training.num_iterations:
+    value: 2000000
+  training.valid_freq:
+    value: 200000
