@@ -6,6 +6,14 @@ import anndata as ad
 import numpy as np
 import tqdm
 import zarr
+
+# dedup: re-exported from cellflow (identical implementations)
+from cellflow.data._utils import (
+    _flatten_list as _flatten_list,
+)
+from cellflow.data._utils import (
+    _to_list as _to_list,
+)
 from zarr.abc.codec import BytesBytesCodec
 from zarr.codecs import BloscCodec
 
@@ -203,13 +211,5 @@ def write_sharded(
     ad.experimental.write_dispatched(group, name, data, callback=callback)
 
 
-def _to_list(x: list[Any] | tuple[Any] | Any) -> list[Any] | tuple[Any]:
-    """Converts x to a list if it is not already a list or tuple."""
-    if isinstance(x, (list | tuple)):
-        return x
-    return [x]
 
 
-def _flatten_list(x: Iterable[Iterable[Any]]) -> list[Any]:
-    """Flattens a list of lists."""
-    return [item for sublist in x for item in sublist]

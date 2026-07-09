@@ -1,13 +1,31 @@
-import abc
-import math
 from collections.abc import Callable, Sequence
 
-import jax
 import jax.numpy as jnp
+
+# dedup: re-exported from cellflow (identical implementations)
+from cellflow.networks._utils import (
+    BaseModule as BaseModule,
+)
+from cellflow.networks._utils import (
+    FilmBlock as FilmBlock,
+)
+from cellflow.networks._utils import (
+    MLPBlock as MLPBlock,
+)
+from cellflow.networks._utils import (
+    ResNetBlock as ResNetBlock,
+)
+from cellflow.networks._utils import (
+    _apply_modules as _apply_modules,
+)
+from cellflow.networks._utils import (
+    _get_layers as _get_layers,
+)
+from cellflow.networks._utils import (
+    sinusoidal_time_encoder as sinusoidal_time_encoder,
+)
 from flax import linen as nn
 from flax.linen import initializers
-
-from scaleflow._types import Layers_t
 
 __all__ = [
     "SelfAttention",
@@ -23,192 +41,14 @@ __all__ = [
 ]
 
 
-def sinusoidal_time_encoder(t: jnp.ndarray, time_freqs: int = 1024, time_max_period: int | None = 10000) -> jnp.ndarray:
-    """
-    Create sinusoidal timestep embeddings.
-
-    Parameters
-    ----------
-    t : jnp.ndarray
-        A 1-D or 2-D array of timesteps. May be fractional.
-    num_freqs : int
-        The dimension of the embedding.
-    max_period : int | None
-        Controls the minimum frequency of the embeddings.
-        If :obj:`None`, the frequencies are evenly spaced in the range [0, 2 * pi],
-        reimplementing :func:`ott.neural.networks.layers.cyclical_time_encoder`
-        for backward compatibility.
-
-    Returns
-    -------
-    jnp.ndarray
-        Sinusoidal embedding.
-    """
-    if time_max_period is None:
-        freq = 2 * jnp.arange(time_freqs) * jnp.pi
-        t = freq * t
-        return jnp.concatenate([jnp.cos(t), jnp.sin(t)], axis=-1)
-
-    t = t * time_max_period
-    half = time_freqs // 2
-    freqs = jnp.exp(-math.log(time_max_period) * jnp.arange(start=0, stop=half, dtype=jnp.float32) / half)
-    args = t * freqs
-    embedding = jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
-    return embedding
 
 
-class BaseModule(abc.ABC, nn.Module):
-    """Base module for condition encoder and its components."""
-
-    @abc.abstractmethod
-    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        """Forward pass."""
-        pass
 
 
-class MLPBlock(BaseModule):
-    """
-    MLP block.
-
-    Parameters
-    ----------
-    dims
-        Dimensions of the MLP layers.
-    dropout_rate
-        Dropout rate.
-    act_last_layer
-        Whether to apply the activation function to the last layer.
-    act_fn
-        Activation function.
-    """
-
-    dims: Sequence[int] = (1024, 1024, 1024)
-    dropout_rate: float = 0.0
-    act_last_layer: bool = True
-    act_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-
-    @nn.compact
-    def __call__(self, x: jnp.ndarray, training: bool = True) -> jnp.ndarray:
-        """
-        Forward pass.
-
-        Parameters
-        ----------
-        x
-            Input tensor of shape ``(batch_size, input_dim)``.
-        training
-            Whether the model is in training mode.
-
-        Returns
-        -------
-        Output tensor of shape ``(batch_size, output_dim)``.
-        """
-        if len(self.dims) == 0:
-            return x
-        z = x
-        for i in range(len(self.dims) - 1):
-            z = self.act_fn(nn.Dense(self.dims[i])(z))
-            z = nn.Dropout(self.dropout_rate)(z, deterministic=not training)
-        z = nn.Dense(self.dims[-1])(z)
-        z = self.act_fn(z) if self.act_last_layer else z
-        z = nn.Dropout(self.dropout_rate)(z, deterministic=not training)
-        return z
 
 
-class FilmBlock(BaseModule):
-    """Feature-wise Linear Modulation (FiLM) layer.
-
-    Applies a learned affine transformation (scale and shift) to the input,
-    conditioned on an external embedding.
-
-    Parameters
-    ----------
-    input_dim
-        Dimensionality of the input features.
-    cond_dim
-        Dimensionality of the conditioning features.
-    act_fn
-        Activation function to apply after modulation. If :obj:`None`, no activation is applied.
-    """
-
-    input_dim: int
-    cond_dim: int
-    act_fn: Callable[[jnp.ndarray], jnp.ndarray] = lambda x: x
-
-    def setup(self) -> None:
-        self.film_generator = nn.Dense(self.input_dim * 2)
-
-    def __call__(self, x: jnp.ndarray, cond: jnp.ndarray) -> jnp.ndarray:
-        """Applies FiLM modulation.
-
-        Parameters
-        ----------
-        x
-            Input features of shape (batch, input_dim).
-        cond
-            Conditioning features of shape (batch, cond_dim).
-
-        Returns
-        -------
-            Modulated features of shape (batch, input_dim).
-        """
-        gamma_beta = self.film_generator(cond)  # shape: (batch, input_dim * 2)
-        gamma, beta = jnp.split(gamma_beta, 2, axis=-1)  # each shape: (batch, input_dim)
-        return self.act_fn(gamma * x + beta)
 
 
-class ResNetBlock(nn.Module):
-    """Residual conditioning block.
-
-    Applies a residual MLP transformation to the input, conditioned on external features.
-
-    Parameters
-    ----------
-    input_dim
-        Dimensionality of the input features.
-    projection_dims
-        Dimensionality of the projection layers.
-    hidden_dims
-        Hidden layer sizes for the residual block.
-    act_fn
-        Activation function to apply in the MLP block.
-    dropout_rate
-        Dropout rate applied after each hidden layer.
-    """
-
-    input_dim: int
-    hidden_dims: Sequence[int] = (256, 256)
-    projection_dims: Sequence[int] = (256, 256)
-    act_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    dropout_rate: float = 0.0
-
-    def setup(self):
-        self.mlp_block_1 = MLPBlock(dims=self.hidden_dims, act_fn=self.act_fn, dropout_rate=self.dropout_rate)
-        self.mlp_block_2 = MLPBlock(
-            dims=list(self.hidden_dims) + [self.input_dim], act_fn=self.act_fn, dropout_rate=self.dropout_rate
-        )
-        self.cond_proj = MLPBlock(dims=self.projection_dims, act_fn=self.act_fn, dropout_rate=self.dropout_rate)
-
-    def __call__(self, x: jnp.ndarray, cond: jnp.ndarray, *, training: bool = True) -> jnp.ndarray:
-        """Forward pass of the residual layer.
-
-        Parameters
-        ----------
-        x
-            Input features of shape (batch, input_dim).
-        cond
-            Conditioning features of shape (batch, cond_dim).
-        training
-            Whether the model is in training mode.
-
-        Returns
-        -------
-            Output features of shape (batch, input_dim).
-        """
-        h = self.mlp_block_1(x)
-        h = h + self.cond_proj(cond)
-        h = self.mlp_block_2(h)
-        return h + x
 
 
 class SelfAttention(BaseModule):
@@ -742,45 +582,5 @@ class AdaLNZeroBlock(BaseModule):
         return x
 
 
-def _get_layers(
-    layers: Layers_t,
-    output_dim: int | None = None,
-    dropout_rate: float | None = None,
-) -> list[nn.Module]:
-    """Get modules from layer parameters."""
-    modules = []
-    if isinstance(layers, Sequence):
-        for layer in layers:
-            layer = dict(layer)
-            layer_type = layer.pop("layer_type", "mlp")
-            if layer_type == "mlp":
-                lay = MLPBlock(**layer)
-            elif layer_type == "self_attention":
-                lay = SelfAttentionBlock(**layer)
-            else:
-                raise ValueError(f"Unknown layer type: {layer_type}")
-            modules.append(lay)
-    if output_dim is not None:
-        modules.append(nn.Dense(output_dim))
-        if dropout_rate is not None:
-            modules.append(nn.Dropout(dropout_rate))
-    return modules
 
 
-def _apply_modules(
-    modules: list[nn.Module],
-    conditions: jax.Array,
-    attention_mask: jnp.ndarray | None,
-    training: bool,
-) -> jnp.ndarray:
-    """Apply modules to conditions."""
-    for module in modules:
-        if isinstance(module, SelfAttentionBlock):
-            conditions = module(conditions, attention_mask, training)
-        elif isinstance(module, nn.Dense):
-            conditions = module(conditions)
-        elif isinstance(module, nn.Dropout):
-            conditions = module(conditions, deterministic=not training)
-        else:
-            conditions = module(conditions, training)
-    return conditions

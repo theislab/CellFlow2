@@ -1,16 +1,35 @@
 import os
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
-from functools import cached_property
-from typing import Any
 
 import anndata as ad
 import pandas as pd
 
+# dedup: re-exported from cellflow (identical implementations)
+from cellflow.preprocessing._gene_emb import (
+    BatchedDataset as BatchedDataset,
+)
+from cellflow.preprocessing._gene_emb import (
+    GeneInfo as GeneInfo,
+)
+from cellflow.preprocessing._gene_emb import (
+    _get_esm_collate_fn as _get_esm_collate_fn,
+)
+from cellflow.preprocessing._gene_emb import (
+    fetch_canonical_transcript_info as fetch_canonical_transcript_info,
+)
+from cellflow.preprocessing._gene_emb import (
+    fetch_protein_sequence as fetch_protein_sequence,
+)
+from cellflow.preprocessing._gene_emb import (
+    order_to_batch_list as order_to_batch_list,
+)
+from cellflow.preprocessing._gene_emb import (
+    prot_sequence_from_ensembl as prot_sequence_from_ensembl,
+)
+
 from scaleflow._logging import logger
 
 try:
-    import requests  # type: ignore[import-untyped]
     import torch
     from torch.utils.data import DataLoader
     from transformers import AutoTokenizer, EsmModel
@@ -32,155 +51,16 @@ __all__ = [
 ]
 
 
-def fetch_canonical_transcript_info(ensembl_gene_id: str) -> dict[str, str] | None:
-    server = "https://rest.ensembl.org"
-    ext = f"/lookup/id/{ensembl_gene_id}?expand=1"
-    headers = {"Content-Type": "application/json"}
-
-    # Fetch gene information
-    response = requests.get(server + ext, headers=headers)
-    if not response.ok:
-        response.raise_for_status()
-
-    gene_data = response.json()
-    transcripts = gene_data.get("Transcript", [])
-
-    # Find the canonical transcript
-    canonical_transcript_info = None
-    for transcript in transcripts:
-        if transcript.get("is_canonical"):
-            canonical_transcript_info = {
-                "transcript_id": transcript["id"],
-                "display_name": transcript.get("display_name", "Unknown Protein"),
-                "biotype": transcript.get("biotype", "Unknown Biotype"),
-            }
-            break
-
-    return canonical_transcript_info
 
 
-def fetch_protein_sequence(ensembl_transcript_id: str | None) -> str:
-    server = "https://rest.ensembl.org"
-    ext = f"/sequence/id/{ensembl_transcript_id}?type=protein"
-    headers = {"Content-Type": "application/json"}
-
-    response = requests.get(server + ext, headers=headers)
-    if not response.ok:
-        response.raise_for_status()
-
-    protein_data = response.json()
-    return protein_data.get("seq", "")
 
 
-@dataclass
-class GeneInfo:
-    gene_id: str
-
-    def __post_init__(self):
-        self._is_protein_coding: bool = False
-        self.transcript_id: str | None = None
-        self.display_name: str | None = None
-        self.canonical_transcript_info = fetch_canonical_transcript_info(self.gene_id)
-        if self.canonical_transcript_info:
-            self.transcript_id = self.canonical_transcript_info["transcript_id"]
-            self.display_name = self.canonical_transcript_info["display_name"]
-            self._is_protein_coding = self.canonical_transcript_info["biotype"] == "protein_coding"
-
-    @property
-    def is_protein_coding(self) -> bool:
-        return self._is_protein_coding
-
-    @cached_property
-    def protein_sequence(self) -> str | None:
-        if self.is_protein_coding:
-            return fetch_protein_sequence(self.transcript_id)
-        return None
-
-    @property
-    def seq_len(self) -> int | None:
-        if self.protein_sequence:
-            return len(self.protein_sequence)
-        return None
 
 
-def prot_sequence_from_ensembl(ensembl_gene_id: list[str]) -> pd.DataFrame:
-    missing_ids: list[str] = []
-    results: dict[str, str | None] = {}
-    columns = [
-        "gene_id",
-        "transcript_id",
-        "display_name",
-        "is_protein_coding",
-        "seq_len",
-        "protein_sequence",
-    ]
-    df = pd.DataFrame(columns=columns)
-    for gene_id in ensembl_gene_id:
-        gene_info = GeneInfo(gene_id)
-        results[gene_id] = gene_info.protein_sequence
-        data = [
-            [
-                gene_id,
-                gene_info.transcript_id,
-                gene_info.display_name,
-                gene_info.is_protein_coding,
-                gene_info.seq_len,
-                gene_info.protein_sequence,
-            ]
-        ]
-        df_iter = pd.DataFrame(data, columns=columns)
-        df = pd.concat([df, df_iter])
-
-    if missing_ids:
-        logger.info(f"Missing sequence for ids: {set(missing_ids)}")
-    return df
 
 
-def order_to_batch_list(unordered_list: list[Any], batch_idx: list[list[int]]) -> list[list[Any]]:
-    ordered_list = []
-    for batch in batch_idx:
-        batch_iter = [unordered_list[i] for i in batch]
-        ordered_list.append(batch_iter)
-    return ordered_list
 
 
-class BatchedDataset:
-    """Modified batched dataset from fair-esm `c9c7d4f0fec964ce10c3e11dccec6c16edaa5144`"""
-
-    def __init__(self, sequence_labels, sequence_strs):
-        self.sequence_labels = list(sequence_labels)
-        self.sequence_strs = list(sequence_strs)
-
-    def __len__(self):
-        return len(self.sequence_labels)
-
-    def __getitem__(self, idx):
-        return self.sequence_labels[idx], self.sequence_strs[idx]
-
-    def get_batch_indices(self, toks_per_batch, extra_toks_per_seq=0) -> list[list[int]]:
-        sizes = [(len(s), i) for i, s in enumerate(self.sequence_strs)]
-        sizes.sort()
-        batches = []
-        buf: list[int] = []
-        max_len = 0
-
-        def _flush_current_buf():
-            nonlocal max_len, buf
-            if len(buf) == 0:
-                return
-            batches.append(buf)
-            buf = []
-            max_len = 0
-
-        for sz, i in sizes:
-            sz += extra_toks_per_seq
-            if max(sz, max_len) * (len(buf) + 1) > toks_per_batch:
-                _flush_current_buf()
-            max_len = max(max_len, sz)
-            buf.append(i)
-
-        _flush_current_buf()
-        return batches
 
 
 def create_dataloader(
@@ -199,26 +79,6 @@ def create_dataloader(
     return data_loader
 
 
-def _get_esm_collate_fn(
-    tokenizer: Callable,
-    max_length: int | None,
-    truncation: bool,
-    return_tensors: str,  # type: ignore[type-arg]
-) -> Callable:  # type: ignore[type-arg]
-    def collate_fn(batch):
-        # batch of tuples (gene_id, sequence)
-        gene_id, seq = zip(*batch, strict=False)
-        metadata = {"gene_id": gene_id, "protein_sequence": seq}
-        token = tokenizer(
-            seq,
-            padding=True,
-            max_length=max_length,
-            truncation=truncation,
-            return_tensors=return_tensors,
-        )
-        return metadata, token
-
-    return collate_fn
 
 
 def get_model_and_tokenizer(model_name: str, use_cuda: bool, cache_dir: None | str) -> tuple[EsmModel, AutoTokenizer]:

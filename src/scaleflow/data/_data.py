@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,6 +7,14 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import zarr
+
+# dedup: re-exported from cellflow (identical implementations)
+from cellflow.data._data import (
+    BaseDataMixin as BaseDataMixin,
+)
+from cellflow.data._data import (
+    ReturnData as ReturnData,
+)
 
 from scaleflow.data._anndata_location import AnnDataLocation
 from scaleflow.data._utils import write_dist_data_threaded, write_nested_dist_data, write_sharded
@@ -20,45 +27,8 @@ __all__ = [
 ]
 
 
-@dataclass
-class ReturnData:  # TODO: this should rather be a NamedTuple
-    split_covariates_mask: np.ndarray | None
-    split_idx_to_covariates: dict[int, tuple[Any, ...]]
-    perturbation_covariates_mask: np.ndarray | None
-    perturbation_idx_to_covariates: dict[int, tuple[Any, ...]]
-    perturbation_idx_to_id: dict[int, Any]
-    condition_data: dict[str, np.ndarray]
-    control_to_perturbation: dict[int, np.ndarray]
-    max_combination_length: int
 
 
-class BaseDataMixin:
-    """Base class for data containers."""
-
-    @property
-    def n_controls(self) -> int:
-        """Returns the number of control covariate values."""
-        return len(self.split_idx_to_covariates)  # type: ignore[attr-defined]
-
-    @property
-    def n_perturbations(self) -> int:
-        """Returns the number of perturbation covariate combinations."""
-        return len(self.perturbation_idx_to_covariates)  # type: ignore[attr-defined]
-
-    @property
-    def n_perturbation_covariates(self) -> int:
-        """Returns the number of perturbation covariates."""
-        return len(self.condition_data)  # type: ignore[attr-defined]
-
-    def _format_params(self, fmt: Callable[[Any], str]) -> str:
-        params = {
-            "n_controls": self.n_controls,
-            "n_perturbations": self.n_perturbations,
-        }
-        return ", ".join(f"{name}={fmt(val)}" for name, val in params.items())
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}[{self._format_params(repr)}]"
 
 
 @dataclass
