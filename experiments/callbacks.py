@@ -12,7 +12,7 @@ import shutil
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
-from scipy.stats import pearsonr, ttest_ind
+from scipy.stats import pearsonr, spearmanr, ttest_ind
 from tqdm import tqdm
 
 from scaleflow.training._callbacks import ComputationCallback
@@ -161,6 +161,110 @@ def de_metrics(y_true, y_pred, source, source_pred=None, fdr: float = 0.05) -> d
 
 _DE_KEYS = ("de_overlap", "de_precision", "dir_agreement")
 _DE_NAN = {k: float("nan") for k in _DE_KEYS}
+
+
+# ── ReconEval-style DEG metrics (theislab/ReconEval sc_reconstruction/metrics/_deg.py) ──
+# Dice@k overlap of top-k |logFC| genes + logFC correlation + mean-genediff correlation.
+# DE is called with scanpy's ``rank_genes_groups`` EXACTLY as ReconEval's DegCalculator does
+# (logfoldchanges + BH-adjusted p-values), so numbers are directly comparable to that pipeline.
+_DEG_DICE_K = (10, 50, 100, 200, 400)
+
+
+def _perform_deg(x, refer, method: str = "t-test"):
+    """scanpy ``rank_genes_groups`` DE of treatment ``x`` vs control ``refer``.
+
+    Verbatim reproduction of ReconEval ``DegCalculator.perform_deg``: builds an AnnData of
+    [treatment; control], runs ``rank_genes_groups`` (``t-test`` or ``wilcoxon``) and returns a
+    DataFrame with scanpy's own ``logfoldchanges`` and BH-adjusted p-values (``pvals_adj``).
+    """
+    import anndata as ad
+    import pandas as pd
+    import scanpy as sc
+
+    x = np.asarray(x, dtype=np.float32)
+    refer = np.asarray(refer, dtype=np.float32)
+    adata = ad.AnnData(np.vstack([x, refer]))
+    adata.var_names = [str(i) for i in range(adata.n_vars)]   # stable gene ids for merging
+    adata.obs["group"] = ["treatment"] * x.shape[0] + ["control"] * refer.shape[0]
+    sc.tl.rank_genes_groups(
+        adata, groupby="group", groups=["treatment"],
+        reference="control", method=method, use_raw=False,
+    )
+    r = adata.uns["rank_genes_groups"]
+    return pd.DataFrame({
+        "gene":     r["names"]["treatment"],
+        "logfc":    r["logfoldchanges"]["treatment"],
+        "pval_adj": r["pvals_adj"]["treatment"],
+    })
+
+
+def _top_genes_by_logfc(deg, k: int, fdr: float | None) -> set:
+    """Top-k genes by |logFC|, FDR-prefiltered (fallback to all). Mirrors ReconEval."""
+    candidates = deg if fdr is None else deg[deg["pval_adj"] <= fdr]
+    if candidates.empty:
+        candidates = deg
+    candidates = candidates.assign(abs_logfc=candidates["logfc"].abs())
+    return set(candidates.nlargest(k, "abs_logfc")["gene"])
+
+
+def _corr_finite(a, b, fn) -> float:
+    """Correlation over finite pairs only (scanpy logFC can be ±inf when a control mean is 0)."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    mask = np.isfinite(a) & np.isfinite(b)
+    if mask.sum() < 2:
+        return float("nan")
+    return float(fn(a[mask], b[mask])[0])
+
+
+def deg_reconeval(
+    x_true, ctrl_true, x_pred, ctrl_pred,
+    dice_k=_DEG_DICE_K, fdr: float | None = 0.05, method: str = "t-test", orig_deg=None,
+) -> tuple[dict, object]:
+    """ReconEval-style gene-space DEG metrics (pred-control / decoder-consistent variant).
+
+    DE-true = ``x_true`` vs ``ctrl_true`` (observed); DE-recon = ``x_pred`` vs ``ctrl_pred``
+    (decoded pred vs decoded control, so the decoder offset cancels). DE is computed with
+    scanpy exactly as in ReconEval. Returns ``(metrics, orig_deg)`` where ``orig_deg`` is the
+    prediction-independent true-DE DataFrame, cacheable per condition (reused across w / steps).
+
+    Metrics (mirror ReconEval DegCalculator):
+      deg_dice_{k}          — 2·|topk_true ∩ topk_pred| / (|topk_true| + |topk_pred|),
+                              topk = top-k genes by |logFC| among FDR-significant.
+      deg_logfc_pearson/    — Pearson/Spearman of scanpy logFC (true vs pred) over shared genes.
+        spearman
+      mean_genediff_pearson/— Pearson/Spearman of the mean gene-diff vectors
+        spearman              (mean(x_true)-mean(ctrl_true)) vs (mean(x_pred)-mean(ctrl_pred)).
+    """
+    import pandas as pd
+
+    if orig_deg is None:
+        orig_deg = _perform_deg(x_true, ctrl_true, method)
+    recon_deg = _perform_deg(x_pred, ctrl_pred, method)
+
+    m: dict = {}
+    for k in dice_k:
+        o = _top_genes_by_logfc(orig_deg, k, fdr)
+        r = _top_genes_by_logfc(recon_deg, k, fdr)
+        denom = len(o) + len(r)
+        m[f"deg_dice_{k}"] = float(2 * len(o & r) / denom) if denom else float("nan")
+
+    merged = pd.merge(orig_deg[["gene", "logfc"]], recon_deg[["gene", "logfc"]],
+                      on="gene", suffixes=("_orig", "_recon"), how="inner")
+    m["deg_logfc_pearson"]  = _corr_finite(merged["logfc_orig"], merged["logfc_recon"], pearsonr)
+    m["deg_logfc_spearman"] = _corr_finite(merged["logfc_orig"], merged["logfc_recon"], spearmanr)
+
+    dt = np.asarray(x_true).mean(axis=0) - np.asarray(ctrl_true).mean(axis=0)
+    dp = np.asarray(x_pred).mean(axis=0) - np.asarray(ctrl_pred).mean(axis=0)
+    m["mean_genediff_pearson"]  = _corr_finite(dt, dp, pearsonr)
+    m["mean_genediff_spearman"] = _corr_finite(dt, dp, spearmanr)
+    return m, orig_deg
+
+
+_DEG_RE_KEYS = tuple(f"deg_dice_{k}" for k in _DEG_DICE_K) + (
+    "deg_logfc_pearson", "deg_logfc_spearman",
+    "mean_genediff_pearson", "mean_genediff_spearman",
+)
 
 
 def _condition_metrics(y_true, y_pred, source, debug: bool = False, compute_de: bool = True) -> dict:
@@ -506,12 +610,19 @@ class ReconMetricsLogger(ComputationCallback):
         emb_obsm_key: str | None = None,
         valid_freq: int = 1,
         wandb_run=None,
+        reconeval_deg: bool = True,
+        deg_method: str = "t-test",
     ):
         self._decoder = decoder
         self._adata = adata
         self._cond_keys = condition_obs_keys
         self._cl_key = cell_line_obs_key
         self._ctrl_key = control_obs_key
+        # ReconEval-style DEG metrics (Dice@k + logFC/mean-genediff correlation), computed via
+        # scanpy rank_genes_groups. ReconEval uses ['t-test','wilcoxon']; we default to the
+        # cheaper 't-test' for the per-condition validation loop ('wilcoxon' is much slower).
+        self._reconeval_deg = reconeval_deg
+        self._deg_method = deg_method
         # obs column whose condition-key value is log1p(raw): match numerically, not by string
         self._log_dose_key = log_dose_obs_key
         # obsm key of the latent the model predicts (e.g. X_state). When set, the PRED delta
@@ -524,6 +635,8 @@ class ReconMetricsLogger(ComputationCallback):
         self._ctrl_cache: dict[str, np.ndarray] = {}
         self._ctrl_decoded_cache: dict[str, np.ndarray] = {}
         self._ctrl_decoded_cells_cache: dict[str, np.ndarray] = {}
+        # true DE (x_true vs ctrl_true) is prediction-independent → cache per condition
+        self._orig_deg_cache: dict[str, tuple] = {}
         # precompute column indices for decoder's var_names
         var_names = decoder.var_names
         if var_names is not None:
@@ -537,6 +650,7 @@ class ReconMetricsLogger(ComputationCallback):
         self._ctrl_cache = {}
         self._ctrl_decoded_cache = {}
         self._ctrl_decoded_cells_cache = {}
+        self._orig_deg_cache = {}
 
     @staticmethod
     def _to_dense(X) -> np.ndarray:
@@ -636,6 +750,7 @@ class ReconMetricsLogger(ComputationCallback):
         pearson_deltas = []
         pearson_fulls = []   # non-delta: decode(pred) vs true genes (no control)
         de_over, de_prec, de_dir = [], [], []   # gene-space DE on decoded genes
+        deg_re = {k: [] for k in _DEG_RE_KEYS}  # ReconEval-style DEG (Dice@k, logFC/diff corr)
         n_total = n_unmatched = 0
         first_unmatched = None
         pred_sigs, predgene_sigs = [], []  # diagnostic: do recon's inputs/outputs vary?
@@ -674,12 +789,26 @@ class ReconMetricsLogger(ComputationCallback):
                 de_over.append(de["de_overlap"])
                 de_prec.append(de["de_precision"])
                 de_dir.append(de["dir_agreement"])
+                # ReconEval-style DEG (scanpy rank_genes_groups): DE-recon = decode(pred) vs
+                # decode(ctrl latent) so the decoder offset cancels (fall back to observed ctrl).
+                if self._reconeval_deg:
+                    ctrl_de = ctrl_pred_cells if ctrl_pred_cells is not None else ctrl_genes
+                    cid = str(self._normalize_key(cond_key))
+                    m_re, orig = deg_reconeval(
+                        true_genes, ctrl_genes, pred_genes, ctrl_de,
+                        method=self._deg_method, orig_deg=self._orig_deg_cache.get(cid),
+                    )
+                    self._orig_deg_cache[cid] = orig    # true-DE is prediction-independent
+                    for kk in _DEG_RE_KEYS:
+                        deg_re[kk].append(m_re[kk])
         if pred_sigs:
             print(f"    {prefix} recon  [diag] pred_latent mean={np.mean(pred_sigs):.6f}  "
                   f"decoded mean={np.mean(predgene_sigs):.6f}  ({step_label})")
 
         # Always emit the keys (NaN when nothing matched) so monitor_metrics never KeyErrors.
         keys = ["pearson_r_delta", "pearson_r", *_DE_KEYS]
+        if self._reconeval_deg:
+            keys += list(_DEG_RE_KEYS)
         if not pearson_deltas:
             ck, no_true, no_ctrl = (first_unmatched or (None, None, None))
             print(f"    {prefix} recon  WARNING: 0/{n_total} conditions matched the h5ad "
@@ -698,15 +827,22 @@ class ReconMetricsLogger(ComputationCallback):
 
         vals = {"pearson_r_delta": pearson_deltas, "pearson_r": pearson_fulls,
                 "de_overlap": de_over, "de_precision": de_prec, "dir_agreement": de_dir}
+        if self._reconeval_deg:
+            vals.update({k: deg_re[k] for k in _DEG_RE_KEYS})
         out = {}
         for k, v in vals.items():
-            out[f"{prefix}_recon_{k}"]        = float(np.nanmean(v))
-            out[f"{prefix}_recon_{k}_median"] = float(np.nanmedian(v))
+            out[f"{prefix}_recon_{k}"]        = float(np.nanmean(v)) if len(v) else float("nan")
+            out[f"{prefix}_recon_{k}_median"] = float(np.nanmedian(v)) if len(v) else float("nan")
+        deg_msg = ""
+        if self._reconeval_deg:
+            deg_msg = (f" | Dice50={out[f'{prefix}_recon_deg_dice_50']:.3f} "
+                       f"Dice100={out[f'{prefix}_recon_deg_dice_100']:.3f} "
+                       f"logFCr={out[f'{prefix}_recon_deg_logfc_pearson']:.3f}")
         print(f"    {prefix} recon  "
               f"rδ={out[f'{prefix}_recon_pearson_r_delta']:.4f}  r={out[f'{prefix}_recon_pearson_r']:.4f}  "
               f"(med rδ={out[f'{prefix}_recon_pearson_r_delta_median']:.4f})  "
               f"DEover={out[f'{prefix}_recon_de_overlap']:.3f} DEprec={out[f'{prefix}_recon_de_precision']:.3f} "
-              f"DirAgr={out[f'{prefix}_recon_dir_agreement']:.3f} "
+              f"DirAgr={out[f'{prefix}_recon_dir_agreement']:.3f}{deg_msg} "
               f"({step_label})")
         if emit and self._wandb_run is not None:
             self._wandb_run.log(out)
