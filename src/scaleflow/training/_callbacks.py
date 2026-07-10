@@ -2,82 +2,20 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from cellflow.training._callbacks import BaseCallback, ComputationCallback, LoggingCallback
-from cellflow.training._callbacks import Metrics as _BaseMetrics
 
 from scaleflow._types import ArrayLike
-from scaleflow.metrics._metrics import (
-    compute_e_distance_gpu,
-    compute_r_squared_gpu,
-    compute_scalar_mmd_gpu,
-)
 
 if TYPE_CHECKING:
     from scaleflow.solvers import _genot, _otfm
 
 
 __all__ = [
-    "Metrics",
     "LearningRateMonitor",
     "CallbackRunner",
 ]
-
-
-metric_to_func_gpu: dict[str, Callable] = {
-    "r_squared": compute_r_squared_gpu,
-    "mmd": compute_scalar_mmd_gpu,
-    "e_distance": compute_e_distance_gpu,
-}
-
-
-class Metrics(_BaseMetrics):
-    """Callback to compute metrics on validation data during training
-
-    Parameters
-    ----------
-    metrics
-        List of metrics to compute
-    metric_aggregations
-        List of aggregation functions to use for each metric
-    use_gpu_optimized
-        If True, use GPU-optimized metric implementations that avoid CPU transfers.
-        Recommended for faster computation. Note: 'sinkhorn_div' not supported.
-    precision
-        Precision for GPU-optimized computation: 'float32', 'bfloat16', or 'float16'.
-        bfloat16 recommended for ~2x speedup with minimal accuracy loss.
-    max_samples_mmd
-        Maximum samples for MMD computation (GPU-optimized only).
-
-    Returns
-    -------
-        :obj:`None`
-    """
-
-    def __init__(
-        self,
-        metrics: list[Literal["r_squared", "mmd", "sinkhorn_div", "e_distance"]],
-        metric_aggregations: list[Literal["mean", "median"]] = None,
-        use_gpu_optimized: bool = False,
-        precision: Literal["float32", "bfloat16", "float16"] = "float32",
-        max_samples_mmd: int = 5000,
-    ):
-        super().__init__(metrics, metric_aggregations)
-        self.use_gpu_optimized = use_gpu_optimized
-        self.precision = precision
-        self.max_samples_mmd = max_samples_mmd
-        self.rng_key = None
-
-        if use_gpu_optimized:
-            import jax
-
-            self.rng_key = jax.random.PRNGKey(42)
-            for metric in metrics:
-                if metric not in metric_to_func_gpu:
-                    raise ValueError(
-                        f"GPU-optimized metric {metric} not available. Available: {list(metric_to_func_gpu.keys())}"
-                    )
 
 
 class LearningRateMonitor(LoggingCallback):

@@ -638,9 +638,9 @@ class ScaleFlow:
         callbacks
             Callbacks to perform at each validation step. There are two types of callbacks:
             - Callbacks for computations should inherit from
-              :class:`~scaleflow.training.ComputationCallback` see e.g. :class:`scaleflow.training.Metrics`.
-            - Callbacks for logging should inherit from :class:`~scaleflow.training.LoggingCallback` see
-              e.g. :class:`~scaleflow.training.WandbLogger`.
+              :class:`~cellflow.training.ComputationCallback` see e.g. :class:`cellflow.training.Metrics`.
+            - Callbacks for logging should inherit from :class:`~cellflow.training.LoggingCallback` see
+              e.g. :class:`~cellflow.training.WandbLogger`.
         monitor_metrics
             Metrics to monitor.
         out_of_core_dataloading

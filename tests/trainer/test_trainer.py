@@ -5,12 +5,12 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
-from cellflow.training import ComputationCallback
+from cellflow.training import ComputationCallback, Metrics
 
 import scaleflow
 from scaleflow._compat import ConstantNoiseFlow
 from scaleflow.solvers import _otfm
-from scaleflow.training import CellFlowTrainer, Metrics
+from scaleflow.training import CellFlowTrainer
 from scaleflow.utils import match_linear
 
 x_test = jnp.ones((10, 5)) * 10
@@ -197,7 +197,7 @@ class TestTrainer:
         )
 
         metric_to_compute = "e_distance"
-        metrics_callback = scaleflow.training.Metrics(metrics=[metric_to_compute])
+        metrics_callback = Metrics(metrics=[metric_to_compute])
 
         predict_kwargs_1 = {"max_steps": 3, "throw": False}
         predict_kwargs_2 = {"max_steps": 500, "throw": False}
