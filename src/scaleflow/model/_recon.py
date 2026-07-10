@@ -23,10 +23,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from cellflow.networks._utils import MLPBlock
 from flax import linen as nn
 from flax.training import train_state
-
-from scaleflow.networks._utils import MLPBlock
 
 __all__ = [
     "Encoder",
@@ -199,7 +198,7 @@ class _ReconModule(nn.Module):
 class Encoder(_ReconModule):
     """Map gene expression to a latent space.
 
-    The hidden trunk is an :class:`~scaleflow.networks._utils.MLPBlock`; the final latent
+    The hidden trunk is an :class:`~cellflow.networks._utils.MLPBlock`; the final latent
     projection is a plain :class:`~flax.linen.Dense` with **no** activation, so the latent
     is unconstrained.
 
@@ -379,7 +378,7 @@ class ReconDecoder:
 
     @property
     def input_key(self) -> str | None:
-        """obsm key of the latent this decoder expects (e.g. ``"X_state"``)."""
+        """Obsm key of the latent this decoder expects (e.g. ``"X_state"``)."""
         return self.metadata.get("input_key")
 
     @property

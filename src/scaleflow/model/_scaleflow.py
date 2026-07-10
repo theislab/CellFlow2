@@ -326,9 +326,9 @@ class ScaleFlow:
         pooling_kwargs
             Keyword arguments for the pooling method corresponding to:
 
-            - :class:`scaleflow.networks.TokenAttentionPooling` if ``'pooling'`` is
+            - :class:`cellflow.networks.TokenAttentionPooling` if ``'pooling'`` is
               ``'attention_token'``.
-            - :class:`scaleflow.networks.SeedAttentionPooling` if ``'pooling'`` is ``'attention_seed'``.
+            - :class:`cellflow.networks.SeedAttentionPooling` if ``'pooling'`` is ``'attention_seed'``.
 
         layers_before_pool
             Layers applied to the condition embeddings before pooling. Can be of type
@@ -337,8 +337,8 @@ class ScaleFlow:
 
                 - ``'layer_type'`` of type :class:`str` indicating the type of the layer, can be
                   ``'mlp'`` or ``'self_attention'``.
-                - Further keyword arguments for the layer type :class:`scaleflow.networks.MLPBlock` or
-                  :class:`scaleflow.networks.SelfAttentionBlock`.
+                - Further keyword arguments for the layer type :class:`cellflow.networks.MLPBlock` or
+                  :class:`cellflow.networks.SelfAttentionBlock`.
 
             - :class:`dict` with keys corresponding to perturbation covariate keys, and values
               correspondinng to the above mentioned tuples.
@@ -350,8 +350,8 @@ class ScaleFlow:
 
             - ``'layer_type'`` of type :class:`str` indicating the type of the layer, can be
               ``'mlp'`` or ``'self_attention'``.
-            - Further keys depend on the layer type, either for :class:`scaleflow.networks.MLPBlock` or
-              for :class:`scaleflow.networks.SelfAttentionBlock`.
+            - Further keys depend on the layer type, either for :class:`cellflow.networks.MLPBlock` or
+              for :class:`cellflow.networks.SelfAttentionBlock`.
 
         condition_embedding_dim
             Dimensions of the condition embedding, i.e. the last layer of the
@@ -367,7 +367,7 @@ class ScaleFlow:
             (:func:`ott.neural.networks.layers.sinusoidal_time_encoder`).
         time_max_period
             Controls the frequency of the time embeddings, see
-            :func:`scaleflow.networks.utils.sinusoidal_time_encoder`.
+            :func:`cellflow.networks._utils.sinusoidal_time_encoder`.
         time_encoder_dims
             Dimensions of the layers processing the time embedding in
             :attr:`scaleflow.networks.ConditionalVelocityField.time_encoder`.
@@ -401,7 +401,7 @@ class ScaleFlow:
             For instance, when ``'solver==genot'``, the following keyword argument can be passed:
 
                 - ``'genot_source_dims'`` of type :class:`tuple` with the dimensions
-                  of the :class:`scaleflow.networks.MLPBlock` processing the source cell.
+                  of the :class:`cellflow.networks.MLPBlock` processing the source cell.
                 - ``'genot_source_dropout'`` of type :class:`float` indicating the dropout rate
                   for the source cell processing.
         probability_path

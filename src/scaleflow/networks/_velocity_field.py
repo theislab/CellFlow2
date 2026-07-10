@@ -6,12 +6,12 @@ from typing import Any, Literal
 import jax
 import jax.numpy as jnp
 import optax
+from cellflow.networks._utils import FilmBlock, MLPBlock, ResNetBlock, sinusoidal_time_encoder
 from flax import linen as nn
 from flax.training import train_state
 
 from scaleflow._types import Layers_separate_input_t, Layers_t
 from scaleflow.networks._set_encoders import ConditionEncoder
-from scaleflow.networks._utils import FilmBlock, MLPBlock, ResNetBlock, sinusoidal_time_encoder
 
 __all__ = ["ConditionalVelocityField", "GENOTConditionalVelocityField", "EquilibriumVelocityField"]
 
@@ -168,7 +168,7 @@ class ConditionalVelocityField(nn.Module):
         self.layer_norm_x = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
 
         if self.cell_transformer_layers > 0:
-            from scaleflow.networks._utils import SelfAttentionBlock
+            from cellflow.networks._utils import SelfAttentionBlock
 
             self.cell_transformer = SelfAttentionBlock(
                 num_heads=[self.cell_transformer_heads] * self.cell_transformer_layers,
@@ -750,7 +750,7 @@ class EquilibriumVelocityField(nn.Module):
         self.layer_norm_x = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
 
         if self.cell_transformer_layers > 0:
-            from scaleflow.networks._utils import SelfAttentionBlock
+            from cellflow.networks._utils import SelfAttentionBlock
 
             self.cell_transformer = SelfAttentionBlock(
                 num_heads=[self.cell_transformer_heads] * self.cell_transformer_layers,

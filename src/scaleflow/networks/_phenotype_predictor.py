@@ -4,10 +4,9 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import optax
+from cellflow.networks import _utils as nn_utils
 from flax import linen as nn
 from flax.training import train_state
-
-from scaleflow.networks import _utils as nn_utils
 
 __all__ = ["PhenotypePredictor"]
 

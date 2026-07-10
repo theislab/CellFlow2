@@ -1,9 +1,9 @@
 import jax
 import jax.numpy as jnp
 import pytest
+from cellflow.networks._utils import SeedAttentionPooling, TokenAttentionPooling
 
 from scaleflow.networks._set_encoders import ConditionEncoder
-from scaleflow.networks._utils import SeedAttentionPooling, TokenAttentionPooling
 
 
 class TestAggregator:
