@@ -104,7 +104,7 @@ def _perform_deg(x, refer, method: str = "t-test"):
     x = np.asarray(x, dtype=np.float32)
     refer = np.asarray(refer, dtype=np.float32)
     adata = ad.AnnData(np.vstack([x, refer]))
-    adata.var_names = [str(i) for i in range(adata.n_vars)]   
+    adata.var_names = [str(i) for i in range(adata.n_vars)]   # stable gene ids for the merge
     adata.obs["group"] = ["treatment"] * x.shape[0] + ["control"] * refer.shape[0]
     sc.tl.rank_genes_groups(
         adata, groupby="group", groups=["treatment"],
@@ -326,7 +326,7 @@ class ValMetricsLogger(ComputationCallback):
         for w in sorted(per_w):
             e = per_w[w][0]
             self._print_entry(e, tag=f" [w={w}]")
-            for k in self.METRICS:                       # all-w curves
+            for k in self.METRICS:
                 wandb_log[f"val_{k}__w{w}"] = e[k]
                 wandb_log[f"val_{k}_median__w{w}"] = e[f"{k}_median"]
         for k in self.METRICS:                           # best-w → the default (graphed) val_* keys
@@ -711,16 +711,14 @@ class ReconMetricsLogger(ComputationCallback):
                 predgene_sigs.append(float(pred_genes.mean()))
                 true_mean = true_genes.mean(axis=0)
                 pred_mean = pred_genes.mean(axis=0)
-                ctrl_mean = ctrl_genes.mean(axis=0)       
+                ctrl_mean = ctrl_genes.mean(axis=0)
                 # pred delta uses decode(control latent) when available, so the decoder
                 # offset cancels (decode(pred) − decode(ctrl)); else fall back to observed.
                 ctrl_pred = self._get_ctrl_decoded(cond_key)
                 if ctrl_pred is None:
                     ctrl_pred = ctrl_mean
-                # delta metric (perturbation effect)
                 r, _ = pearsonr(true_mean - ctrl_mean, pred_mean - ctrl_pred)
                 pearson_deltas.append(float(r))
-                # non-delta metric (absolute reconstruction): decode(pred) vs true genes
                 rf, _ = pearsonr(true_mean, pred_mean)
                 pearson_fulls.append(float(rf))
                 # ReconEval-style DEG (scanpy rank_genes_groups): DE-recon = decode(pred) vs
@@ -798,7 +796,7 @@ class ReconMetricsLogger(ComputationCallback):
         wandb_log: dict = {}
         for w in sorted(per_w):
             for k, v in per_w[w].items():
-                wandb_log[f"{k}__w{w}"] = v          # all-w curves
+                wandb_log[f"{k}__w{w}"] = v
         wandb_log.update(best)                        # best-w → default val_recon_* keys
         wandb_log["val_recon_best_w"] = float(best_w)
         print(f"    val recon  → best w={best_w} by {primary} "
