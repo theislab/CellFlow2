@@ -1,28 +1,14 @@
 from collections.abc import Callable, Sequence
 
+import jax
 import jax.numpy as jnp
-
-# dedup: re-exported from cellflow (identical implementations)
+from cellflow._types import Layers_t
 from cellflow.networks._utils import (
-    BaseModule as BaseModule,
-)
-from cellflow.networks._utils import (
-    FilmBlock as FilmBlock,
-)
-from cellflow.networks._utils import (
-    MLPBlock as MLPBlock,
-)
-from cellflow.networks._utils import (
-    ResNetBlock as ResNetBlock,
-)
-from cellflow.networks._utils import (
-    _apply_modules as _apply_modules,
-)
-from cellflow.networks._utils import (
-    _get_layers as _get_layers,
-)
-from cellflow.networks._utils import (
-    sinusoidal_time_encoder as sinusoidal_time_encoder,
+    BaseModule,
+    FilmBlock,
+    MLPBlock,
+    ResNetBlock,
+    sinusoidal_time_encoder,
 )
 from flax import linen as nn
 from flax.linen import initializers
@@ -580,6 +566,50 @@ class AdaLNZeroBlock(BaseModule):
         x = x + gate_mlp * h
 
         return x
+
+
+def _get_layers(
+    layers: Layers_t,
+    output_dim: int | None = None,
+    dropout_rate: float | None = None,
+) -> list[nn.Module]:
+    """Get modules from layer parameters."""
+    modules = []
+    if isinstance(layers, Sequence):
+        for layer in layers:
+            layer = dict(layer)
+            layer_type = layer.pop("layer_type", "mlp")
+            if layer_type == "mlp":
+                lay = MLPBlock(**layer)
+            elif layer_type == "self_attention":
+                lay = SelfAttentionBlock(**layer)
+            else:
+                raise ValueError(f"Unknown layer type: {layer_type}")
+            modules.append(lay)
+    if output_dim is not None:
+        modules.append(nn.Dense(output_dim))
+        if dropout_rate is not None:
+            modules.append(nn.Dropout(dropout_rate))
+    return modules
+
+
+def _apply_modules(
+    modules: list[nn.Module],
+    conditions: jax.Array,
+    attention_mask: jnp.ndarray | None,
+    training: bool,
+) -> jnp.ndarray:
+    """Apply modules to conditions."""
+    for module in modules:
+        if isinstance(module, SelfAttentionBlock):
+            conditions = module(conditions, attention_mask, training)
+        elif isinstance(module, nn.Dense):
+            conditions = module(conditions)
+        elif isinstance(module, nn.Dropout):
+            conditions = module(conditions, deterministic=not training)
+        else:
+            conditions = module(conditions, training)
+    return conditions
 
 
 
