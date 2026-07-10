@@ -327,8 +327,6 @@ def _solver_params(solver) -> dict:
         "vf_params":           solver.vf_state.params,
         "vf_inference_params": solver.vf_state_inference.params,
     }
-    if hasattr(solver, "phenotype_state") and solver.phenotype_state is not None:
-        p["phenotype_params"] = solver.phenotype_state.params
     return p
 
 
@@ -336,8 +334,6 @@ def restore_solver_params(solver, params: dict) -> None:
     """Restore orbax-loaded params dict back into a solver in-place."""
     solver.vf_state           = solver.vf_state.replace(params=params["vf_params"])
     solver.vf_state_inference = solver.vf_state_inference.replace(params=params["vf_inference_params"])
-    if "phenotype_params" in params and hasattr(solver, "phenotype_state") and solver.phenotype_state is not None:
-        solver.phenotype_state = solver.phenotype_state.replace(params=params["phenotype_params"])
 
 
 class BestModelCheckpoint(ComputationCallback):

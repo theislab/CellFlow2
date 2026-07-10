@@ -285,12 +285,6 @@ class ScaleFlow:
         solver_kwargs: dict[str, Any] | None = None,
         layer_norm_before_concatenation: bool = False,
         linear_projection_before_concatenation: bool = False,
-        use_phenotype_predictor: bool = False,
-        phenotype_hidden_dims: Sequence[int] = (256, 128, 64),
-        phenotype_dropout: float = 0.0,
-        phenotype_output_dim: int = 1,
-        loss_weight_gex: float = 1.0,
-        loss_weight_functional: float = 1.0,
         seed=0,
     ) -> None:
         """Prepare the model for training.
@@ -544,16 +538,6 @@ class ScaleFlow:
                 f"The key of `probability_path` must be `'constant_noise'` or `'bridge'` but found {probability_path}."
             )
 
-        phenotype_predictor = None
-        if use_phenotype_predictor:
-            from scaleflow.networks import PhenotypePredictor
-
-            phenotype_predictor = PhenotypePredictor(
-                hidden_dims=phenotype_hidden_dims,
-                dropout_rate=phenotype_dropout,
-                output_dim=phenotype_output_dim,
-            )
-
         # Get sample conditions from first target distribution
         # Conditions are stored as nested dicts: {col_name: array}
 
@@ -562,9 +546,6 @@ class ScaleFlow:
                 vf=self.vf,
                 match_fn=match_fn,
                 probability_path=probability_path,
-                phenotype_predictor=phenotype_predictor,
-                loss_weight_gex=loss_weight_gex,
-                loss_weight_functional=loss_weight_functional,
                 optimizer=optimizer,
                 conditions=sample_conditions,
                 rng=jax.random.PRNGKey(seed),
@@ -575,9 +556,6 @@ class ScaleFlow:
             self._solver = self._solver_class(
                 vf=self.vf,
                 match_fn=match_fn,
-                phenotype_predictor=phenotype_predictor,
-                loss_weight_gex=loss_weight_gex,
-                loss_weight_functional=loss_weight_functional,
                 optimizer=optimizer,
                 conditions=sample_conditions,
                 rng=jax.random.PRNGKey(seed),
@@ -623,9 +601,6 @@ class ScaleFlow:
         ----
         A low value of ``'valid_freq'`` results in long training
         because predictions are time-consuming compared to training steps.
-
-        For multi-task training with functional assays, create a custom dataloader
-        that returns batches with the appropriate 'task' field ('gex' or 'functional').
 
         Parameters
         ----------

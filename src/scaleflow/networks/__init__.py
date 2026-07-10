@@ -1,6 +1,3 @@
-from scaleflow.networks._phenotype_predictor import (
-    PhenotypePredictor,
-)
 from scaleflow.networks._set_encoders import (
     ConditionEncoder,
 )
@@ -19,7 +16,6 @@ __all__ = [
     "GENOTConditionalVelocityField",
     "EquilibriumVelocityField",
     "ConditionEncoder",
-    "PhenotypePredictor",
     "AdaLNModulation",
     "AdaLNZeroBlock",
 ]

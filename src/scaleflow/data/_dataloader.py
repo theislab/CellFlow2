@@ -88,11 +88,11 @@ class InMemorySampler(SamplerABC):
         return self._initialized
 
     def sample(self) -> dict[str, Any]:
-        """Sample a batch for gene expression (flow matching) task.
+        """Sample a batch for flow matching.
 
         Returns
         -------
-        Dictionary with source cells, target cells, condition, and task type
+        Dictionary with source cells, target cells, and condition.
         """
         if not self._initialized:
             raise ValueError("Sampler not initialized. Call init_sampler() first.")
@@ -604,11 +604,11 @@ class ReservoirSampler(SamplerABC):
         return None
 
     def sample(self) -> dict[str, Any]:
-        """Sample a batch for gene expression (flow matching) task.
+        """Sample a batch for flow matching.
 
         Returns
         -------
-        Dictionary with source cells, target cells, condition, and task type
+        Dictionary with source cells, target cells, and condition.
         """
         source_dist_idx = self._sample_source_dist_idx()
         target_dist_idx = self._sample_target_dist_idx(source_dist_idx)
