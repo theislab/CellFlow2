@@ -213,7 +213,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             use_gpu_optimized=True,
             precision="bfloat16",
         ),
-        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False)), compute_de=not recon_enabled),
+        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
         callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),
         temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
     ]
@@ -289,7 +289,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     # re-read predict_kwargs from cfg (the earlier dict was mutated when the trainer popped
     # guidance_scales); test sweeps the SAME guidance_scales as validation, plotting all w.
     test_predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
-    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs, compute_de=not recon_enabled)
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs)
 
     # ── gene-space recon metrics on the test set (test_recon_*) ──
     test_recon = {}

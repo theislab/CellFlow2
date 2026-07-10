@@ -12,7 +12,7 @@ import shutil
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
-from scipy.stats import pearsonr, spearmanr, ttest_ind
+from scipy.stats import pearsonr, spearmanr
 from tqdm import tqdm
 
 from scaleflow.training._callbacks import ComputationCallback
@@ -86,87 +86,7 @@ def mean_nn_displacement_corr(valid_source_data, valid_true_data, valid_pred_dat
     return float(np.nanmean(scores))
 
 
-# ── differential-expression (DE) metrics ─────────────────────────────────────
-def _bh_fdr_reject(pvals, alpha: float) -> np.ndarray:
-    """Benjamini–Hochberg: boolean 'is significant' mask at FDR ≤ alpha."""
-    p = np.nan_to_num(np.asarray(pvals, dtype=float), nan=1.0)
-    n = p.size
-    reject = np.zeros(n, dtype=bool)
-    if n == 0:
-        return reject
-    order = np.argsort(p)
-    ranked = p[order]
-    passed = ranked <= alpha * (np.arange(1, n + 1) / n)
-    if passed.any():
-        cutoff = ranked[np.nonzero(passed)[0].max()]   # largest p below its BH threshold
-        reject = p <= cutoff
-    return reject
-
-
-def _de_vs_control(perturbed, control, fdr: float):
-    """Per-gene (logFC, BH-significant mask) for `perturbed` vs `control`.
-
-    Expression is log1p-normalized, so logFC = mean(perturbed) − mean(control).
-    Significance is a per-gene Welch t-test (perturbed vs control), BH-corrected.
-    """
-    perturbed = np.asarray(perturbed)
-    control = np.asarray(control)
-    logfc = perturbed.mean(axis=0) - control.mean(axis=0)
-    if perturbed.shape[0] < 2 or control.shape[0] < 2:
-        return logfc, np.zeros(logfc.shape, dtype=bool)   # too few cells to test
-    _, pvals = ttest_ind(perturbed, control, axis=0, equal_var=False)
-    return logfc, _bh_fdr_reject(pvals, fdr)
-
-
-def de_metrics(y_true, y_pred, source, source_pred=None, fdr: float = 0.05) -> dict:
-    """DE-based condition metrics (all in [0, 1], higher = better). ALWAYS gene-space:
-    callers must pass gene-expression arrays (decode a latent to genes first).
-
-    Significant DE genes are called (FDR ≤ `fdr`, default 0.05) separately for the
-    true perturbed cells and the predicted perturbed cells, each vs the control
-    distribution; genes are ranked by |logFC|. ``source_pred`` (optional) is the control
-    used for the PREDICTED side — pass decoded control cells so the decoder offset cancels
-    (decode(pred) − decode(ctrl)); defaults to ``source`` (the observed control).
-
-    DEOver (DE overlap)     — |predTop-N ∩ trueSig| / N, where N = #true-significant
-                              genes and predTop-N = the N predicted-significant genes
-                              with the largest |logFC|. Recovery of the top true DE genes.
-    DEPrec (DE precision)   — |predSig ∩ trueSig| / |predSig|: of predicted-significant
-                              genes, the fraction that are truly significant.
-    DirAgr (direction agr.) — over predSig ∩ trueSig, the fraction whose logFC sign
-                              matches the true logFC sign (up/down-regulation agreement).
-    """
-    ctrl_t = np.asarray(source)
-    ctrl_p = np.asarray(source_pred) if source_pred is not None else ctrl_t
-    logfc_t, sig_t = _de_vs_control(y_true, ctrl_t, fdr)
-    logfc_p, sig_p = _de_vs_control(y_pred, ctrl_p, fdr)
-
-    true_genes = np.nonzero(sig_t)[0]
-    pred_genes = np.nonzero(sig_p)[0]
-    N, nP = int(true_genes.size), int(pred_genes.size)
-    inter = sig_t & sig_p
-
-    if N == 0:                                    # no true DE genes → overlap undefined
-        de_over = float("nan")
-    else:                                         # top-N predicted (by |logFC|) ∩ true set
-        pred_topN = pred_genes[np.argsort(-np.abs(logfc_p[pred_genes]))][:N]
-        de_over = float(np.isin(pred_topN, true_genes).sum() / N)
-
-    de_prec = float(inter.sum() / nP) if nP > 0 else float("nan")
-    dir_agr = (float((np.sign(logfc_t[inter]) == np.sign(logfc_p[inter])).mean())
-               if inter.any() else float("nan"))
-
-    return {"de_overlap": de_over, "de_precision": de_prec, "dir_agreement": dir_agr}
-
-
-_DE_KEYS = ("de_overlap", "de_precision", "dir_agreement")
-_DE_NAN = {k: float("nan") for k in _DE_KEYS}
-
-
-# ── ReconEval-style DEG metrics (theislab/ReconEval sc_reconstruction/metrics/_deg.py) ──
-# Dice@k overlap of top-k |logFC| genes + logFC correlation + mean-genediff correlation.
-# DE is called with scanpy's ``rank_genes_groups`` EXACTLY as ReconEval's DegCalculator does
-# (logfoldchanges + BH-adjusted p-values), so numbers are directly comparable to that pipeline.
+# ── differential-expression (DEG) metrics ────────────────────────────────────
 _DEG_DICE_K = (10, 50, 100, 200, 400)
 
 
@@ -184,7 +104,7 @@ def _perform_deg(x, refer, method: str = "t-test"):
     x = np.asarray(x, dtype=np.float32)
     refer = np.asarray(refer, dtype=np.float32)
     adata = ad.AnnData(np.vstack([x, refer]))
-    adata.var_names = [str(i) for i in range(adata.n_vars)]   # stable gene ids for merging
+    adata.var_names = [str(i) for i in range(adata.n_vars)]   
     adata.obs["group"] = ["treatment"] * x.shape[0] + ["control"] * refer.shape[0]
     sc.tl.rank_genes_groups(
         adata, groupby="group", groups=["treatment"],
@@ -267,42 +187,30 @@ _DEG_RE_KEYS = tuple(f"deg_dice_{k}" for k in _DEG_DICE_K) + (
 )
 
 
-def _condition_metrics(y_true, y_pred, source, debug: bool = False, compute_de: bool = True) -> dict:
-    """Per-condition metrics on the model's OUTPUT space. DE metrics are only meaningful
-    in gene space, so `compute_de` must be False for latent-output runs (the gene-space DE
-    is computed instead in ReconMetricsLogger on decoded genes)."""
+def _condition_metrics(y_true, y_pred, source, debug: bool = False) -> dict:
+    """Per-condition metrics on the model's OUTPUT space. Gene-space DEG metrics are computed
+    separately in ReconMetricsLogger (on decoded genes), not here."""
     yt, yp = np.asarray(y_true), np.asarray(y_pred)
-    m = {
+    return {
         "pearson_r":  pearson_r(yt, yp),
         "e_distance": float(compute_e_distance_fast(yt, yp)),
         "mmd":        float(compute_scalar_mmd(yt, yp)),
         "pearson_r_delta":    pearson_r_delta(yt, yp, source)    if source is not None else float("nan"),
         "nn_displacement_corr": nn_displacement_corr(yt, yp, source, debug=debug) if source is not None else float("nan"),
     }
-    if compute_de:
-        m.update(de_metrics(yt, yp, source) if source is not None else _DE_NAN)
-    return m
 
 
 class ValMetricsLogger(ComputationCallback):
     """Logs pooled val metrics to JSON + wandb; returns per-dataset nn_displacement_corr for monitoring."""
 
-    METRICS = ("pearson_r", "e_distance", "mmd", "pearson_r_delta", "nn_displacement_corr",
-               "de_overlap", "de_precision", "dir_agreement")
+    METRICS = ("pearson_r", "e_distance", "mmd", "pearson_r_delta", "nn_displacement_corr")
 
-    def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False,
-                 compute_de: bool = True):
+    def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False):
         self.save_path   = save_path
         self._valid_freq = valid_freq
         self._step       = 0
         self._wandb_run  = wandb_run
         self._debug      = debug
-        # DE metrics are gene-space only; for latent-output runs pass compute_de=False
-        # (the gene-space DE is logged by ReconMetricsLogger on decoded genes instead).
-        self._compute_de = compute_de
-        self.METRICS = ValMetricsLogger.METRICS if compute_de else tuple(
-            m for m in ValMetricsLogger.METRICS if m not in _DE_KEYS
-        )
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self._step = 0
@@ -316,8 +224,7 @@ class ValMetricsLogger(ComputationCallback):
                     continue
                 src_arr = valid_source_data.get(ds, {}).get(cond_key)
                 per_ds.setdefault(ds, []).append(
-                    _condition_metrics(true_arr, pred_arr, src_arr, debug=self._debug,
-                                       compute_de=self._compute_de)
+                    _condition_metrics(true_arr, pred_arr, src_arr, debug=self._debug)
                 )
         return per_ds
 
@@ -425,8 +332,7 @@ class ValMetricsLogger(ComputationCallback):
 
 
 # Metrics where higher = better. All others (e_distance, mmd) → lower = better.
-_MAXIMIZE_METRICS = {"pearson_r", "pearson_r_delta", "nn_displacement_corr",
-                     "de_overlap", "de_precision", "dir_agreement"}
+_MAXIMIZE_METRICS = {"pearson_r", "pearson_r_delta", "nn_displacement_corr"}
 
 
 def _solver_params(solver) -> dict:
@@ -472,7 +378,7 @@ class BestModelCheckpoint(ComputationCallback):
                 if pred_arr is None:
                     continue
                 src_arr = valid_source_data.get(ds, {}).get(cond_key)
-                m = _condition_metrics(true_arr, pred_arr, src_arr, compute_de=self._metric in _DE_KEYS)
+                m = _condition_metrics(true_arr, pred_arr, src_arr)
                 scores.append(m[self._metric])
         return float(np.nanmean(scores)) if scores else float("nan")
 
@@ -534,21 +440,20 @@ def _test_guidance_plan(predict_kwargs: dict | None) -> tuple[dict, list[float],
     return base_pk, ws, base_w
 
 
-def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = None,
-                  compute_de: bool = True) -> dict:
+def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = None) -> dict:
     """Per-condition and aggregated test metrics for each dataset.
 
     When ``predict_kwargs`` carries a ``guidance_scales`` list (the CFG w-sweep used at
     validation), the SAME sampled test batch is predicted once per w. The returned dict holds
     the default-w (config ``guidance_scale``) results plus ``per_w_aggregated`` = {w: aggregated}
-    so every w can be plotted; no best-w is selected. ``compute_de`` False for latent-output
-    runs (gene-space DE is computed by ReconMetricsLogger on decoded genes instead).
+    so every w can be plotted; no best-w is selected. Gene-space DEG metrics are reported
+    separately by ReconMetricsLogger on decoded genes.
     """
     base_pk, ws, base_w = _test_guidance_plan(predict_kwargs)
     # skip the w-sweep for non-CFG models: every w gives the same conditional prediction.
     if not getattr(solver, "cfg_enabled", False):
         ws = [base_w]
-    keys = [k for k in ValMetricsLogger.METRICS if compute_de or k not in _DE_KEYS]
+    keys = list(ValMetricsLogger.METRICS)
 
     # sample each dataset ONCE so all w are compared on the same cells/conditions
     batches = {}
@@ -572,7 +477,7 @@ def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = Non
             per_condition = {}
             for cond_key in tqdm(sorted(true.keys(), key=str), desc=f"  test metrics [{name}] w={w}"):
                 src_arr = src.get(cond_key) if isinstance(src, dict) else None
-                per_condition[str(cond_key)] = _condition_metrics(true[cond_key], pred[cond_key], src_arr, compute_de=compute_de)
+                per_condition[str(cond_key)] = _condition_metrics(true[cond_key], pred[cond_key], src_arr)
                 all_per_condition[f"{name}/{cond_key}"] = per_condition[str(cond_key)]
             per_dataset[name] = {
                 "per_condition": per_condition,
@@ -749,7 +654,6 @@ class ReconMetricsLogger(ComputationCallback):
         """
         pearson_deltas = []
         pearson_fulls = []   # non-delta: decode(pred) vs true genes (no control)
-        de_over, de_prec, de_dir = [], [], []   # gene-space DE on decoded genes
         deg_re = {k: [] for k in _DEG_RE_KEYS}  # ReconEval-style DEG (Dice@k, logFC/diff corr)
         n_total = n_unmatched = 0
         first_unmatched = None
@@ -782,16 +686,10 @@ class ReconMetricsLogger(ComputationCallback):
                 # non-delta metric (absolute reconstruction): decode(pred) vs true genes
                 rf, _ = pearsonr(true_mean, pred_mean)
                 pearson_fulls.append(float(rf))
-                # gene-space DE (decoded cells): DE-true = perturbed vs observed control,
-                # DE-pred = decode(pred) vs decode(control latent) so the decoder offset cancels.
-                ctrl_pred_cells = self._get_ctrl_decoded_cells(cond_key)
-                de = de_metrics(true_genes, pred_genes, ctrl_genes, source_pred=ctrl_pred_cells)
-                de_over.append(de["de_overlap"])
-                de_prec.append(de["de_precision"])
-                de_dir.append(de["dir_agreement"])
                 # ReconEval-style DEG (scanpy rank_genes_groups): DE-recon = decode(pred) vs
                 # decode(ctrl latent) so the decoder offset cancels (fall back to observed ctrl).
                 if self._reconeval_deg:
+                    ctrl_pred_cells = self._get_ctrl_decoded_cells(cond_key)
                     ctrl_de = ctrl_pred_cells if ctrl_pred_cells is not None else ctrl_genes
                     cid = str(self._normalize_key(cond_key))
                     m_re, orig = deg_reconeval(
@@ -806,7 +704,7 @@ class ReconMetricsLogger(ComputationCallback):
                   f"decoded mean={np.mean(predgene_sigs):.6f}  ({step_label})")
 
         # Always emit the keys (NaN when nothing matched) so monitor_metrics never KeyErrors.
-        keys = ["pearson_r_delta", "pearson_r", *_DE_KEYS]
+        keys = ["pearson_r_delta", "pearson_r"]
         if self._reconeval_deg:
             keys += list(_DEG_RE_KEYS)
         if not pearson_deltas:
@@ -825,8 +723,7 @@ class ReconMetricsLogger(ComputationCallback):
             print(f"    {prefix} recon  note: {n_unmatched}/{n_total} conditions unmatched "
                   f"(e.g. {first_unmatched[0]!r})")
 
-        vals = {"pearson_r_delta": pearson_deltas, "pearson_r": pearson_fulls,
-                "de_overlap": de_over, "de_precision": de_prec, "dir_agreement": de_dir}
+        vals = {"pearson_r_delta": pearson_deltas, "pearson_r": pearson_fulls}
         if self._reconeval_deg:
             vals.update({k: deg_re[k] for k in _DEG_RE_KEYS})
         out = {}
@@ -837,12 +734,11 @@ class ReconMetricsLogger(ComputationCallback):
         if self._reconeval_deg:
             deg_msg = (f" | Dice50={out[f'{prefix}_recon_deg_dice_50']:.3f} "
                        f"Dice100={out[f'{prefix}_recon_deg_dice_100']:.3f} "
-                       f"logFCr={out[f'{prefix}_recon_deg_logfc_pearson']:.3f}")
+                       f"logFCr={out[f'{prefix}_recon_deg_logfc_pearson']:.3f} "
+                       f"meandiffr={out[f'{prefix}_recon_mean_genediff_pearson']:.3f}")
         print(f"    {prefix} recon  "
               f"rδ={out[f'{prefix}_recon_pearson_r_delta']:.4f}  r={out[f'{prefix}_recon_pearson_r']:.4f}  "
-              f"(med rδ={out[f'{prefix}_recon_pearson_r_delta_median']:.4f})  "
-              f"DEover={out[f'{prefix}_recon_de_overlap']:.3f} DEprec={out[f'{prefix}_recon_de_precision']:.3f} "
-              f"DirAgr={out[f'{prefix}_recon_dir_agreement']:.3f}{deg_msg} "
+              f"(med rδ={out[f'{prefix}_recon_pearson_r_delta_median']:.4f}){deg_msg} "
               f"({step_label})")
         if emit and self._wandb_run is not None:
             self._wandb_run.log(out)
