@@ -206,6 +206,11 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     dec_path  = recon_cfg.get("decoder_path")
     h5ad_path = recon_cfg.get("h5ad_path")
     recon_enabled = bool(dec_path and h5ad_path)
+    # No decoder / gene-space flow (model outputs adata.X): run ReconEval DEG directly on the
+    # preds in ValMetricsLogger. When recon IS enabled the output is a latent, so DEG there is
+    # meaningless → off (ReconMetricsLogger computes it on decoded genes instead). Overridable
+    # via recon.deg_on_output for the rare latent-without-decoder case.
+    deg_on_output = bool(recon_cfg.get("deg_on_output", not recon_enabled))
     cbs = [
         Metrics(
             metrics=["e_distance", "mmd"],
@@ -213,7 +218,10 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
             use_gpu_optimized=True,
             precision="bfloat16",
         ),
-        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
+        callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq),
+                                   wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False)),
+                                   deg_on_output=deg_on_output,
+                                   deg_method=str(recon_cfg.get("deg_method", "t-test"))),
         callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),
         temp_edit.EffectSizeMonitor(valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run),
     ]
@@ -259,6 +267,9 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         ]
     if recon_enabled:
         monitor_metrics += ["val_recon_pearson_r_delta"]
+    if deg_on_output:
+        print(f"  gene-space DEG on preds enabled (ReconEval-style, "
+              f"method={recon_cfg.get('deg_method', 't-test')}) → val_deg_dice_*/deg_logfc_*/mean_genediff_*")
 
     print(f"Training {int(cfg.training.num_iterations)} iterations "
           f"(val every {int(cfg.training.valid_freq)} steps) …")
@@ -289,7 +300,9 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
     # re-read predict_kwargs from cfg (the earlier dict was mutated when the trainer popped
     # guidance_scales); test sweeps the SAME guidance_scales as validation, plotting all w.
     test_predict_kwargs = OmegaConf.to_container(cfg.solver.get("predict_kwargs", {}), resolve=True)
-    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs)
+    test_metrics = callbacks.evaluate_test(best_solver, test_samplers, predict_kwargs=test_predict_kwargs,
+                                           deg_on_output=deg_on_output,
+                                           deg_method=str(recon_cfg.get("deg_method", "t-test")))
 
     # ── gene-space recon metrics on the test set (test_recon_*) ──
     test_recon = {}

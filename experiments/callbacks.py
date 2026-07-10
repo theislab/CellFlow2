@@ -205,15 +205,25 @@ class ValMetricsLogger(ComputationCallback):
 
     METRICS = ("pearson_r", "e_distance", "mmd", "pearson_r_delta", "nn_displacement_corr")
 
-    def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False):
+    def __init__(self, save_path: str, valid_freq: int, wandb_run=None, debug: bool = False,
+                 deg_on_output: bool = False, deg_method: str = "t-test"):
         self.save_path   = save_path
         self._valid_freq = valid_freq
         self._step       = 0
         self._wandb_run  = wandb_run
         self._debug      = debug
+        # Gene-space runs (flow directly on adata.X, no decoder): the model OUTPUT is gene
+        # expression, so run ReconEval-style DEG directly on the preds here. DE-recon uses the
+        # observed control as the pred-side reference (no decoder offset to cancel).
+        self._deg_on_output = deg_on_output
+        self._deg_method = deg_method
+        self._orig_deg_cache: dict[str, object] = {}
+        self.METRICS = (ValMetricsLogger.METRICS + _DEG_RE_KEYS
+                        if deg_on_output else ValMetricsLogger.METRICS)
 
     def on_train_begin(self, *args, **kwargs) -> None:
         self._step = 0
+        self._orig_deg_cache = {}
 
     def _gather(self, valid_source_data, valid_true_data, valid_pred_data):
         per_ds: dict = {}
@@ -223,10 +233,24 @@ class ValMetricsLogger(ComputationCallback):
                 if pred_arr is None:
                     continue
                 src_arr = valid_source_data.get(ds, {}).get(cond_key)
-                per_ds.setdefault(ds, []).append(
-                    _condition_metrics(true_arr, pred_arr, src_arr, debug=self._debug)
-                )
+                m = _condition_metrics(true_arr, pred_arr, src_arr, debug=self._debug)
+                if self._deg_on_output:
+                    m.update(self._deg_on_preds(cond_key, true_arr, pred_arr, src_arr))
+                per_ds.setdefault(ds, []).append(m)
         return per_ds
+
+    def _deg_on_preds(self, cond_key, true_arr, pred_arr, src_arr) -> dict:
+        """ReconEval-style gene-space DEG on the model output (no decoder). ctrl_pred = observed
+        control (no decoder offset). True-DE cached per condition (prediction-independent)."""
+        if src_arr is None:
+            return {k: float("nan") for k in _DEG_RE_KEYS}
+        cid = str(cond_key)
+        m_re, orig = deg_reconeval(
+            true_arr, src_arr, pred_arr, src_arr,
+            method=self._deg_method, orig_deg=self._orig_deg_cache.get(cid),
+        )
+        self._orig_deg_cache[cid] = orig
+        return m_re
 
     # guidance scale picked (by this primary metric) when a CFG w-sweep is active
     _PRIMARY = "pearson_r_delta"
@@ -440,20 +464,23 @@ def _test_guidance_plan(predict_kwargs: dict | None) -> tuple[dict, list[float],
     return base_pk, ws, base_w
 
 
-def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = None) -> dict:
+def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = None,
+                  deg_on_output: bool = False, deg_method: str = "t-test") -> dict:
     """Per-condition and aggregated test metrics for each dataset.
 
     When ``predict_kwargs`` carries a ``guidance_scales`` list (the CFG w-sweep used at
     validation), the SAME sampled test batch is predicted once per w. The returned dict holds
     the default-w (config ``guidance_scale``) results plus ``per_w_aggregated`` = {w: aggregated}
-    so every w can be plotted; no best-w is selected. Gene-space DEG metrics are reported
-    separately by ReconMetricsLogger on decoded genes.
+    so every w can be plotted; no best-w is selected. For latent runs, gene-space DEG is
+    reported separately by ReconMetricsLogger on decoded genes; for gene-space runs
+    (``deg_on_output=True``) ReconEval DEG is computed here directly on the preds.
     """
     base_pk, ws, base_w = _test_guidance_plan(predict_kwargs)
     # skip the w-sweep for non-CFG models: every w gives the same conditional prediction.
     if not getattr(solver, "cfg_enabled", False):
         ws = [base_w]
-    keys = list(ValMetricsLogger.METRICS)
+    keys = list(ValMetricsLogger.METRICS) + (list(_DEG_RE_KEYS) if deg_on_output else [])
+    orig_deg_cache: dict = {}   # true-DE per condition, prediction-independent
 
     # sample each dataset ONCE so all w are compared on the same cells/conditions
     batches = {}
@@ -477,7 +504,17 @@ def evaluate_test(solver, test_samplers: dict, predict_kwargs: dict | None = Non
             per_condition = {}
             for cond_key in tqdm(sorted(true.keys(), key=str), desc=f"  test metrics [{name}] w={w}"):
                 src_arr = src.get(cond_key) if isinstance(src, dict) else None
-                per_condition[str(cond_key)] = _condition_metrics(true[cond_key], pred[cond_key], src_arr)
+                m = _condition_metrics(true[cond_key], pred[cond_key], src_arr)
+                if deg_on_output:
+                    if src_arr is not None:
+                        cid = f"{name}/{cond_key}"
+                        m_re, orig = deg_reconeval(true[cond_key], src_arr, pred[cond_key], src_arr,
+                                                   method=deg_method, orig_deg=orig_deg_cache.get(cid))
+                        orig_deg_cache[cid] = orig
+                        m.update(m_re)
+                    else:
+                        m.update({k: float("nan") for k in _DEG_RE_KEYS})
+                per_condition[str(cond_key)] = m
                 all_per_condition[f"{name}/{cond_key}"] = per_condition[str(cond_key)]
             per_dataset[name] = {
                 "per_condition": per_condition,
@@ -674,7 +711,7 @@ class ReconMetricsLogger(ComputationCallback):
                 predgene_sigs.append(float(pred_genes.mean()))
                 true_mean = true_genes.mean(axis=0)
                 pred_mean = pred_genes.mean(axis=0)
-                ctrl_mean = ctrl_genes.mean(axis=0)               # observed control genes
+                ctrl_mean = ctrl_genes.mean(axis=0)       
                 # pred delta uses decode(control latent) when available, so the decoder
                 # offset cancels (decode(pred) − decode(ctrl)); else fall back to observed.
                 ctrl_pred = self._get_ctrl_decoded(cond_key)
