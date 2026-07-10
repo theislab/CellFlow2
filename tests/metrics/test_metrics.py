@@ -7,11 +7,10 @@ from cellflow.metrics import (
     compute_mean_metrics,
     compute_metrics,
     compute_r_squared,
+    compute_scalar_mmd,
     compute_sinkhorn_div,
     maximum_mean_discrepancy,
 )
-
-from scaleflow.metrics import compute_scalar_mmd_sf
 
 
 class TestMetrics:
@@ -45,7 +44,7 @@ class TestMetrics:
         sinkhorn_div = compute_sinkhorn_div(x_test, y_test, epsilon=epsilon)
         e_distance = compute_e_distance(x_test, y_test)
         e_distance_fast = compute_e_distance_fast(x_test, y_test)
-        scalar_mmd = compute_scalar_mmd_sf(x_test, y_test)
+        scalar_mmd = compute_scalar_mmd(x_test, y_test)
         mmd_fast = maximum_mean_discrepancy(x_test, y_test, exact=False)
 
         assert -1000 <= r_squared <= 1

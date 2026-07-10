@@ -11,12 +11,10 @@ from pathlib import Path
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
-from cellflow.metrics import compute_e_distance_fast
+from cellflow.metrics import compute_e_distance_fast, compute_scalar_mmd
 from cellflow.training import ComputationCallback
 from scipy.stats import pearsonr, ttest_ind
 from tqdm import tqdm
-
-from scaleflow.metrics._metrics import compute_scalar_mmd_sf
 
 
 def pearson_r_delta(y_true, y_pred, source) -> float:
@@ -169,7 +167,7 @@ def _condition_metrics(y_true, y_pred, source, debug: bool = False, compute_de: 
     m = {
         "pearson_r":  pearson_r(yt, yp),
         "e_distance": float(compute_e_distance_fast(yt, yp)),
-        "mmd":        float(compute_scalar_mmd_sf(yt, yp)),
+        "mmd":        float(compute_scalar_mmd(yt, yp)),
         "pearson_r_delta":    pearson_r_delta(yt, yp, source)    if source is not None else float("nan"),
         "nn_displacement_corr": nn_displacement_corr(yt, yp, source, debug=debug) if source is not None else float("nan"),
     }

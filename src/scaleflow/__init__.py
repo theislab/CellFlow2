@@ -5,7 +5,6 @@ from importlib import metadata
 _LAZY_SUBMODULES = {
     "data",
     "datasets",
-    "metrics",
     "model",
     "networks",
     "pp",

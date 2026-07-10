@@ -32,10 +32,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from cellflow.metrics import compute_e_distance_fast
+from cellflow.metrics import compute_e_distance_fast, compute_scalar_mmd
 from cellflow.training import ComputationCallback
-
-from scaleflow.metrics._metrics import compute_scalar_mmd_sf
 
 SPLIT_COLORS = {"train": "#9e9e9e", "val": "#2196F3", "test": "#e74c3c"}
 
@@ -81,8 +79,8 @@ def condition_diagnostics(source, true, pred, max_cells: int = 2000, seed: int =
             cm = s.mean(0)
             true_eff = float(np.linalg.norm(t.mean(0) - cm))
             pred_eff = float(np.linalg.norm(p.mean(0) - cm))
-            mmd_ct = float(compute_scalar_mmd_sf(s, t))
-            mmd_pt = float(compute_scalar_mmd_sf(p, t))
+            mmd_ct = float(compute_scalar_mmd(s, t))
+            mmd_pt = float(compute_scalar_mmd(p, t))
             rec.update(
                 true_effect=true_eff, pred_effect=pred_eff,
                 effect_ratio=pred_eff / (true_eff + 1e-8),
@@ -93,7 +91,7 @@ def condition_diagnostics(source, true, pred, max_cells: int = 2000, seed: int =
         rec.update(
             pearson_r=_pearson_r(t, p),
             e_distance=float(compute_e_distance_fast(t, p)),
-            mmd=float(compute_scalar_mmd_sf(p, t)),
+            mmd=float(compute_scalar_mmd(p, t)),
         )
         rows.append(rec)
     return pd.DataFrame(rows)
