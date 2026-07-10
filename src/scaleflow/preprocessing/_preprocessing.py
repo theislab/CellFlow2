@@ -4,10 +4,10 @@ from typing import Any, Literal
 import anndata as ad
 import numpy as np
 import sklearn.preprocessing as preprocessing
+from cellflow.data._utils import _to_list
 
 from scaleflow._logging import logger
 from scaleflow._types import ArrayLike
-from scaleflow.data._utils import _to_list
 
 __all__ = ["encode_onehot", "annotate_compounds", "get_molecular_fingerprints"]
 

@@ -8,14 +8,6 @@ import numpy as np
 import pandas as pd
 import zarr
 
-# dedup: re-exported from cellflow (identical implementations)
-from cellflow.data._data import (
-    BaseDataMixin as BaseDataMixin,
-)
-from cellflow.data._data import (
-    ReturnData as ReturnData,
-)
-
 from scaleflow.data._anndata_location import AnnDataLocation
 from scaleflow.data._utils import write_dist_data_threaded, write_nested_dist_data, write_sharded
 from scaleflow.data.io import CSRLabelMapping

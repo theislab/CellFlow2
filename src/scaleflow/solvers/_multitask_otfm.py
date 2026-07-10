@@ -6,6 +6,7 @@ import diffrax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from cellflow.solvers.utils import ema_update
 from flax.training import train_state
 from ott.solvers import utils as solver_utils
 
@@ -13,7 +14,6 @@ from scaleflow import utils
 from scaleflow._compat import BaseFlow
 from scaleflow._types import ArrayLike
 from scaleflow.networks._velocity_field import MultiTaskConditionalVelocityField
-from scaleflow.solvers.utils import ema_update
 
 __all__ = ["MultiTaskOTFlowMatching"]
 

@@ -1,11 +1,6 @@
 import jax
 import jax.numpy as jnp
 
-# dedup: re-exported from cellflow (identical implementations)
-from cellflow.solvers.utils import (
-    ema_update as ema_update,
-)
-
 
 def _multivariate_normal(
     rng: jax.Array,

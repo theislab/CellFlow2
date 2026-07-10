@@ -3,28 +3,11 @@ from collections.abc import Callable, Iterable
 
 import anndata as ad
 import pandas as pd
-
-# dedup: re-exported from cellflow (identical implementations)
 from cellflow.preprocessing._gene_emb import (
-    BatchedDataset as BatchedDataset,
-)
-from cellflow.preprocessing._gene_emb import (
-    GeneInfo as GeneInfo,
-)
-from cellflow.preprocessing._gene_emb import (
-    _get_esm_collate_fn as _get_esm_collate_fn,
-)
-from cellflow.preprocessing._gene_emb import (
-    fetch_canonical_transcript_info as fetch_canonical_transcript_info,
-)
-from cellflow.preprocessing._gene_emb import (
-    fetch_protein_sequence as fetch_protein_sequence,
-)
-from cellflow.preprocessing._gene_emb import (
-    order_to_batch_list as order_to_batch_list,
-)
-from cellflow.preprocessing._gene_emb import (
-    prot_sequence_from_ensembl as prot_sequence_from_ensembl,
+    BatchedDataset,
+    GeneInfo,
+    _get_esm_collate_fn,
+    prot_sequence_from_ensembl,
 )
 
 from scaleflow._logging import logger

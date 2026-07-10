@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from cellflow.solvers.utils import ema_update
 from flax.core import frozen_dict
 from flax.training import train_state
 from ott.solvers import utils as solver_utils
@@ -16,7 +17,6 @@ from ott.solvers import utils as solver_utils
 from scaleflow import utils
 from scaleflow._types import ArrayLike
 from scaleflow.networks._velocity_field import ConditionalVelocityField
-from scaleflow.solvers.utils import ema_update
 
 __all__ = ["EquilibriumMatching"]
 

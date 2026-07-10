@@ -6,14 +6,6 @@ import anndata as ad
 import numpy as np
 import tqdm
 import zarr
-
-# dedup: re-exported from cellflow (identical implementations)
-from cellflow.data._utils import (
-    _flatten_list as _flatten_list,
-)
-from cellflow.data._utils import (
-    _to_list as _to_list,
-)
 from zarr.abc.codec import BytesBytesCodec
 from zarr.codecs import BloscCodec
 
