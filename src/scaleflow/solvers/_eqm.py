@@ -13,8 +13,8 @@ from flax.core import frozen_dict
 from flax.training import train_state
 from ott.solvers import utils as solver_utils
 
-from scaleflow import utils
-from scaleflow._types import ArrayLike
+from cellflow import utils
+from cellflow._types import ArrayLike
 from scaleflow.networks._velocity_field import ConditionalVelocityField
 
 __all__ = ["EquilibriumMatching"]
@@ -34,7 +34,7 @@ class EquilibriumMatching:
         match_fn
             Function to match samples from the source and the target
             distributions. It has a ``(src, tgt) -> matching`` signature,
-            see e.g. :func:`scaleflow.utils.match_linear`. If :obj:`None`, no
+            see e.g. :func:`cellflow.utils.match_linear`. If :obj:`None`, no
             matching is performed.
         gamma_sampler
             Noise level sampler with a ``(rng, n_samples) -> gamma`` signature.

@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, Any
 
 from cellflow.training._callbacks import BaseCallback, ComputationCallback, LoggingCallback
 
-from scaleflow._types import ArrayLike
+from cellflow._types import ArrayLike
 
 if TYPE_CHECKING:
-    from scaleflow.solvers import _genot, _otfm
+    from scaleflow.solvers import GENOT, OTFlowMatching
 
 
 __all__ = [
@@ -109,7 +109,7 @@ class CallbackRunner:
         valid_source_data: dict[str, dict[str, ArrayLike]],
         valid_data: dict[str, dict[str, ArrayLike]],
         pred_data: dict[str, dict[str, ArrayLike]],
-        solver: _otfm.OTFlowMatching | _genot.GENOT,
+        solver: OTFlowMatching | GENOT,
         additional_metrics: dict[str, Any] | None = None,
         iteration: int | None = None,
         pred_data_by_w: dict[float, dict[str, dict[str, ArrayLike]]] | None = None,
@@ -157,7 +157,7 @@ class CallbackRunner:
         valid_source_data: dict[str, dict[str, ArrayLike]],
         valid_data: dict[str, dict[str, ArrayLike]],
         pred_data: dict[str, dict[str, ArrayLike]],
-        solver: _otfm.OTFlowMatching | _genot.GENOT,
+        solver: OTFlowMatching | GENOT,
         pred_data_by_w: dict[float, dict[str, dict[str, ArrayLike]]] | None = None,
     ) -> dict[str, Any]:
         """Called at the end of training to run callbacks. First computes metrics with computation callbacks and then logs data with logging callbacks.

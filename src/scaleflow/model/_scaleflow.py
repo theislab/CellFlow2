@@ -18,13 +18,13 @@ from cellflow.training import BaseCallback
 
 from scaleflow import _constants
 from scaleflow._compat import BrownianBridge, ConstantNoiseFlow
-from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
+from cellflow._types import ArrayLike, Layers_separate_input_t, Layers_t
 from scaleflow.data import DataManager, GroupedDistribution, SamplerABC
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
-from scaleflow.solvers import SOLVER_REGISTRY, _eqm, _genot, _otfm
+from scaleflow.solvers import SOLVER_REGISTRY, EquilibriumMatching, GENOT, OTFlowMatching
 from scaleflow.training._trainer import CellFlowTrainer
-from scaleflow.utils import match_linear
+from cellflow.utils import match_linear
 
 __all__ = ["ScaleFlow"]
 
@@ -47,7 +47,7 @@ class ScaleFlow:
         self._dataloader: SamplerABC | None = None
         self._trainer: CellFlowTrainer | None = None
         self._validation_data: dict[str, GroupedDistribution] = {"predict_kwargs": {}}
-        self._solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching | None = None
+        self._solver: OTFlowMatching | GENOT | EquilibriumMatching | None = None
         self._condition_dim: int | None = None
         self._vf: (
             _velocity_field.ConditionalVelocityField
@@ -212,8 +212,8 @@ class ScaleFlow:
             If :obj:`None`, use all conditions.
         predict_kwargs
             Keyword arguments for the prediction function
-            :func:`scaleflow.solvers._otfm.OTFlowMatching.predict` or
-            :func:`scaleflow.solvers._genot.GENOT.predict` used during validation.
+            :func:`scaleflow.solvers.OTFlowMatching.predict` or
+            :func:`scaleflow.solvers.GENOT.predict` used during validation.
 
         Returns
         -------
@@ -282,7 +282,7 @@ class ScaleFlow:
         """Prepare the model for training.
 
         This function sets up the neural network architecture and specificities of the
-        :attr:`solver`. When :attr:`solver` is an instance of :class:`scaleflow.solvers._genot.GENOT`,
+        :attr:`solver`. When :attr:`solver` is an instance of :class:`scaleflow.solvers.GENOT`,
         the following arguments have to be passed to ``'condition_encoder_kwargs'``:
 
 
@@ -400,7 +400,7 @@ class ScaleFlow:
         match_fn
             Matching function between unperturbed and perturbed cells. Should take as input source
             and target data and return the optimal transport matrix, see e.g.
-            :func:`scaleflow.utils.match_linear`.
+            :func:`cellflow.utils.match_linear`.
         optimizer
             Optimizer used for training.
         solver_kwargs
@@ -438,10 +438,10 @@ class ScaleFlow:
 
         condition_encoder_kwargs = condition_encoder_kwargs or {}
         if (
-            self._solver_class == _otfm.OTFlowMatching or self._solver_class == _eqm.EquilibriumMatching
+            self._solver_class == OTFlowMatching or self._solver_class == EquilibriumMatching
         ) and vf_kwargs is not None:
             raise ValueError("For `solver='otfm'` or `solver='eqm'`, `vf_kwargs` must be `None`.")
-        if self._solver_class == _genot.GENOT:
+        if self._solver_class == GENOT:
             if vf_kwargs is None:
                 vf_kwargs = {"genot_source_dims": [1024, 1024, 1024], "genot_source_dropout": 0.0}
             else:
@@ -454,7 +454,7 @@ class ScaleFlow:
         solver_kwargs = solver_kwargs or {}
         probability_path = probability_path or {"constant_noise": 0.0}
 
-        if self._solver_class == _eqm.EquilibriumMatching:
+        if self._solver_class == EquilibriumMatching:
             self.vf = self._vf_class(
                 output_dim=self._data_dim,
                 max_combination_length=max_combination_length,
@@ -533,7 +533,7 @@ class ScaleFlow:
         # Get sample conditions from first target distribution
         # Conditions are stored as nested dicts: {col_name: array}
 
-        if self._solver_class == _otfm.OTFlowMatching:
+        if self._solver_class == OTFlowMatching:
             self._solver = self._solver_class(
                 vf=self.vf,
                 match_fn=match_fn,
@@ -543,7 +543,7 @@ class ScaleFlow:
                 rng=jax.random.PRNGKey(seed),
                 **solver_kwargs,
             )
-        elif self._solver_class == _eqm.EquilibriumMatching:
+        elif self._solver_class == EquilibriumMatching:
             # EqM doesn't use probability_path, only match_fn
             self._solver = self._solver_class(
                 vf=self.vf,
@@ -553,7 +553,7 @@ class ScaleFlow:
                 rng=jax.random.PRNGKey(seed),
                 **solver_kwargs,
             )
-        elif self._solver_class == _genot.GENOT:
+        elif self._solver_class == GENOT:
             self._solver = self._solver_class(
                 vf=self.vf,
                 data_match_fn=match_fn,
@@ -883,7 +883,7 @@ class ScaleFlow:
         return self._adata
 
     @property
-    def solver(self) -> _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching | None:
+    def solver(self) -> OTFlowMatching | GENOT | EquilibriumMatching | None:
         """The solver."""
         return self._solver
 

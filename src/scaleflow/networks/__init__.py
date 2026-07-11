@@ -1,6 +1,5 @@
-from scaleflow.networks._set_encoders import (
-    ConditionEncoder,
-)
+from cellflow.networks._set_encoders import ConditionEncoder
+
 from scaleflow.networks._utils import (
     AdaLNModulation,
     AdaLNZeroBlock,

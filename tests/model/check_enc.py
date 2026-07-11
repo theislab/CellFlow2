@@ -4,7 +4,7 @@ from functools import partial
 import jax
 from jax.tree_util import tree_flatten_with_path, keystr
 from scaleflow.model import ScaleFlow
-from scaleflow.utils import match_linear
+from cellflow.utils import match_linear
 
 COND_SHAPES = {"cell_line": 300, "drug": 256, "prophet": 512, "dose": 1}
 ALL_MODS    = ["cell_line", "drug", "prophet", "dose"]

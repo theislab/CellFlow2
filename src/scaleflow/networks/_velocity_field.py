@@ -10,8 +10,8 @@ from cellflow.networks._utils import FilmBlock, MLPBlock, ResNetBlock, sinusoida
 from flax import linen as nn
 from flax.training import train_state
 
-from scaleflow._types import Layers_separate_input_t, Layers_t
-from scaleflow.networks._set_encoders import ConditionEncoder
+from cellflow._types import Layers_separate_input_t, Layers_t
+from cellflow.networks._set_encoders import ConditionEncoder
 
 __all__ = ["ConditionalVelocityField", "GENOTConditionalVelocityField", "EquilibriumVelocityField"]
 

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from scanpy.readwrite import _check_datafile_present_and_download
 
-from scaleflow._types import PathLike
+from cellflow._types import PathLike
 
 __all__ = [
     "ineurons",

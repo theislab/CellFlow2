@@ -9,7 +9,7 @@ from numpy.typing import ArrayLike
 from tqdm import tqdm
 
 from scaleflow.data import SamplerABC
-from scaleflow.solvers import _eqm, _genot, _otfm
+from scaleflow.solvers import EquilibriumMatching, GENOT, OTFlowMatching
 from scaleflow.training._callbacks import CallbackRunner
 
 
@@ -21,14 +21,14 @@ class CellFlowTrainer:
         dataloader
             Data sampler.
         solver
-            :class:`~scaleflow.solvers._otfm.OTFlowMatching`,
-            :class:`~scaleflow.solvers._genot.GENOT`, or
-            :class:`~scaleflow.solvers._eqm.EquilibriumMatching` solver with a conditional velocity field.
+            :class:`~scaleflow.solvers.OTFlowMatching`,
+            :class:`~scaleflow.solvers.GENOT`, or
+            :class:`~scaleflow.solvers.EquilibriumMatching` solver with a conditional velocity field.
         predict_kwargs
             Keyword arguments for the prediction functions
-            :func:`scaleflow.solvers._otfm.OTFlowMatching.predict`,
-            :func:`scaleflow.solvers._genot.GENOT.predict`, or
-            :func:`scaleflow.solvers._eqm.EquilibriumMatching.predict` used during validation.
+            :func:`scaleflow.solvers.OTFlowMatching.predict`,
+            :func:`scaleflow.solvers.GENOT.predict`, or
+            :func:`scaleflow.solvers.EquilibriumMatching.predict` used during validation.
         seed
             Random seed for subsampling validation data.
 
@@ -39,11 +39,11 @@ class CellFlowTrainer:
 
     def __init__(
         self,
-        solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching,
+        solver: OTFlowMatching | GENOT | EquilibriumMatching,
         predict_kwargs: dict[str, Any] | None = None,
         seed: int = 0,
     ):
-        if not isinstance(solver, (_otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching)):
+        if not isinstance(solver, (OTFlowMatching | GENOT | EquilibriumMatching)):
             raise NotImplementedError(
                 f"Solver must be an instance of OTFlowMatching, GENOT, or EquilibriumMatching, got {type(solver)}"
             )
@@ -171,7 +171,7 @@ class CellFlowTrainer:
         monitor_metrics: Sequence[str] = [],
         callbacks: Sequence[BaseCallback] = [],
         log_every: int = 1000,
-    ) -> _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching:
+    ) -> OTFlowMatching | GENOT | EquilibriumMatching:
         """Trains the model.
 
         Parameters

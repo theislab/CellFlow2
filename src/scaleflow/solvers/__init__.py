@@ -4,8 +4,8 @@ from scaleflow.networks._velocity_field import (
     GENOTConditionalVelocityField,
 )
 from scaleflow.solvers._eqm import EquilibriumMatching
-from scaleflow.solvers._genot import GENOT
-from scaleflow.solvers._otfm import ClassifierFreeGuidance, Guidance, OTFlowMatching
+from cellflow.solvers._genot import GENOT
+from cellflow.solvers._otfm import ClassifierFreeGuidance, Guidance, OTFlowMatching
 from scaleflow.solvers._registry import SOLVER_REGISTRY, register_solver
 
 # Built-in solvers, resolved by name in `CellFlow(solver=...)`. OTFM/GENOT are cellflow's
