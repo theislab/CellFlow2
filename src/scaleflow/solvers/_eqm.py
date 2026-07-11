@@ -307,7 +307,6 @@ class EquilibriumMatching:
         max_steps: int = 250,
         use_nesterov: bool = True,
         mu: float = 0.35,
-        show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
         """Predict the translated source ``x`` under condition ``condition``.
@@ -334,8 +333,6 @@ class EquilibriumMatching:
             Whether to use Nesterov accelerated gradient (recommended).
         mu
             Momentum parameter for Nesterov (default: 0.35 as in paper).
-        show_progress
-            Whether to show a progress bar when predicting over multiple conditions.
         kwargs
             Additional keyword arguments (for compatibility).
 
@@ -367,20 +364,11 @@ class EquilibriumMatching:
         )
 
         if isinstance(x, dict):
-            if show_progress:
-                from tqdm import tqdm
-
-                results = {}
-                keys = sorted(x.keys())
-                for key in tqdm(keys, desc="Predicting conditions", leave=False):
-                    results[key] = predict_fn(x[key], condition[key])
-                return results
-            else:
-                return jax.tree.map(
-                    predict_fn,
-                    x,
-                    condition,
-                )
+            return jax.tree.map(
+                predict_fn,
+                x,
+                condition,
+            )
         else:
             x_pred = predict_fn(x, condition)
             return np.array(x_pred)
