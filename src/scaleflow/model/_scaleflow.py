@@ -22,7 +22,7 @@ from scaleflow._types import ArrayLike, Layers_separate_input_t, Layers_t
 from scaleflow.data import DataManager, GroupedDistribution, SamplerABC
 from scaleflow.networks import _velocity_field
 from scaleflow.plotting import _utils
-from scaleflow.solvers import _eqm, _genot, _otfm
+from scaleflow.solvers import SOLVER_REGISTRY, _eqm, _genot, _otfm
 from scaleflow.training._trainer import CellFlowTrainer
 from scaleflow.utils import match_linear
 
@@ -41,17 +41,9 @@ class ScaleFlow:
     """
 
     def __init__(self, solver: Literal["otfm", "genot", "eqm"] = "otfm"):
-        if solver == "otfm":
-            self._solver_class = _otfm.OTFlowMatching
-            self._vf_class = _velocity_field.ConditionalVelocityField
-        elif solver == "genot":
-            self._solver_class = _genot.GENOT
-            self._vf_class = _velocity_field.GENOTConditionalVelocityField
-        elif solver == "eqm":
-            self._solver_class = _eqm.EquilibriumMatching
-            self._vf_class = _velocity_field.EquilibriumVelocityField
-        else:
-            raise ValueError(f"Unknown solver: {solver}. Must be 'otfm', 'genot', or 'eqm'.")
+        if solver not in SOLVER_REGISTRY:
+            raise ValueError(f"Unknown solver {solver!r}. Registered solvers: {sorted(SOLVER_REGISTRY)}.")
+        self._solver_class, self._vf_class = SOLVER_REGISTRY[solver]
         self._dataloader: SamplerABC | None = None
         self._trainer: CellFlowTrainer | None = None
         self._validation_data: dict[str, GroupedDistribution] = {"predict_kwargs": {}}
