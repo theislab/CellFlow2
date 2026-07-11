@@ -7,6 +7,7 @@ import diffrax
 import jax
 import jax.numpy as jnp
 import numpy as np
+from cellflow.solvers._otfm import ClassifierFreeGuidance, Guidance
 from cellflow.solvers.utils import ema_update
 from flax.core import frozen_dict
 from flax.training import train_state
@@ -17,7 +18,7 @@ from scaleflow._compat import BaseFlow
 from scaleflow._types import ArrayLike
 from scaleflow.networks._velocity_field import ConditionalVelocityField
 
-__all__ = ["OTFlowMatching"]
+__all__ = ["OTFlowMatching", "ClassifierFreeGuidance", "Guidance"]
 
 
 class OTFlowMatching:
@@ -198,11 +199,32 @@ class OTFlowMatching:
         CFG runs the original conditional-only path (no ``v_null`` computation)."""
         return float(getattr(self.vf, "condition_dropout_prob", 0.0)) > 0.0
 
+    def _base_velocity(self) -> Callable:  # type: ignore[type-arg]
+        """Return the base (conditional) velocity closure used on the predict path.
+
+        The closure has the diffrax ``(t, x, args) -> velocity`` signature, with
+        ``args`` being ``(params, condition, encoder_noise)``, and evaluates the
+        inference velocity field conditionally (``force_uncond=False``).
+        """
+
+        def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
+            params, condition, encoder_noise = args
+            return self.vf_state_inference.apply_fn({"params": params}, t, x, condition, encoder_noise, train=False)[0]
+
+        return vf
+
     def _get_predict_fn(self, kwargs_frozen: frozen_dict.FrozenDict) -> Callable:  # type: ignore[type-arg]
         """Build (and cache) the jitted predict fn for a given set of diffeqsolve kwargs.
 
         ``params`` are threaded through as an argument rather than closed over, so the
         compiled function can be reused as the inference parameters change.
+
+        Classifier-free guidance is applied via :class:`cellflow.solvers.ClassifierFreeGuidance`
+        (``guidance_scale`` is scaleflow's per-call scale, equal to that strategy's ``scale``).
+        It runs only when the model was trained with CFG (:attr:`cfg_enabled`) and a non-trivial
+        ``guidance_scale`` is requested; otherwise the plain conditional velocity is used and no
+        ``v_null`` is computed. ``guidance_scale`` is part of the (frozen) cache key, so distinct
+        scales — e.g. a validation w-sweep — get distinct compiled fns.
         """
         if kwargs_frozen in self._predict_fn_cache:
             return self._predict_fn_cache[kwargs_frozen]
@@ -210,9 +232,6 @@ class OTFlowMatching:
         kwargs = dict(kwargs_frozen)
         # classifier-free guidance scale (not a diffrax arg → pop it). w=1 → plain conditional.
         guidance_scale = float(kwargs.pop("guidance_scale", 1.0))
-        # Guidance (v_null path) only runs when CFG is enabled AND a non-trivial w is requested.
-        # When CFG is disabled we keep the ORIGINAL conditional-only code — v_null is never
-        # computed — regardless of any guidance_scale passed in.
         apply_guidance = self.cfg_enabled and guidance_scale != 1.0
         if guidance_scale != 1.0 and not self.cfg_enabled:
             print(f"[predict] guidance_scale (w) = {guidance_scale} IGNORED — model was not trained "
@@ -221,24 +240,10 @@ class OTFlowMatching:
             # fires once per unique predict-config (this fn is cached), not per predict call
             print(f"[predict] classifier-free guidance ON — guidance_scale (w) = {guidance_scale}", flush=True)
 
-        if not apply_guidance:
-            # original path: conditional velocity only, no v_null.
-            def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
-                params, condition, encoder_noise = args
-                return self.vf_state_inference.apply_fn(
-                    {"params": params}, t, x, condition, encoder_noise, train=False
-                )[0]
-        else:
-            def vf(t: jnp.ndarray, x: jnp.ndarray, args: tuple[Any, dict[str, jnp.ndarray], jnp.ndarray]) -> jnp.ndarray:
-                params, condition, encoder_noise = args
-                v_cond = self.vf_state_inference.apply_fn(
-                    {"params": params}, t, x, condition, encoder_noise, train=False
-                )[0]
-                # v = v_null + w·(v_cond − v_null): amplify the condition-specific velocity.
-                v_null = self.vf_state_inference.apply_fn(
-                    {"params": params}, t, x, condition, encoder_noise, train=False, force_uncond=True
-                )[0]
-                return v_null + guidance_scale * (v_cond - v_null)
+        vf = self._base_velocity()
+        if apply_guidance:
+            # v = v_null + scale·(v_cond − v_null); scaleflow's guidance_scale is this scale.
+            vf = ClassifierFreeGuidance(scale=guidance_scale).wrap(vf, self.vf_state_inference)
 
         def solve_ode(
             params: Any, x: jnp.ndarray, condition: dict[str, jnp.ndarray], encoder_noise: jnp.ndarray
