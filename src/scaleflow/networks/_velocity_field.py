@@ -12,6 +12,7 @@ from flax.training import train_state
 
 from cellflow._types import Layers_separate_input_t, Layers_t
 from cellflow.networks._set_encoders import ConditionEncoder
+from cellflow.networks._velocity_field import null_condition_embedding, null_condition_input
 
 __all__ = ["ConditionalVelocityField", "GENOTConditionalVelocityField", "EquilibriumVelocityField"]
 
@@ -126,8 +127,11 @@ class ConditionalVelocityField(nn.Module):
     decoder_dropout: float = 0.0
     layer_norm_before_concatenation: bool = False
     linear_projection_before_concatenation: bool = False
-    condition_dropout_prob: float = 0.0   # classifier-free guidance: prob of dropping the whole
-                                          # condition to a null (zeros) embedding during training
+    condition_dropout_prob: float = 0.0   # classifier-free guidance: prob of dropping the condition
+                                          # to a null embedding during training
+    condition_null: Literal["zero_embedding", "mask_value"] = "zero_embedding"  # how force_uncond/
+                                          # dropout builds the null: zero the embedding, or mask the
+                                          # raw condition and run the encoder on the empty set
 
     @staticmethod
     def _normalize_vf_kwargs(vf_kwargs: dict[str, Any] | None) -> dict[str, Any]:
@@ -248,6 +252,17 @@ class ConditionalVelocityField(nn.Module):
         force_uncond: bool = False,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         squeeze = x_t.ndim == 1
+        # CFG `mask_value` mode: null by masking the raw condition and routing the empty set
+        # through the encoder (in-distribution, mirroring how padded conditions are handled).
+        if self.condition_null == "mask_value":
+            cond = null_condition_input(
+                cond,
+                condition_dropout_prob=self.condition_dropout_prob,
+                mask_value=self.mask_value,
+                make_rng=self.make_rng,
+                train=train,
+                force_uncond=force_uncond,
+            )
         cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
         if self.condition_mode == "deterministic":
             cond_embedding = cond_mean
@@ -255,6 +270,17 @@ class ConditionalVelocityField(nn.Module):
             cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
 
         cond_embedding = self.layer_cond_output_dropout(cond_embedding, deterministic=not train)
+        # CFG `zero_embedding` mode: null by zeroing the pooled embedding, BEFORE the LayerNorm
+        # below so training and inference share the same null representation, and dropping
+        # independently per condition (not per whole batch).
+        if self.condition_null == "zero_embedding":
+            cond_embedding = null_condition_embedding(
+                cond_embedding,
+                condition_dropout_prob=self.condition_dropout_prob,
+                make_rng=self.make_rng,
+                train=train,
+                force_uncond=force_uncond,
+            )
 
         t_encoded = sinusoidal_time_encoder(t, time_freqs=self.time_freqs, time_max_period=self.time_max_period)
         t_encoded = self.time_encoder(t_encoded, training=train)
@@ -272,16 +298,6 @@ class ConditionalVelocityField(nn.Module):
         t_encoded = self.layer_norm_time(t_encoded)
         x_encoded = self.layer_norm_x(x_encoded)
         cond_embedding = self.layer_norm_condition(cond_embedding)
-
-        # Classifier-free guidance: null the condition (zeros AFTER layer-norm, to avoid
-        # normalizing an all-zeros vector). `force_uncond=True` → unconditional velocity at
-        # inference; during training each batch is nulled with prob `condition_dropout_prob`
-        # so the model also learns the unconditional field.
-        if force_uncond:
-            cond_embedding = jnp.zeros_like(cond_embedding)
-        elif train and self.condition_dropout_prob > 0.0:
-            drop = jax.random.bernoulli(self.make_rng("dropout"), p=self.condition_dropout_prob)
-            cond_embedding = jnp.where(drop, jnp.zeros_like(cond_embedding), cond_embedding)
 
         if squeeze:
             cond_embedding = jnp.squeeze(cond_embedding)  # , 0)

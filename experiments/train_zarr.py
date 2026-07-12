@@ -187,6 +187,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         layers_after_pool=layers_after_pool,
         cond_output_dropout=float(ce.cond_output_dropout),
         condition_dropout_prob=float(m.get("condition_dropout_prob", 0.0)),  # CFG: null-drop prob
+        condition_null=str(m.get("condition_null", "zero_embedding")),  # CFG: zero_embedding | mask_value
         hidden_dims=hidden_dims,
         decoder_dims=decoder_dims,
         condition_embedding_dim=int(m.condition_embedding_dim),

@@ -254,7 +254,8 @@ class ScaleFlow:
         layers_after_pool: Layers_t = dc_field(default_factory=lambda: []),
         condition_embedding_dim: int = 256,
         cond_output_dropout: float = 0.9,
-        condition_dropout_prob: float = 0.0,   # classifier-free guidance: prob of nulling the whole condition
+        condition_dropout_prob: float = 0.0,   # classifier-free guidance: prob of nulling the condition
+        condition_null: Literal["zero_embedding", "mask_value"] = "zero_embedding",  # how CFG builds the null
         condition_encoder_kwargs: dict[str, Any] | None = None,
         pool_sample_covariates: bool = True,
         time_freqs: int = 1024,
@@ -476,13 +477,15 @@ class ScaleFlow:
             layer_norm_before_concatenation=layer_norm_before_concatenation,
             linear_projection_before_concatenation=linear_projection_before_concatenation,
         )
-        # EqM's velocity field has no time encoder; only the time-conditioned VFs take these.
+        # EqM's velocity field is reduced: it has no time encoder and no classifier-free-guidance
+        # nulling, so those args go only to the time-conditioned (OTFM/GENOT) velocity fields.
         if self._solver_class is not EquilibriumMatching:
             vf_args.update(
                 time_freqs=time_freqs,
                 time_max_period=time_max_period,
                 time_encoder_dims=time_encoder_dims,
                 time_encoder_dropout=time_encoder_dropout,
+                condition_null=condition_null,
             )
         self.vf = self._vf_class(**vf_args, **vf_kwargs)
 
