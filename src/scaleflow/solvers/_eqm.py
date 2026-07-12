@@ -8,6 +8,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+from cellflow.solvers._base import BaseSolver
 from cellflow.solvers.utils import ema_update
 from flax.core import frozen_dict
 from flax.training import train_state
@@ -20,7 +21,7 @@ from scaleflow.networks._velocity_field import ConditionalVelocityField
 __all__ = ["EquilibriumMatching"]
 
 
-class EquilibriumMatching:
+class EquilibriumMatching(BaseSolver):
     """Equilibrium Matching for generative modeling.
 
     Based on "Equilibrium Matching" (Wang & Du, 2024).
@@ -53,10 +54,10 @@ class EquilibriumMatching:
         c_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         **kwargs: Any,
     ):
-        self._is_trained: bool = False
-        self.vf = vf
-        self.condition_encoder_mode = self.vf.condition_mode
-        self.condition_encoder_regularization = self.vf.regularization
+        # EqM has no probability path or time sampler (it interpolates via gamma), so pass
+        # ``None`` for the base's generic slots; the rest of the shared scaffolding
+        # (is_trained flag, vf, condition-encoder settings, predict-fn cache) comes from BaseSolver.
+        super().__init__(vf, probability_path=None, time_sampler=None)
         self.gamma_sampler = gamma_sampler
         self.c_fn = c_fn if c_fn is not None else lambda gamma: 1.0 - gamma
         self.match_fn = jax.jit(match_fn) if match_fn is not None else None
@@ -65,9 +66,11 @@ class EquilibriumMatching:
         self.vf_state = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_state_inference = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_step_fn = self._get_vf_step_fn()
-        # Cache of jitted predict fns keyed on the frozen sampler config; params are
-        # threaded as an argument so the compiled fn is reused across calls.
-        self._predict_fn_cache: dict[frozen_dict.FrozenDict, Any] = {}
+
+    @property
+    def _inference_state(self) -> train_state.TrainState:
+        """EqM reads condition embeddings from the EMA inference state."""
+        return self.vf_state_inference
 
     def _get_vf_step_fn(self) -> Callable:
         @jax.jit
@@ -178,29 +181,6 @@ class EquilibriumMatching:
                 params=ema_update(self.vf_state_inference.params, self.vf_state.params, self.ema)
             )
         return loss
-
-    def get_condition_embedding(self, condition: dict[str, ArrayLike], return_as_numpy=True) -> ArrayLike:
-        """Get learnt embeddings of the conditions.
-
-        Parameters
-        ----------
-        condition
-            Conditions to encode
-        return_as_numpy
-            Whether to return the embeddings as numpy arrays.
-
-        Returns
-        -------
-        Mean and log-variance of encoded conditions.
-        """
-        cond_mean, cond_logvar = self.vf.apply(
-            {"params": self.vf_state_inference.params},
-            condition,
-            method="get_condition_embedding",
-        )
-        if return_as_numpy:
-            return np.asarray(cond_mean), np.asarray(cond_logvar)
-        return cond_mean, cond_logvar
 
     def _predict_jit(
         self,
@@ -372,12 +352,3 @@ class EquilibriumMatching:
         else:
             x_pred = predict_fn(x, condition)
             return np.array(x_pred)
-
-    @property
-    def is_trained(self) -> bool:
-        """Whether the model is trained."""
-        return self._is_trained
-
-    @is_trained.setter
-    def is_trained(self, value: bool) -> None:
-        self._is_trained = value
