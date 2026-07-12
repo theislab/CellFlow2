@@ -167,14 +167,16 @@ class ConditionalVelocityField(_CFConditionalVelocityField):
         cond_embedding: jnp.ndarray,
         squeeze: bool,
         train: bool,
+        x_0_encoded: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Combine/decode, adding ``'adaln_zero'`` and the ``'after_condition'`` cell transformer."""
+        concat_inputs, conditioning_vec = self._conditioning_signals(t_encoded, x_encoded, cond_embedding, x_0_encoded)
         if self.conditioning == "concatenation":
-            out = jnp.concatenate((t_encoded, x_encoded, cond_embedding), axis=-1)
+            out = jnp.concatenate(concat_inputs, axis=-1)
         elif self.conditioning == "film":
-            out = self.film_block(x_encoded, jnp.concatenate((t_encoded, cond_embedding), axis=-1))
+            out = self.film_block(x_encoded, conditioning_vec)
         elif self.conditioning == "resnet":
-            out = self.resnet_block(x_encoded, jnp.concatenate((t_encoded, cond_embedding), axis=-1))
+            out = self.resnet_block(x_encoded, conditioning_vec)
         elif self.conditioning == "adaln_zero":
             out = x_encoded
         else:
@@ -192,12 +194,12 @@ class ConditionalVelocityField(_CFConditionalVelocityField):
         if self.conditioning == "adaln_zero":
             from scaleflow.networks._utils import apply_adaln
 
-            # Modulate each cell by its OWN (t, condition) — see build_adaln_blocks.
+            # Modulate each cell by its OWN conditioning vector — see build_adaln_blocks.
             return apply_adaln(
                 adaln_blocks=self.adaln_blocks,
                 output_layer=self.output_layer,
                 out=out,
-                conditioning_vec=jnp.concatenate((t_encoded, cond_embedding), axis=-1),
+                conditioning_vec=conditioning_vec,
                 squeeze=squeeze,
                 train=train,
             )
@@ -207,18 +209,60 @@ class ConditionalVelocityField(_CFConditionalVelocityField):
 
 
 class GENOTConditionalVelocityField(_CFGENOTConditionalVelocityField):
-    """GENOT velocity field, re-using :class:`cellflow.networks.GENOTConditionalVelocityField`.
+    """GENOT velocity field, extending :class:`cellflow.networks.GENOTConditionalVelocityField`.
 
-    Adds only the ``cell_transformer_*`` fields so the shared model constructor (which
-    passes them to every velocity field) can build it uniformly; GENOT itself does not
-    use a cell transformer, so these are accepted and ignored.
+    Adds the ``'adaln_zero'`` conditioning mode (per-cell AdaLN-Zero modulation by the
+    ``(t, x_0, condition)`` vector — the same signals GENOT's film/resnet already use,
+    with the source folded in), reusing the shared adaln helpers. Also carries the
+    ``cell_transformer_*`` fields so the uniform model constructor can build it (GENOT
+    does not use a cell transformer, so they are accepted and ignored).
     """
 
+    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
     cell_transformer_layers: int = 0
     cell_transformer_heads: int = 8
     cell_transformer_dim: int = 128
     cell_transformer_dropout: float = 0.1
     cell_transformer_mode: Literal["before_condition", "after_condition"] = "before_condition"
+
+    def _setup_conditioning(self, conditioning_kwargs: dict[str, Any]) -> None:
+        """Add the ``'adaln_zero'`` mode (modulated by ``(t, x_0, condition)``); delegate the rest."""
+        if self.conditioning == "adaln_zero":
+            from scaleflow.networks._utils import build_adaln_blocks
+
+            self.adaln_blocks = build_adaln_blocks(
+                decoder_dims=self.decoder_dims,
+                cond_dim=self.time_encoder_dims[-1] + self.genot_source_dims[-1] + self.condition_embedding_dim,
+                decoder_dropout=self.decoder_dropout,
+                act_fn=self.act_fn,
+                conditioning_kwargs=conditioning_kwargs,
+            )
+        else:
+            super()._setup_conditioning(conditioning_kwargs)
+
+    def _combine_and_decode(
+        self,
+        t_encoded: jnp.ndarray,
+        x_encoded: jnp.ndarray,
+        cond_embedding: jnp.ndarray,
+        squeeze: bool,
+        train: bool,
+        x_0_encoded: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        """Route ``'adaln_zero'`` through the shared adaln helper; delegate the rest."""
+        if self.conditioning == "adaln_zero":
+            from scaleflow.networks._utils import apply_adaln
+
+            _, conditioning_vec = self._conditioning_signals(t_encoded, x_encoded, cond_embedding, x_0_encoded)
+            return apply_adaln(
+                adaln_blocks=self.adaln_blocks,
+                output_layer=self.output_layer,
+                out=x_encoded,
+                conditioning_vec=conditioning_vec,
+                squeeze=squeeze,
+                train=train,
+            )
+        return super()._combine_and_decode(t_encoded, x_encoded, cond_embedding, squeeze, train, x_0_encoded)
 
 
 class EquilibriumVelocityField(nn.Module):
