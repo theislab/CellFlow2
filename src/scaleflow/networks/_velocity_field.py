@@ -129,6 +129,13 @@ class ConditionalVelocityField(nn.Module):
     condition_dropout_prob: float = 0.0   # classifier-free guidance: prob of dropping the whole
                                           # condition to a null (zeros) embedding during training
 
+    @staticmethod
+    def _normalize_vf_kwargs(vf_kwargs: dict[str, Any] | None) -> dict[str, Any]:
+        """This velocity field takes no solver-specific ``vf_kwargs`` (must be ``None``)."""
+        if vf_kwargs is not None:
+            raise ValueError("This velocity field takes no `vf_kwargs`; pass `None`.")
+        return {}
+
     def setup(self):
         """Initialize the network."""
         if isinstance(self.conditioning_kwargs, dataclasses.Field):
@@ -526,6 +533,16 @@ class GENOTConditionalVelocityField(ConditionalVelocityField):
     layer_norm_before_concatenation: bool = False
     linear_projection_before_concatenation: bool = False
 
+    @staticmethod
+    def _normalize_vf_kwargs(vf_kwargs: dict[str, Any] | None) -> dict[str, Any]:
+        """GENOT's velocity field needs source-processing kwargs; default them when not given."""
+        if vf_kwargs is None:
+            return {"genot_source_dims": [1024, 1024, 1024], "genot_source_dropout": 0.0}
+        assert isinstance(vf_kwargs, dict)
+        assert "genot_source_dims" in vf_kwargs
+        assert "genot_source_dropout" in vf_kwargs
+        return vf_kwargs
+
     def setup(self):
         """Initialize the network."""
         if isinstance(self.conditioning_kwargs, dataclasses.Field):
@@ -718,6 +735,13 @@ class EquilibriumVelocityField(nn.Module):
     linear_projection_before_concatenation: bool = False
     condition_dropout_prob: float = 0.0   # classifier-free guidance: prob of dropping the whole
                                           # condition to a null (zeros) embedding during training
+
+    @staticmethod
+    def _normalize_vf_kwargs(vf_kwargs: dict[str, Any] | None) -> dict[str, Any]:
+        """This velocity field takes no solver-specific ``vf_kwargs`` (must be ``None``)."""
+        if vf_kwargs is not None:
+            raise ValueError("This velocity field takes no `vf_kwargs`; pass `None`.")
+        return {}
 
     def setup(self):
         """Initialize the network."""

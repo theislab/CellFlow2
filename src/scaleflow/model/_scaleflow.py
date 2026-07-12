@@ -440,88 +440,51 @@ class ScaleFlow:
                 raise ValueError("Stochastic condition embeddings require `regularization`>0.")
 
         condition_encoder_kwargs = condition_encoder_kwargs or {}
-        if (
-            self._solver_class == OTFlowMatching or self._solver_class == EquilibriumMatching
-        ) and vf_kwargs is not None:
-            raise ValueError("For `solver='sf_otfm'` or `solver='sf_eqm'`, `vf_kwargs` must be `None`.")
-        if self._solver_class == GENOT:
-            if vf_kwargs is None:
-                vf_kwargs = {"genot_source_dims": [1024, 1024, 1024], "genot_source_dropout": 0.0}
-            else:
-                assert isinstance(vf_kwargs, dict)
-                assert "genot_source_dims" in vf_kwargs
-                assert "genot_source_dropout" in vf_kwargs
-        else:
-            vf_kwargs = {}
+        # Each velocity field owns which solver-specific `vf_kwargs` it accepts (GENOT needs
+        # source-processing dims; the others take none), mirroring cellflow's normalization hook.
+        vf_kwargs = self._vf_class._normalize_vf_kwargs(vf_kwargs)
         covariates_not_pooled = [] if pool_sample_covariates else self._dm.sample_covariates
         solver_kwargs = solver_kwargs or {}
         probability_path = probability_path or {"constant_noise": 0.0}
 
-        if self._solver_class == EquilibriumMatching:
-            self.vf = self._vf_class(
-                output_dim=self._data_dim,
-                max_combination_length=max_combination_length,
-                condition_mode=condition_mode,
-                regularization=regularization,
-                condition_embedding_dim=condition_embedding_dim,
-                covariates_not_pooled=covariates_not_pooled,
-                pooling=pooling,
-                pooling_kwargs=pooling_kwargs,
-                layers_before_pool=layers_before_pool,
-                layers_after_pool=layers_after_pool,
-                cond_output_dropout=cond_output_dropout,
-                condition_dropout_prob=condition_dropout_prob,
-                condition_encoder_kwargs=condition_encoder_kwargs,
-                act_fn=vf_act_fn,
-                hidden_dims=hidden_dims,
-                hidden_dropout=hidden_dropout,
-                cell_transformer_layers=cell_transformer_layers,
-                cell_transformer_heads=cell_transformer_heads,
-                cell_transformer_dim=cell_transformer_dim,
-                cell_transformer_dropout=cell_transformer_dropout,
-                cell_transformer_mode=cell_transformer_mode,
-                conditioning=conditioning,
-                conditioning_kwargs=conditioning_kwargs,
-                decoder_dims=decoder_dims,
-                decoder_dropout=decoder_dropout,
-                layer_norm_before_concatenation=layer_norm_before_concatenation,
-                linear_projection_before_concatenation=linear_projection_before_concatenation,
-            )
-        else:
-            self.vf = self._vf_class(
-                output_dim=self._data_dim,
-                max_combination_length=max_combination_length,
-                condition_mode=condition_mode,
-                regularization=regularization,
-                condition_embedding_dim=condition_embedding_dim,
-                covariates_not_pooled=covariates_not_pooled,
-                pooling=pooling,
-                pooling_kwargs=pooling_kwargs,
-                layers_before_pool=layers_before_pool,
-                layers_after_pool=layers_after_pool,
-                cond_output_dropout=cond_output_dropout,
-                condition_dropout_prob=condition_dropout_prob,
-                condition_encoder_kwargs=condition_encoder_kwargs,
-                act_fn=vf_act_fn,
+        vf_args = dict(
+            output_dim=self._data_dim,
+            max_combination_length=max_combination_length,
+            condition_mode=condition_mode,
+            regularization=regularization,
+            condition_embedding_dim=condition_embedding_dim,
+            covariates_not_pooled=covariates_not_pooled,
+            pooling=pooling,
+            pooling_kwargs=pooling_kwargs,
+            layers_before_pool=layers_before_pool,
+            layers_after_pool=layers_after_pool,
+            cond_output_dropout=cond_output_dropout,
+            condition_dropout_prob=condition_dropout_prob,
+            condition_encoder_kwargs=condition_encoder_kwargs,
+            act_fn=vf_act_fn,
+            hidden_dims=hidden_dims,
+            hidden_dropout=hidden_dropout,
+            cell_transformer_layers=cell_transformer_layers,
+            cell_transformer_heads=cell_transformer_heads,
+            cell_transformer_dim=cell_transformer_dim,
+            cell_transformer_dropout=cell_transformer_dropout,
+            cell_transformer_mode=cell_transformer_mode,
+            conditioning=conditioning,
+            conditioning_kwargs=conditioning_kwargs,
+            decoder_dims=decoder_dims,
+            decoder_dropout=decoder_dropout,
+            layer_norm_before_concatenation=layer_norm_before_concatenation,
+            linear_projection_before_concatenation=linear_projection_before_concatenation,
+        )
+        # EqM's velocity field has no time encoder; only the time-conditioned VFs take these.
+        if self._solver_class is not EquilibriumMatching:
+            vf_args.update(
                 time_freqs=time_freqs,
                 time_max_period=time_max_period,
                 time_encoder_dims=time_encoder_dims,
                 time_encoder_dropout=time_encoder_dropout,
-                hidden_dims=hidden_dims,
-                hidden_dropout=hidden_dropout,
-                cell_transformer_layers=cell_transformer_layers,
-                cell_transformer_heads=cell_transformer_heads,
-                cell_transformer_dim=cell_transformer_dim,
-                cell_transformer_dropout=cell_transformer_dropout,
-                cell_transformer_mode=cell_transformer_mode,
-                conditioning=conditioning,
-                conditioning_kwargs=conditioning_kwargs,
-                decoder_dims=decoder_dims,
-                decoder_dropout=decoder_dropout,
-                layer_norm_before_concatenation=layer_norm_before_concatenation,
-                linear_projection_before_concatenation=linear_projection_before_concatenation,
-                **vf_kwargs,
             )
+        self.vf = self._vf_class(**vf_args, **vf_kwargs)
 
         probability_path, noise = next(iter(probability_path.items()))
         if probability_path == "constant_noise":
@@ -536,42 +499,19 @@ class ScaleFlow:
         # Get sample conditions from first target distribution
         # Conditions are stored as nested dicts: {col_name: array}
 
-        if self._solver_class == OTFlowMatching:
-            self._solver = self._solver_class(
-                vf=self.vf,
-                match_fn=match_fn,
-                probability_path=probability_path,
-                optimizer=optimizer,
-                conditions=sample_conditions,
-                rng=jax.random.PRNGKey(seed),
-                **solver_kwargs,
-            )
-        elif self._solver_class == EquilibriumMatching:
-            # EqM doesn't use probability_path, only match_fn
-            self._solver = self._solver_class(
-                vf=self.vf,
-                match_fn=match_fn,
-                optimizer=optimizer,
-                conditions=sample_conditions,
-                rng=jax.random.PRNGKey(seed),
-                **solver_kwargs,
-            )
-        elif self._solver_class == GENOT:
-            self._solver = self._solver_class(
-                vf=self.vf,
-                data_match_fn=match_fn,
-                probability_path=probability_path,
-                source_dim=self._data_dim,
-                target_dim=self._data_dim,
-                optimizer=optimizer,
-                conditions=sample_conditions,
-                rng=jax.random.PRNGKey(seed),
-                **solver_kwargs,
-            )
-        else:
-            raise NotImplementedError(
-                f"Solver must be an instance of OTFlowMatching, EquilibriumMatching, or GENOT, got {type(self.solver)}"
-            )
+        # Each solver owns how it names its match function / needs data dims, mirroring cellflow.
+        solver_args = dict(
+            vf=self.vf,
+            optimizer=optimizer,
+            conditions=sample_conditions,
+            rng=jax.random.PRNGKey(seed),
+            **self._solver_class._match_kwargs(match_fn=match_fn, data_dim=self._data_dim),
+            **solver_kwargs,
+        )
+        # EqM interpolates via gamma and has no probability path.
+        if self._solver_class is not EquilibriumMatching:
+            solver_args["probability_path"] = probability_path
+        self._solver = self._solver_class(**solver_args)
 
         self._trainer = CellFlowTrainer(solver=self.solver, predict_kwargs=self.validation_data["predict_kwargs"])  # type: ignore[arg-type]
 
