@@ -120,27 +120,18 @@ class ConditionalVelocityField(_CFConditionalVelocityField):
     def _setup_conditioning(self, conditioning_kwargs: dict[str, Any]) -> None:
         """Add the ``'adaln_zero'`` mode and an optional cell transformer; delegate the rest."""
         if self.conditioning == "adaln_zero":
-            from scaleflow.networks._utils import AdaLNZeroBlock
-
-            cond_dim = self.time_encoder_dims[-1] + self.condition_embedding_dim
-            mlp_ratio = conditioning_kwargs.get("mlp_ratio", 4.0)
+            from scaleflow.networks._utils import build_adaln_blocks
 
             # Per-cell AdaLN-Zero: modulate each cell by its OWN (t, condition). No cross-cell
             # attention — the velocity field must be a per-cell function, and cells within a
             # batch have different flow-times t, so they must not attend to each other.
-            self.adaln_blocks = [
-                AdaLNZeroBlock(
-                    hidden_dim=dim,
-                    cond_dim=cond_dim,
-                    num_heads=conditioning_kwargs.get("num_heads", 8),
-                    qkv_dim=conditioning_kwargs.get("qkv_dim", None),
-                    mlp_ratio=mlp_ratio,  # Standard 4x expansion in MLP
-                    dropout_rate=self.decoder_dropout,
-                    use_attention=False,
-                    act_fn=self.act_fn,
-                )
-                for dim in self.decoder_dims
-            ]
+            self.adaln_blocks = build_adaln_blocks(
+                decoder_dims=self.decoder_dims,
+                cond_dim=self.time_encoder_dims[-1] + self.condition_embedding_dim,
+                decoder_dropout=self.decoder_dropout,
+                act_fn=self.act_fn,
+                conditioning_kwargs=conditioning_kwargs,
+            )
         else:
             super()._setup_conditioning(conditioning_kwargs)
 
@@ -199,23 +190,20 @@ class ConditionalVelocityField(_CFConditionalVelocityField):
                 out = self.cell_transformer(out_expanded, mask=None, training=train)
 
         if self.conditioning == "adaln_zero":
-            # Cells are the BATCH dim and each is modulated by its OWN (t, condition):
-            # out (n_cells, hidden) with per-cell conditioning (n_cells, cond_dim). No cell-0
-            # collapse, no cross-cell attention — a proper per-cell velocity field.
-            conditioning_vec = jnp.concatenate((t_encoded, cond_embedding), axis=-1)
-            if squeeze:
-                out = jnp.expand_dims(out, 0)                    # (1, hidden)
-                conditioning_vec = jnp.expand_dims(conditioning_vec, 0)  # (1, cond_dim)
-            for block in self.adaln_blocks:
-                out = block(out, conditioning_vec, mask=None, training=train)
-            if squeeze:
-                out = jnp.squeeze(out, 0)
-            out = self.output_layer(out)
-        else:
-            out = self.decoder(out, training=train)
-            out = self.output_layer(out)
+            from scaleflow.networks._utils import apply_adaln
 
-        return out
+            # Modulate each cell by its OWN (t, condition) — see build_adaln_blocks.
+            return apply_adaln(
+                adaln_blocks=self.adaln_blocks,
+                output_layer=self.output_layer,
+                out=out,
+                conditioning_vec=jnp.concatenate((t_encoded, cond_embedding), axis=-1),
+                squeeze=squeeze,
+                train=train,
+            )
+
+        out = self.decoder(out, training=train)
+        return self.output_layer(out)
 
 
 class GENOTConditionalVelocityField(_CFGENOTConditionalVelocityField):
@@ -339,31 +327,16 @@ class EquilibriumVelocityField(nn.Module):
                 **conditioning_kwargs,
             )
         elif self.conditioning == "adaln_zero":
-            from scaleflow.networks._utils import AdaLNZeroBlock
+            from scaleflow.networks._utils import build_adaln_blocks
 
-            cond_dim = self.condition_embedding_dim
-
-            # Use standard Transformer MLP expansion (4x by default)
-            # mlp_dim is left as None, so it will use mlp_ratio * hidden_dim
-            # This gives: hidden_dim → (4 × hidden_dim) → hidden_dim
-            mlp_ratio = conditioning_kwargs.get("mlp_ratio", 4.0)
-
-            # Per-cell AdaLN-Zero: modulate each cell by its OWN (t, condition). No cross-cell
-            # attention — the velocity field must be a per-cell function, and cells within a
-            # batch have different flow-times t, so they must not attend to each other.
-            self.adaln_blocks = [
-                AdaLNZeroBlock(
-                    hidden_dim=dim,
-                    cond_dim=cond_dim,
-                    num_heads=conditioning_kwargs.get("num_heads", 8),
-                    qkv_dim=conditioning_kwargs.get("qkv_dim", None),
-                    mlp_ratio=mlp_ratio,  # Standard 4x expansion in MLP
-                    dropout_rate=self.decoder_dropout,
-                    use_attention=False,
-                    act_fn=self.act_fn,
-                )
-                for dim in self.decoder_dims
-            ]
+            # Per-cell AdaLN-Zero modulated by the condition only (EqM has no time encoder).
+            self.adaln_blocks = build_adaln_blocks(
+                decoder_dims=self.decoder_dims,
+                cond_dim=self.condition_embedding_dim,
+                decoder_dropout=self.decoder_dropout,
+                act_fn=self.act_fn,
+                conditioning_kwargs=conditioning_kwargs,
+            )
         elif self.conditioning == "concatenation":
             if len(conditioning_kwargs) > 0:
                 raise ValueError("If `conditioning=='concatenation' mode, no conditioning kwargs can be passed.")
@@ -425,17 +398,17 @@ class EquilibriumVelocityField(nn.Module):
                 out = self.cell_transformer(out_expanded, mask=None, training=train)
 
         if self.conditioning == "adaln_zero":
-            # Per-cell modulation: cells are the BATCH dim, each modulated by its own condition.
-            # No cell-0 collapse, no cross-cell attention.
-            conditioning_vec = cond_embedding
-            if squeeze:
-                out = jnp.expand_dims(out, 0)                    # (1, hidden)
-                conditioning_vec = jnp.expand_dims(conditioning_vec, 0)  # (1, cond_dim)
-            for block in self.adaln_blocks:
-                out = block(out, conditioning_vec, mask=None, training=train)
-            if squeeze:
-                out = jnp.squeeze(out, 0)
-            out = self.output_layer(out)
+            from scaleflow.networks._utils import apply_adaln
+
+            # Modulated by the condition only (EqM has no time encoder).
+            out = apply_adaln(
+                adaln_blocks=self.adaln_blocks,
+                output_layer=self.output_layer,
+                out=out,
+                conditioning_vec=cond_embedding,
+                squeeze=squeeze,
+                train=train,
+            )
         else:
             out = self.decoder(out, training=train)
             out = self.output_layer(out)

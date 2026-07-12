@@ -8,6 +8,8 @@ from flax.linen import initializers
 __all__ = [
     "AdaLNModulation",
     "AdaLNZeroBlock",
+    "build_adaln_blocks",
+    "apply_adaln",
 ]
 
 
@@ -194,3 +196,58 @@ class AdaLNZeroBlock(BaseModule):
         x = x + gate_mlp * h
 
         return x
+
+
+def build_adaln_blocks(
+    *,
+    decoder_dims,
+    cond_dim: int,
+    decoder_dropout: float,
+    act_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    conditioning_kwargs: dict,
+) -> list["AdaLNZeroBlock"]:
+    """Build the per-cell AdaLN-Zero block stack (one block per ``decoder_dims`` entry).
+
+    Shared by the velocity fields' ``adaln_zero`` conditioning so the block construction
+    lives in one place; each caller supplies its own ``cond_dim`` (the size of the
+    conditioning vector it will modulate by: e.g. ``(t, cond)`` for OTFM, ``cond`` for
+    EqM, ``(t, x_0, cond)`` for GENOT).
+    """
+    return [
+        AdaLNZeroBlock(
+            hidden_dim=dim,
+            cond_dim=cond_dim,
+            num_heads=conditioning_kwargs.get("num_heads", 8),
+            qkv_dim=conditioning_kwargs.get("qkv_dim", None),
+            mlp_ratio=conditioning_kwargs.get("mlp_ratio", 4.0),
+            dropout_rate=decoder_dropout,
+            use_attention=False,
+            act_fn=act_fn,
+        )
+        for dim in decoder_dims
+    ]
+
+
+def apply_adaln(
+    *,
+    adaln_blocks,
+    output_layer,
+    out: jnp.ndarray,
+    conditioning_vec: jnp.ndarray,
+    squeeze: bool,
+    train: bool,
+) -> jnp.ndarray:
+    """Run the AdaLN-Zero stack, modulating each cell (batch dim) by ``conditioning_vec``.
+
+    ``out`` is the token to modulate (the encoded ``x``); ``conditioning_vec`` is the
+    per-cell modulation signal assembled by the caller. No cross-cell attention — cells
+    carry their own condition. Applies ``output_layer`` at the end.
+    """
+    if squeeze:
+        out = jnp.expand_dims(out, 0)
+        conditioning_vec = jnp.expand_dims(conditioning_vec, 0)
+    for block in adaln_blocks:
+        out = block(out, conditioning_vec, mask=None, training=train)
+    if squeeze:
+        out = jnp.squeeze(out, 0)
+    return output_layer(out)
