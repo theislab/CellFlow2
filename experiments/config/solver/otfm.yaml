@@ -1,4 +1,4 @@
-solver_key: otfm
+solver_key: sf_otfm
 predict_kwargs:
   max_steps: 32768
   guidance_scale: 1.0    # baseline / positional CFG scale (1.0 = plain conditional). Used for the

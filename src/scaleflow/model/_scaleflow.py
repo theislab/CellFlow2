@@ -37,12 +37,15 @@ class ScaleFlow:
         adata
             An :class:`~anndata.AnnData` object to extract the training data from.
         solver
-            Solver to use for training. Either ``'otfm'``, ``'genot'`` or ``'eqm'``.
+            Solver to use for training. Either ``'sf_otfm'``, ``'sf_genot'`` or ``'sf_eqm'``.
     """
 
-    def __init__(self, solver: Literal["otfm", "genot", "eqm"] = "otfm"):
-        if solver not in SOLVER_REGISTRY:
-            raise ValueError(f"Unknown solver {solver!r}. Registered solvers: {sorted(SOLVER_REGISTRY)}.")
+    def __init__(self, solver: Literal["sf_otfm", "sf_genot", "sf_eqm"] = "sf_otfm"):
+        # scaleflow's solvers live under ``sf_*`` keys in cellflow's shared registry (so they
+        # don't clobber cellflow's own ``otfm``/``genot``); only those keys are selectable here.
+        if not solver.startswith("sf_") or solver not in SOLVER_REGISTRY:
+            available = sorted(k for k in SOLVER_REGISTRY if k.startswith("sf_"))
+            raise ValueError(f"Unknown solver {solver!r}. Available: {available}.")
         self._solver_class, self._vf_class = SOLVER_REGISTRY[solver]
         self._dataloader: SamplerABC | None = None
         self._trainer: CellFlowTrainer | None = None
@@ -440,7 +443,7 @@ class ScaleFlow:
         if (
             self._solver_class == OTFlowMatching or self._solver_class == EquilibriumMatching
         ) and vf_kwargs is not None:
-            raise ValueError("For `solver='otfm'` or `solver='eqm'`, `vf_kwargs` must be `None`.")
+            raise ValueError("For `solver='sf_otfm'` or `solver='sf_eqm'`, `vf_kwargs` must be `None`.")
         if self._solver_class == GENOT:
             if vf_kwargs is None:
                 vf_kwargs = {"genot_source_dims": [1024, 1024, 1024], "genot_source_dropout": 0.0}

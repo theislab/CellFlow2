@@ -14,7 +14,7 @@ from scaleflow.model import ScaleFlow
 
 
 class TestScaleFlowSmoke:
-    @pytest.mark.parametrize("solver", ["otfm", "genot"])
+    @pytest.mark.parametrize("solver", ["sf_otfm", "sf_genot"])
     def test_prepare_and_train(self, sample_grouped_distribution, solver):
         sampler = InMemorySampler(
             data=sample_grouped_distribution,
