@@ -3,8 +3,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution
-
 
 @pytest.fixture()
 def adata_perturbation() -> ad.AnnData:
@@ -249,21 +247,3 @@ def adata_test() -> ad.AnnData:
     )
 
     return adata
-
-
-@pytest.fixture
-def sample_grouped_distribution(adata_test: ad.AnnData) -> GroupedDistribution:
-    adl = AnnDataLocation()
-    dm = DataManager(
-        dist_flag_key="control",
-        src_dist_keys=["cell_line"],
-        tgt_dist_keys=["drug", "gene"],
-        rep_keys={
-            "cell_line": "cell_line_embeddings",
-            "drug": "drug_embeddings",
-            "gene": "gene_embeddings",
-        },
-        data_location=adl.obsm["X_pca"],
-    )
-    gd = dm.prepare_data(adata_test)
-    return gd

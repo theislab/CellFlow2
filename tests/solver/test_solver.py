@@ -25,7 +25,7 @@ def eqm_dataloader():
     class DataLoader:
         n_conditions = 10
 
-        def sample(self):
+        def sample(self, rng=None):
             return {
                 "src_cell_data": jnp.ones((10, 5)) * 10,
                 "tgt_cell_data": jnp.ones((10, 5)),
@@ -42,7 +42,7 @@ def dataloader():
     class DataLoader:
         n_conditions = 10
 
-        def sample(self):
+        def sample(self, rng=None):
             return {
                 "src_cell_data": jnp.ones((10, 5)) * 10,
                 "tgt_cell_data": jnp.ones((10, 5)),

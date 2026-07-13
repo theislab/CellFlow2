@@ -8,7 +8,6 @@ from cellflow.training import BaseCallback
 from numpy.typing import ArrayLike
 from tqdm import tqdm
 
-from scaleflow.data import SamplerABC
 from scaleflow.solvers import EquilibriumMatching, GENOT, OTFlowMatching
 from scaleflow.training._callbacks import CallbackRunner
 
@@ -62,7 +61,7 @@ class CellFlowTrainer:
 
     def _validation_step(
         self,
-        val_data: dict[str, SamplerABC],
+        val_data: dict[str, Any],
         mode: Literal["on_log_iteration", "on_train_end"] = "on_log_iteration",
     ) -> tuple[
         dict[str, dict[str, ArrayLike]],
@@ -110,7 +109,7 @@ class CellFlowTrainer:
             # Initialize sampler if not already initialized
             if hasattr(vdl, "_initialized") and not vdl._initialized:
                 vdl.init_sampler()
-            batch = vdl.sample()  # Samplers use internal rng
+            batch = vdl.sample(mode=mode)  # cellflow ValidationSampler.sample(mode)
 
             val_pbar.set_description(f"Validation ({val_key}) - extracting data")
 
@@ -164,10 +163,10 @@ class CellFlowTrainer:
 
     def train(
         self,
-        dataloader: SamplerABC,
+        dataloader: Any,
         num_iterations: int,
         valid_freq: int,
-        valid_loaders: dict[str, SamplerABC] | None = None,
+        valid_loaders: dict[str, Any] | None = None,
         monitor_metrics: Sequence[str] = [],
         callbacks: Sequence[BaseCallback] = [],
         log_every: int = 1000,
@@ -195,6 +194,7 @@ class CellFlowTrainer:
         """
         self.training_logs = {"loss": []}
         rng_jax = jax.random.PRNGKey(0)
+        rng_np = np.random.default_rng(0)  # cellflow samplers draw batches from a numpy Generator
 
         # Initiate callbacks
         valid_loaders = valid_loaders or {}
@@ -209,7 +209,7 @@ class CellFlowTrainer:
             rng_jax, rng_step_fn = jax.random.split(rng_jax, 2)
 
             # Sample batch
-            batch = sampler.sample()
+            batch = sampler.sample(rng_np)
             loss = self.solver.step_fn(rng_step_fn, batch)
 
             # Track losses
