@@ -28,7 +28,7 @@ import numpy as np
 from scaleflow.data import GroupedDistribution, split_datasets
 from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
 from scaleflow.model import ScaleFlow
-from scaleflow.training import Metrics
+from cellflow.training import Metrics
 
 ZARR   = Path("/storage/pancellflow/tahoe.zarr")
 OUTPUT = Path("/storage/pancellflow/smoke_outputs")
@@ -229,8 +229,6 @@ sf.train(
         Metrics(
             metrics=["r_squared", "e_distance", "mmd"],
             metric_aggregations=["mean"],
-            use_gpu_optimized=True,
-            precision="bfloat16",
         ),
     ],
     monitor_metrics=["loss", "val_r_squared_mean", "val_e_distance_mean", "val_mmd_mean"],

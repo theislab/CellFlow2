@@ -4,22 +4,17 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shutil
 from functools import partial
 from pathlib import Path
-
-import shutil
 
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
+from cellflow.metrics import compute_e_distance_fast, compute_scalar_mmd
+from cellflow.training import ComputationCallback
 from scipy.stats import pearsonr, ttest_ind
 from tqdm import tqdm
-
-from scaleflow.training._callbacks import ComputationCallback
-from scaleflow.metrics._metrics import (
-    compute_e_distance_fast,
-    compute_scalar_mmd,
-)
 
 
 def pearson_r_delta(y_true, y_pred, source) -> float:
@@ -166,7 +161,8 @@ _DE_NAN = {k: float("nan") for k in _DE_KEYS}
 def _condition_metrics(y_true, y_pred, source, debug: bool = False, compute_de: bool = True) -> dict:
     """Per-condition metrics on the model's OUTPUT space. DE metrics are only meaningful
     in gene space, so `compute_de` must be False for latent-output runs (the gene-space DE
-    is computed instead in ReconMetricsLogger on decoded genes)."""
+    is computed instead in ReconMetricsLogger on decoded genes).
+    """
     yt, yp = np.asarray(y_true), np.asarray(y_pred)
     m = {
         "pearson_r":  pearson_r(yt, yp),
@@ -331,8 +327,6 @@ def _solver_params(solver) -> dict:
         "vf_params":           solver.vf_state.params,
         "vf_inference_params": solver.vf_state_inference.params,
     }
-    if hasattr(solver, "phenotype_state") and solver.phenotype_state is not None:
-        p["phenotype_params"] = solver.phenotype_state.params
     return p
 
 
@@ -340,8 +334,6 @@ def restore_solver_params(solver, params: dict) -> None:
     """Restore orbax-loaded params dict back into a solver in-place."""
     solver.vf_state           = solver.vf_state.replace(params=params["vf_params"])
     solver.vf_state_inference = solver.vf_state_inference.replace(params=params["vf_inference_params"])
-    if "phenotype_params" in params and hasattr(solver, "phenotype_state") and solver.phenotype_state is not None:
-        solver.phenotype_state = solver.phenotype_state.replace(params=params["phenotype_params"])
 
 
 class BestModelCheckpoint(ComputationCallback):
@@ -546,7 +538,8 @@ class ReconMetricsLogger(ComputationCallback):
     def _normalize_key(cond_key: tuple) -> tuple:
         """ValidationSampler yields keys as a 1-tuple holding the str(tuple), e.g.
         ``("('A549', 'A-366', 2.39)",)`` — parse it back into ``('A549', 'A-366', 2.39)``.
-        Already-clean tuples pass through unchanged."""
+        Already-clean tuples pass through unchanged.
+        """
         if len(cond_key) == 1 and isinstance(cond_key[0], str) and cond_key[0].lstrip().startswith("("):
             try:
                 return tuple(ast.literal_eval(cond_key[0]))

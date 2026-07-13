@@ -7,9 +7,11 @@ model:
   conditioning_key:        ${conditioning.conditioning_key}
   conditioning_kwargs:     ${conditioning.conditioning_kwargs}
   probability_path_kwargs: {constant_noise: 0.0}
-  condition_dropout_prob:  0.0    # classifier-free guidance: prob of nulling the whole condition
+  condition_dropout_prob:  0.0    # classifier-free guidance: prob of nulling the condition
                                   # during training (0 = off; ~0.1–0.2 to enable CFG). At inference
                                   # pass predict_kwargs.guidance_scale > 1 to amplify the condition.
+  condition_null: zero_embedding  # how CFG builds the null: zero_embedding (zero the pooled
+                                  # embedding) or mask_value (mask the raw condition, encode empty set)
   layer_norm_before_concatenation: false   # LayerNorm t/x/cond before combining (helps adaln_zero
                                             # balance time vs condition in the modulation vector)
 

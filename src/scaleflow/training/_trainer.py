@@ -4,12 +4,12 @@ from typing import Any, Literal
 
 import jax
 import numpy as np
+from cellflow.training import BaseCallback
 from numpy.typing import ArrayLike
 from tqdm import tqdm
 
-from scaleflow.data import SamplerABC
-from scaleflow.solvers import _eqm, _genot, _otfm
-from scaleflow.training._callbacks import BaseCallback, CallbackRunner
+from scaleflow.solvers import EquilibriumMatching, GENOT, OTFlowMatching
+from scaleflow.training._callbacks import CallbackRunner
 
 
 class CellFlowTrainer:
@@ -20,14 +20,14 @@ class CellFlowTrainer:
         dataloader
             Data sampler.
         solver
-            :class:`~scaleflow.solvers._otfm.OTFlowMatching`,
-            :class:`~scaleflow.solvers._genot.GENOT`, or
-            :class:`~scaleflow.solvers._eqm.EquilibriumMatching` solver with a conditional velocity field.
+            :class:`~scaleflow.solvers.OTFlowMatching`,
+            :class:`~scaleflow.solvers.GENOT`, or
+            :class:`~scaleflow.solvers.EquilibriumMatching` solver with a conditional velocity field.
         predict_kwargs
             Keyword arguments for the prediction functions
-            :func:`scaleflow.solvers._otfm.OTFlowMatching.predict`,
-            :func:`scaleflow.solvers._genot.GENOT.predict`, or
-            :func:`scaleflow.solvers._eqm.EquilibriumMatching.predict` used during validation.
+            :func:`scaleflow.solvers.OTFlowMatching.predict`,
+            :func:`scaleflow.solvers.GENOT.predict`, or
+            :func:`scaleflow.solvers.EquilibriumMatching.predict` used during validation.
         seed
             Random seed for subsampling validation data.
 
@@ -38,11 +38,11 @@ class CellFlowTrainer:
 
     def __init__(
         self,
-        solver: _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching,
+        solver: OTFlowMatching | GENOT | EquilibriumMatching,
         predict_kwargs: dict[str, Any] | None = None,
         seed: int = 0,
     ):
-        if not isinstance(solver, (_otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching)):
+        if not isinstance(solver, (OTFlowMatching | GENOT | EquilibriumMatching)):
             raise NotImplementedError(
                 f"Solver must be an instance of OTFlowMatching, GENOT, or EquilibriumMatching, got {type(solver)}"
             )
@@ -61,7 +61,7 @@ class CellFlowTrainer:
 
     def _validation_step(
         self,
-        val_data: dict[str, SamplerABC],
+        val_data: dict[str, Any],
         mode: Literal["on_log_iteration", "on_train_end"] = "on_log_iteration",
     ) -> tuple[
         dict[str, dict[str, ArrayLike]],
@@ -109,7 +109,7 @@ class CellFlowTrainer:
             # Initialize sampler if not already initialized
             if hasattr(vdl, "_initialized") and not vdl._initialized:
                 vdl.init_sampler()
-            batch = vdl.sample()  # Samplers use internal rng
+            batch = vdl.sample(mode=mode)  # cellflow ValidationSampler.sample(mode)
 
             val_pbar.set_description(f"Validation ({val_key}) - extracting data")
 
@@ -163,21 +163,20 @@ class CellFlowTrainer:
 
     def train(
         self,
-        dataloader: SamplerABC,
+        dataloader: Any,
         num_iterations: int,
         valid_freq: int,
-        valid_loaders: dict[str, SamplerABC] | None = None,
+        valid_loaders: dict[str, Any] | None = None,
         monitor_metrics: Sequence[str] = [],
         callbacks: Sequence[BaseCallback] = [],
         log_every: int = 1000,
-    ) -> _otfm.OTFlowMatching | _genot.GENOT | _eqm.EquilibriumMatching:
+    ) -> OTFlowMatching | GENOT | EquilibriumMatching:
         """Trains the model.
 
         Parameters
         ----------
             dataloader
-                Dataloader used. The dataloader is responsible for returning batches
-                with appropriate 'task' field ('gex' or 'functional').
+                Dataloader used.
             num_iterations
                 Number of iterations to train the model.
             valid_freq
@@ -193,8 +192,9 @@ class CellFlowTrainer:
         -------
             The trained model.
         """
-        self.training_logs = {"loss": [], "loss_gex": [], "loss_functional": []}
+        self.training_logs = {"loss": []}
         rng_jax = jax.random.PRNGKey(0)
+        rng_np = np.random.default_rng(0)  # cellflow samplers draw batches from a numpy Generator
 
         # Initiate callbacks
         valid_loaders = valid_loaders or {}
@@ -208,14 +208,12 @@ class CellFlowTrainer:
         for it in pbar:
             rng_jax, rng_step_fn = jax.random.split(rng_jax, 2)
 
-            # Sample batch (dataloader controls which task)
-            batch = sampler.sample()
+            # Sample batch
+            batch = sampler.sample(rng_np)
             loss = self.solver.step_fn(rng_step_fn, batch)
 
             # Track losses
-            task = batch.get("task", "gex")
             self.training_logs["loss"].append(float(loss))
-            self.training_logs[f"loss_{task}"].append(float(loss))
 
             if it % log_every == 0:
                 try:
@@ -235,16 +233,6 @@ class CellFlowTrainer:
                 mean_loss = np.mean(self.training_logs["loss"][-valid_freq:])
                 additional_metrics = {"train_loss": mean_loss}
 
-                # Add task-specific losses if available
-                if self.training_logs["loss_gex"]:
-                    mean_loss_gex = np.mean([l for l in self.training_logs["loss_gex"][-valid_freq:] if l is not None])
-                    additional_metrics["train_loss_gex"] = mean_loss_gex
-                if self.training_logs["loss_functional"]:
-                    mean_loss_func = np.mean(
-                        [l for l in self.training_logs["loss_functional"][-valid_freq:] if l is not None]
-                    )
-                    additional_metrics["train_loss_functional"] = mean_loss_func
-
                 # Run callbacks with loss as additional metric
                 metrics = crun.on_log_iteration(
                     valid_source_data,
@@ -259,10 +247,6 @@ class CellFlowTrainer:
                 # Update progress bar
                 postfix_dict = {metric: round(self.training_logs[metric][-1], 3) for metric in monitor_metrics}
                 postfix_dict["train_loss"] = round(mean_loss, 3)
-                if "train_loss_gex" in additional_metrics:
-                    postfix_dict["loss_gex"] = round(additional_metrics["train_loss_gex"], 3)
-                if "train_loss_functional" in additional_metrics:
-                    postfix_dict["loss_func"] = round(additional_metrics["train_loss_functional"], 3)
                 pbar.set_postfix(postfix_dict)
 
                 # Free the validation predictions NOW. Otherwise these locals stay referenced

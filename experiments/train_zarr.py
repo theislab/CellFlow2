@@ -33,8 +33,8 @@ from omegaconf import DictConfig, OmegaConf
 from scaleflow.data import GroupedDistribution, split_datasets
 from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
 from scaleflow.model import ScaleFlow
-from scaleflow.training import Metrics
-from scaleflow.utils import match_linear
+from cellflow.training import Metrics
+from cellflow.utils import match_linear
 
 import utils
 import callbacks
@@ -187,6 +187,7 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         layers_after_pool=layers_after_pool,
         cond_output_dropout=float(ce.cond_output_dropout),
         condition_dropout_prob=float(m.get("condition_dropout_prob", 0.0)),  # CFG: null-drop prob
+        condition_null=str(m.get("condition_null", "zero_embedding")),  # CFG: zero_embedding | mask_value
         hidden_dims=hidden_dims,
         decoder_dims=decoder_dims,
         condition_embedding_dim=int(m.condition_embedding_dim),
@@ -210,8 +211,6 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         Metrics(
             metrics=["e_distance", "mmd"],
             metric_aggregations=["mean"],
-            use_gpu_optimized=True,
-            precision="bfloat16",
         ),
         callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False)), compute_de=not recon_enabled),
         callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),

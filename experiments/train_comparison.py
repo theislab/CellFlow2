@@ -38,8 +38,8 @@ from omegaconf import DictConfig, OmegaConf
 from scaleflow.data import GroupedDistribution, split_datasets
 from scaleflow.data._dataloader import CombinedSampler, ReservoirSampler, ValidationSampler
 from scaleflow.model import ScaleFlow
-from scaleflow.training import Metrics
-from scaleflow.utils import match_linear
+from cellflow.training import Metrics
+from cellflow.utils import match_linear
 
 import utils
 import callbacks
@@ -296,8 +296,6 @@ def run(cfg: DictConfig, gds: dict | None = None) -> dict:
         Metrics(
             metrics=["r_squared", "e_distance", "mmd"],
             metric_aggregations=["mean"],
-            use_gpu_optimized=True,
-            precision="bfloat16",
         ),
         callbacks.ValMetricsLogger(save_path=val_log_path, valid_freq=int(cfg.training.valid_freq), wandb_run=wandb_run, debug=bool(cfg.match_fn.get("debug", False))),
         callbacks.BestModelCheckpoint(save_path=ckpt_path, wandb_run=wandb_run, metric=cfg.training.checkpoint_metric),

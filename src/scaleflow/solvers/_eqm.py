@@ -8,20 +8,20 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
+from cellflow.solvers._base import BaseSolver
+from cellflow.solvers.utils import ema_update
 from flax.core import frozen_dict
 from flax.training import train_state
 from ott.solvers import utils as solver_utils
 
-from scaleflow import utils
-from scaleflow._types import ArrayLike
+from cellflow import utils
+from cellflow._types import ArrayLike
 from scaleflow.networks._velocity_field import ConditionalVelocityField
-from scaleflow.solvers.utils import ema_update
 
 __all__ = ["EquilibriumMatching"]
 
 
-class EquilibriumMatching:
+class EquilibriumMatching(BaseSolver):
     """Equilibrium Matching for generative modeling.
 
     Based on "Equilibrium Matching" (Wang & Du, 2024).
@@ -35,7 +35,7 @@ class EquilibriumMatching:
         match_fn
             Function to match samples from the source and the target
             distributions. It has a ``(src, tgt) -> matching`` signature,
-            see e.g. :func:`scaleflow.utils.match_linear`. If :obj:`None`, no
+            see e.g. :func:`cellflow.utils.match_linear`. If :obj:`None`, no
             matching is performed.
         gamma_sampler
             Noise level sampler with a ``(rng, n_samples) -> gamma`` signature.
@@ -46,44 +46,36 @@ class EquilibriumMatching:
             Keyword arguments for :meth:`scaleflow.networks.ConditionalVelocityField.create_train_state`.
     """
 
+    @staticmethod
+    def _match_kwargs(*, match_fn: Callable, data_dim: int) -> dict[str, Any]:
+        """EqM matches source/target on ``match_fn`` and needs no explicit dimensions."""
+        return {"match_fn": match_fn}
+
     def __init__(
         self,
         vf: ConditionalVelocityField,
         match_fn: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = None,
         gamma_sampler: Callable[[jax.Array, int], jnp.ndarray] = solver_utils.uniform_sampler,
         c_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
-        phenotype_predictor: Any | None = None,
-        loss_weight_gex: float = 1.0,
-        loss_weight_functional: float = 1.0,
         **kwargs: Any,
     ):
-        self._is_trained: bool = False
-        self.vf = vf
-        self.condition_encoder_mode = self.vf.condition_mode
-        self.condition_encoder_regularization = self.vf.regularization
+        # EqM has no probability path or time sampler (it interpolates via gamma), so pass
+        # ``None`` for the base's generic slots; the rest of the shared scaffolding
+        # (is_trained flag, vf, condition-encoder settings, predict-fn cache) comes from BaseSolver.
+        super().__init__(vf, probability_path=None, time_sampler=None)
         self.gamma_sampler = gamma_sampler
         self.c_fn = c_fn if c_fn is not None else lambda gamma: 1.0 - gamma
         self.match_fn = jax.jit(match_fn) if match_fn is not None else None
         self.ema = kwargs.pop("ema", 1.0)
-        self.loss_weight_gex = loss_weight_gex
-        self.loss_weight_functional = loss_weight_functional
 
         self.vf_state = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_state_inference = self.vf.create_train_state(input_dim=self.vf.output_dims[-1], **kwargs)
         self.vf_step_fn = self._get_vf_step_fn()
-        # Cache of jitted predict fns keyed on the frozen sampler config; params are
-        # threaded as an argument so the compiled fn is reused across calls.
-        self._predict_fn_cache: dict[frozen_dict.FrozenDict, Any] = {}
 
-        self.phenotype_predictor = phenotype_predictor
-        if self.phenotype_predictor is not None:
-            phenotype_optimizer = kwargs.get("optimizer", optax.adamw(learning_rate=1e-3))
-            self.phenotype_state = self.phenotype_predictor.create_train_state(
-                rng=kwargs.get("rng", jax.random.PRNGKey(0)),
-                optimizer=phenotype_optimizer,
-                condition_embedding_dim=self.vf.condition_embedding_dim,
-            )
-            self.phenotype_step_fn = self._get_phenotype_step_fn()
+    @property
+    def _inference_state(self) -> train_state.TrainState:
+        """EqM reads condition embeddings from the EMA inference state."""
+        return self.vf_state_inference
 
     def _get_vf_step_fn(self) -> Callable:
         @jax.jit
@@ -146,66 +138,6 @@ class EquilibriumMatching:
 
         return vf_step_fn
 
-    def _get_phenotype_step_fn(self) -> Callable:
-        @jax.jit
-        def phenotype_step_fn(
-            rng: jax.Array,
-            vf_state: train_state.TrainState,
-            phenotype_state: train_state.TrainState,
-            conditions: dict[str, jnp.ndarray],
-            phenotypes: jnp.ndarray,
-            encoder_noise: jnp.ndarray,
-        ):
-            def loss_fn(
-                vf_params: jnp.ndarray,
-                phenotype_params: jnp.ndarray,
-                conditions: dict[str, jnp.ndarray],
-                phenotypes: jnp.ndarray,
-                encoder_noise: jnp.ndarray,
-                rng: jax.Array,
-            ) -> jnp.ndarray:
-                rng_encoder = rng
-                mean_cond, logvar_cond = vf_state.apply_fn(
-                    {"params": vf_params},
-                    conditions,
-                    rngs={"condition_encoder": rng_encoder},
-                    method="get_condition_embedding",
-                )
-                if self.condition_encoder_mode == "deterministic":
-                    cond_embedding = mean_cond
-                else:
-                    cond_embedding = mean_cond + encoder_noise * jnp.exp(logvar_cond / 2.0)
-
-                phenotype_pred = phenotype_state.apply_fn(
-                    {"params": phenotype_params},
-                    cond_embedding,
-                    training=True,
-                )
-
-                mse_loss = jnp.mean((phenotype_pred - phenotypes) ** 2)
-                condition_mean_regularization = 0.5 * jnp.mean(mean_cond**2)
-                condition_var_regularization = -0.5 * jnp.mean(1 + logvar_cond - jnp.exp(logvar_cond))
-                if self.condition_encoder_mode == "stochastic":
-                    encoder_loss = condition_mean_regularization + condition_var_regularization
-                elif (self.condition_encoder_mode == "deterministic") and (self.condition_encoder_regularization > 0):
-                    encoder_loss = condition_mean_regularization
-                else:
-                    encoder_loss = 0.0
-                return mse_loss + encoder_loss
-
-            grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
-            loss, (vf_grads, phenotype_grads) = grad_fn(
-                vf_state.params, phenotype_state.params, conditions, phenotypes, encoder_noise, rng
-            )
-            vf_state_updated = vf_state.replace(
-                params=jax.tree_util.tree_map(lambda p, g: p - 0.0 * g, vf_state.params, vf_grads)
-            )
-            vf_state_updated = vf_state_updated.apply_gradients(grads=vf_grads)
-            phenotype_state_updated = phenotype_state.apply_gradients(grads=phenotype_grads)
-            return vf_state_updated, phenotype_state_updated, loss
-
-        return phenotype_step_fn
-
     def step_fn(
         self,
         rng: jnp.ndarray,
@@ -218,25 +150,13 @@ class EquilibriumMatching:
         rng
             Random number generator.
         batch
-            Data batch with keys ``task``, and task-specific data.
-            For 'gex' task: ``src_cell_data``, ``tgt_cell_data``, ``condition``.
-            For 'functional' task: ``condition``, ``phenotype``.
+            Data batch with keys ``src_cell_data``, ``tgt_cell_data``, and
+            optionally ``condition``.
 
         Returns
         -------
         Loss value.
         """
-        task = batch.get("task", "gex")
-
-        if task == "gex":
-            return self._step_gex(rng, batch)
-        elif task == "functional":
-            return self._step_functional(rng, batch)
-        else:
-            raise ValueError(f"Unknown task type: {task}")
-
-    def _step_gex(self, rng: jnp.ndarray, batch: dict[str, ArrayLike]) -> float:
-        """Step function for gene expression (equilibrium matching) task."""
         src, tgt = batch["src_cell_data"], batch["tgt_cell_data"]
         condition = batch.get("condition")
         rng_resample, rng_gamma, rng_step_fn, rng_encoder_noise = jax.random.split(rng, 4)
@@ -265,58 +185,7 @@ class EquilibriumMatching:
             self.vf_state_inference = self.vf_state_inference.replace(
                 params=ema_update(self.vf_state_inference.params, self.vf_state.params, self.ema)
             )
-        return loss * self.loss_weight_gex
-
-    def _step_functional(self, rng: jnp.ndarray, batch: dict[str, ArrayLike]) -> float:
-        """Step function for functional (phenotype prediction) task."""
-        if self.phenotype_predictor is None:
-            raise ValueError("Cannot train functional task: phenotype_predictor not provided")
-
-        condition = batch["condition"]
-        phenotype = batch["phenotype"]
-        rng_step_fn, rng_encoder_noise = jax.random.split(rng, 2)
-        n = phenotype.shape[0]
-        encoder_noise = jax.random.normal(rng_encoder_noise, (n, self.vf.condition_embedding_dim))
-
-        self.vf_state, self.phenotype_state, loss = self.phenotype_step_fn(
-            rng_step_fn,
-            self.vf_state,
-            self.phenotype_state,
-            condition,
-            phenotype,
-            encoder_noise,
-        )
-
-        if self.ema == 1.0:
-            self.vf_state_inference = self.vf_state
-        else:
-            self.vf_state_inference = self.vf_state_inference.replace(
-                params=ema_update(self.vf_state_inference.params, self.vf_state.params, self.ema)
-            )
-        return loss * self.loss_weight_functional
-
-    def get_condition_embedding(self, condition: dict[str, ArrayLike], return_as_numpy=True) -> ArrayLike:
-        """Get learnt embeddings of the conditions.
-
-        Parameters
-        ----------
-        condition
-            Conditions to encode
-        return_as_numpy
-            Whether to return the embeddings as numpy arrays.
-
-        Returns
-        -------
-        Mean and log-variance of encoded conditions.
-        """
-        cond_mean, cond_logvar = self.vf.apply(
-            {"params": self.vf_state_inference.params},
-            condition,
-            method="get_condition_embedding",
-        )
-        if return_as_numpy:
-            return np.asarray(cond_mean), np.asarray(cond_logvar)
-        return cond_mean, cond_logvar
+        return loss
 
     def _predict_jit(
         self,
@@ -423,7 +292,6 @@ class EquilibriumMatching:
         max_steps: int = 250,
         use_nesterov: bool = True,
         mu: float = 0.35,
-        show_progress: bool = False,
         **kwargs: Any,
     ) -> ArrayLike | dict[str, ArrayLike]:
         """Predict the translated source ``x`` under condition ``condition``.
@@ -450,8 +318,6 @@ class EquilibriumMatching:
             Whether to use Nesterov accelerated gradient (recommended).
         mu
             Momentum parameter for Nesterov (default: 0.35 as in paper).
-        show_progress
-            Whether to show a progress bar when predicting over multiple conditions.
         kwargs
             Additional keyword arguments (for compatibility).
 
@@ -483,81 +349,11 @@ class EquilibriumMatching:
         )
 
         if isinstance(x, dict):
-            if show_progress:
-                from tqdm import tqdm
-
-                results = {}
-                keys = sorted(x.keys())
-                for key in tqdm(keys, desc="Predicting conditions", leave=False):
-                    results[key] = predict_fn(x[key], condition[key])
-                return results
-            else:
-                return jax.tree.map(
-                    predict_fn,
-                    x,
-                    condition,
-                )
+            return jax.tree.map(
+                predict_fn,
+                x,
+                condition,
+            )
         else:
             x_pred = predict_fn(x, condition)
             return np.array(x_pred)
-
-    def predict_phenotype(
-        self,
-        condition: dict[str, ArrayLike],
-        rng: jax.Array | None = None,
-    ) -> ArrayLike:
-        """Predict phenotype from condition.
-
-        Parameters
-        ----------
-        condition
-            A dictionary with keys indicating the name of the condition and values containing
-            the condition embeddings as arrays of shape [batch_size, max_combination_length, emb_dim].
-        rng
-            Random number generator to sample from the latent distribution,
-            only used if ``condition_mode='stochastic'``. If :obj:`None`, the
-            mean embedding is used.
-
-        Returns
-        -------
-        Predicted phenotype of shape [batch_size, output_dim].
-        """
-        if self.phenotype_predictor is None:
-            raise ValueError("Cannot predict phenotype: phenotype_predictor not provided")
-
-        use_mean = rng is None or self.condition_encoder_mode == "deterministic"
-        rng = utils.default_prng_key(rng)
-        n = next(iter(condition.values())).shape[0]
-        encoder_noise = (
-            jnp.zeros((n, self.vf.condition_embedding_dim))
-            if use_mean
-            else jax.random.normal(rng, (n, self.vf.condition_embedding_dim))
-        )
-
-        mean_cond, logvar_cond = self.vf.apply(
-            {"params": self.vf_state_inference.params},
-            condition,
-            method="get_condition_embedding",
-        )
-
-        if self.condition_encoder_mode == "deterministic":
-            cond_embedding = mean_cond
-        else:
-            cond_embedding = mean_cond + encoder_noise * jnp.exp(logvar_cond / 2.0)
-
-        phenotype_pred = self.phenotype_state.apply_fn(
-            {"params": self.phenotype_state.params},
-            cond_embedding,
-            training=False,
-        )
-
-        return np.array(phenotype_pred)
-
-    @property
-    def is_trained(self) -> bool:
-        """Whether the model is trained."""
-        return self._is_trained
-
-    @is_trained.setter
-    def is_trained(self, value: bool) -> None:
-        self._is_trained = value

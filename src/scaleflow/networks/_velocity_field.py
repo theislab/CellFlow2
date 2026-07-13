@@ -6,18 +6,33 @@ from typing import Any, Literal
 import jax
 import jax.numpy as jnp
 import optax
+from cellflow.networks._utils import FilmBlock, MLPBlock, ResNetBlock, sinusoidal_time_encoder
 from flax import linen as nn
 from flax.training import train_state
 
-from scaleflow._types import Layers_separate_input_t, Layers_t
-from scaleflow.networks._set_encoders import ConditionEncoder
-from scaleflow.networks._utils import FilmBlock, MLPBlock, ResNetBlock, sinusoidal_time_encoder
+from cellflow._types import Layers_separate_input_t, Layers_t
+from cellflow.networks._set_encoders import ConditionEncoder
+from cellflow.networks._velocity_field import (
+    ConditionalVelocityField as _CFConditionalVelocityField,
+)
+from cellflow.networks._velocity_field import (
+    GENOTConditionalVelocityField as _CFGENOTConditionalVelocityField,
+)
 
 __all__ = ["ConditionalVelocityField", "GENOTConditionalVelocityField", "EquilibriumVelocityField"]
 
 
-class ConditionalVelocityField(nn.Module):
-    """Parameterized neural vector field with conditions.
+class ConditionalVelocityField(_CFConditionalVelocityField):
+    """Velocity field extending :class:`cellflow.networks.ConditionalVelocityField`.
+
+    Inherits all fields, the condition encoder, CFG nulling (``condition_null`` +
+    ``_maybe_null_*``), ``get_condition_embedding``, ``create_train_state``, and the
+    ``setup``/``__call__`` scaffolding. Adds two scaleflow-only features by overriding
+    the conditioning hooks: an ``'adaln_zero'`` conditioning mode (per-cell AdaLN-Zero
+    modulation replacing the decoder) and an optional cell self-attention transformer
+    applied ``'before_condition'`` or ``'after_condition'``.
+
+    Legacy docstring (inherited parameters):
 
     Parameters
     ----------
@@ -95,80 +110,37 @@ class ConditionalVelocityField(nn.Module):
         Output of the neural vector field.
     """
 
-    output_dim: int
-    max_combination_length: int
-    condition_mode: Literal["deterministic", "stochastic"] = "deterministic"
-    regularization: float = 1.0
-    condition_embedding_dim: int = 32
-    covariates_not_pooled: Sequence[str] = dc_field(default_factory=lambda: [])
-    pooling: Literal["mean", "attention_token", "attention_seed"] = "attention_token"
-    pooling_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    layers_before_pool: Layers_separate_input_t | Layers_t = dc_field(default_factory=lambda: [])
-    layers_after_pool: Layers_t = dc_field(default_factory=lambda: [])
-    cond_output_dropout: float = 0.0
-    mask_value: float = 0.0
-    condition_encoder_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    act_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    time_freqs: int = 1024
-    time_max_period: int = 10000
-    time_encoder_dims: Sequence[int] = (1024, 1024, 1024)
-    time_encoder_dropout: float = 0.0
-    hidden_dims: Sequence[int] = (1024, 1024, 1024)
-    hidden_dropout: float = 0.0
+    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
     cell_transformer_layers: int = 0
     cell_transformer_heads: int = 8
     cell_transformer_dim: int = 128
     cell_transformer_dropout: float = 0.1
     cell_transformer_mode: Literal["before_condition", "after_condition"] = "before_condition"
-    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
-    conditioning_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    decoder_dims: Sequence[int] = (1024, 1024, 1024)
-    decoder_dropout: float = 0.0
-    layer_norm_before_concatenation: bool = False
-    linear_projection_before_concatenation: bool = False
-    condition_dropout_prob: float = 0.0   # classifier-free guidance: prob of dropping the whole
-                                          # condition to a null (zeros) embedding during training
 
-    def setup(self):
-        """Initialize the network."""
-        if isinstance(self.conditioning_kwargs, dataclasses.Field):
-            conditioning_kwargs = dict(self.conditioning_kwargs.default_factory())
+    def _adaln_cond_dim(self) -> int:
+        """Size of the vector that modulates the adaln blocks: ``(t, condition)`` here."""
+        return self.time_encoder_dims[-1] + self.condition_embedding_dim
+
+    def _setup_conditioning(self, conditioning_kwargs: dict[str, Any]) -> None:
+        """Add the ``'adaln_zero'`` mode and an optional cell transformer; delegate the rest."""
+        if self.conditioning == "adaln_zero":
+            from scaleflow.networks._utils import build_adaln_blocks
+
+            # Per-cell AdaLN-Zero: modulate each cell by its OWN conditioning vector. No cross-cell
+            # attention — the velocity field must be a per-cell function, and cells within a
+            # batch have different flow-times t, so they must not attend to each other.
+            self.adaln_blocks = build_adaln_blocks(
+                decoder_dims=self.decoder_dims,
+                cond_dim=self._adaln_cond_dim(),
+                decoder_dropout=self.decoder_dropout,
+                act_fn=self.act_fn,
+                conditioning_kwargs=conditioning_kwargs,
+            )
         else:
-            conditioning_kwargs = dict(self.conditioning_kwargs)
-        self.condition_encoder = ConditionEncoder(
-            condition_mode=self.condition_mode,
-            regularization=self.regularization,
-            output_dim=self.condition_embedding_dim,
-            pooling=self.pooling,
-            pooling_kwargs=self.pooling_kwargs,
-            layers_before_pool=self.layers_before_pool,
-            layers_after_pool=self.layers_after_pool,
-            covariates_not_pooled=self.covariates_not_pooled,
-            mask_value=self.mask_value,
-            **self.condition_encoder_kwargs,
-        )
-
-        self.layer_cond_output_dropout = nn.Dropout(rate=self.cond_output_dropout)
-        self.layer_norm_condition = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
-
-        self.time_encoder = MLPBlock(
-            dims=self.time_encoder_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.time_encoder_dropout,
-            act_last_layer=False,
-        )
-        self.layer_norm_time = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
-
-        self.x_encoder = MLPBlock(
-            dims=self.hidden_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.hidden_dropout,
-            act_last_layer=(False if self.linear_projection_before_concatenation else True),
-        )
-        self.layer_norm_x = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
+            super()._setup_conditioning(conditioning_kwargs)
 
         if self.cell_transformer_layers > 0:
-            from scaleflow.networks._utils import SelfAttentionBlock
+            from cellflow.networks._utils import SelfAttentionBlock
 
             self.cell_transformer = SelfAttentionBlock(
                 num_heads=[self.cell_transformer_heads] * self.cell_transformer_layers,
@@ -179,80 +151,9 @@ class ConditionalVelocityField(nn.Module):
                 act_fn=self.act_fn,
             )
 
-        self.decoder = MLPBlock(
-            dims=self.decoder_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.decoder_dropout,
-            act_last_layer=(False if self.linear_projection_before_concatenation else True),
-        )
-
-        self.output_layer = nn.Dense(self.output_dim)
-
-        if self.conditioning == "film":
-            self.film_block = FilmBlock(
-                input_dim=self.hidden_dims[-1],
-                cond_dim=self.time_encoder_dims[-1] + self.condition_embedding_dim,
-                **conditioning_kwargs,
-            )
-        elif self.conditioning == "resnet":
-            self.resnet_block = ResNetBlock(
-                input_dim=self.hidden_dims[-1],
-                **conditioning_kwargs,
-            )
-        elif self.conditioning == "adaln_zero":
-            from scaleflow.networks._utils import AdaLNZeroBlock
-
-            cond_dim = self.time_encoder_dims[-1] + self.condition_embedding_dim
-
-            # Use standard Transformer MLP expansion (4x by default)
-            # mlp_dim is left as None, so it will use mlp_ratio * hidden_dim
-            # This gives: hidden_dim → (4 × hidden_dim) → hidden_dim
-            mlp_ratio = conditioning_kwargs.get("mlp_ratio", 4.0)
-
-            # Per-cell AdaLN-Zero: modulate each cell by its OWN (t, condition). No cross-cell
-            # attention — the velocity field must be a per-cell function, and cells within a
-            # batch have different flow-times t, so they must not attend to each other.
-            self.adaln_blocks = [
-                AdaLNZeroBlock(
-                    hidden_dim=dim,
-                    cond_dim=cond_dim,
-                    num_heads=conditioning_kwargs.get("num_heads", 8),
-                    qkv_dim=conditioning_kwargs.get("qkv_dim", None),
-                    mlp_ratio=mlp_ratio,  # Standard 4x expansion in MLP
-                    dropout_rate=self.decoder_dropout,
-                    use_attention=False,
-                    act_fn=self.act_fn,
-                )
-                for dim in self.decoder_dims
-            ]
-        elif self.conditioning == "concatenation":
-            if len(conditioning_kwargs) > 0:
-                raise ValueError("If `conditioning=='concatenation' mode, no conditioning kwargs can be passed.")
-        else:
-            raise ValueError(f"Unknown conditioning mode: {self.conditioning}")
-
-    def __call__(
-        self,
-        t: jnp.ndarray,
-        x_t: jnp.ndarray,
-        cond: dict[str, jnp.ndarray],
-        encoder_noise: jnp.ndarray,
-        train: bool = True,
-        force_uncond: bool = False,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        squeeze = x_t.ndim == 1
-        cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
-        if self.condition_mode == "deterministic":
-            cond_embedding = cond_mean
-        else:
-            cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
-
-        cond_embedding = self.layer_cond_output_dropout(cond_embedding, deterministic=not train)
-
-        t_encoded = sinusoidal_time_encoder(t, time_freqs=self.time_freqs, time_max_period=self.time_max_period)
-        t_encoded = self.time_encoder(t_encoded, training=train)
+    def _encode_x(self, x_t: jnp.ndarray, squeeze: bool, train: bool) -> jnp.ndarray:
+        """Encode ``x_t``, optionally passing it through the cell transformer first."""
         x_encoded = self.x_encoder(x_t, training=train)
-
         if self.cell_transformer_layers > 0 and self.cell_transformer_mode == "before_condition":
             if squeeze:
                 x_encoded_expanded = jnp.expand_dims(x_encoded, 0)
@@ -261,32 +162,25 @@ class ConditionalVelocityField(nn.Module):
             else:
                 x_encoded_expanded = jnp.expand_dims(x_encoded, 0) if x_encoded.ndim == 1 else x_encoded
                 x_encoded = self.cell_transformer(x_encoded_expanded, mask=None, training=train)
+        return x_encoded
 
-        t_encoded = self.layer_norm_time(t_encoded)
-        x_encoded = self.layer_norm_x(x_encoded)
-        cond_embedding = self.layer_norm_condition(cond_embedding)
-
-        # Classifier-free guidance: null the condition (zeros AFTER layer-norm, to avoid
-        # normalizing an all-zeros vector). `force_uncond=True` → unconditional velocity at
-        # inference; during training each batch is nulled with prob `condition_dropout_prob`
-        # so the model also learns the unconditional field.
-        if force_uncond:
-            cond_embedding = jnp.zeros_like(cond_embedding)
-        elif train and self.condition_dropout_prob > 0.0:
-            drop = jax.random.bernoulli(self.make_rng("dropout"), p=self.condition_dropout_prob)
-            cond_embedding = jnp.where(drop, jnp.zeros_like(cond_embedding), cond_embedding)
-
-        if squeeze:
-            cond_embedding = jnp.squeeze(cond_embedding)  # , 0)
-        elif cond_embedding.shape[0] != x_t.shape[0]:  # type: ignore[attr-defined]
-            cond_embedding = jnp.tile(cond_embedding, (x_t.shape[0], 1))
-
+    def _combine_and_decode(
+        self,
+        t_encoded: jnp.ndarray,
+        x_encoded: jnp.ndarray,
+        cond_embedding: jnp.ndarray,
+        squeeze: bool,
+        train: bool,
+        x_0_encoded: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        """Combine/decode, adding ``'adaln_zero'`` and the ``'after_condition'`` cell transformer."""
+        concat_inputs, conditioning_vec = self._conditioning_signals(t_encoded, x_encoded, cond_embedding, x_0_encoded)
         if self.conditioning == "concatenation":
-            out = jnp.concatenate((t_encoded, x_encoded, cond_embedding), axis=-1)
+            out = jnp.concatenate(concat_inputs, axis=-1)
         elif self.conditioning == "film":
-            out = self.film_block(x_encoded, jnp.concatenate((t_encoded, cond_embedding), axis=-1))
+            out = self.film_block(x_encoded, conditioning_vec)
         elif self.conditioning == "resnet":
-            out = self.resnet_block(x_encoded, jnp.concatenate((t_encoded, cond_embedding), axis=-1))
+            out = self.resnet_block(x_encoded, conditioning_vec)
         elif self.conditioning == "adaln_zero":
             out = x_encoded
         else:
@@ -302,516 +196,105 @@ class ConditionalVelocityField(nn.Module):
                 out = self.cell_transformer(out_expanded, mask=None, training=train)
 
         if self.conditioning == "adaln_zero":
-            # Cells are the BATCH dim and each is modulated by its OWN (t, condition):
-            # out (n_cells, hidden) with per-cell conditioning (n_cells, cond_dim). No cell-0
-            # collapse, no cross-cell attention — a proper per-cell velocity field.
-            conditioning_vec = jnp.concatenate((t_encoded, cond_embedding), axis=-1)
-            if squeeze:
-                out = jnp.expand_dims(out, 0)                    # (1, hidden)
-                conditioning_vec = jnp.expand_dims(conditioning_vec, 0)  # (1, cond_dim)
-            for block in self.adaln_blocks:
-                out = block(out, conditioning_vec, mask=None, training=train)
-            if squeeze:
-                out = jnp.squeeze(out, 0)
-            out = self.output_layer(out)
-        else:
-            out = self.decoder(out, training=train)
-            out = self.output_layer(out)
+            from scaleflow.networks._utils import apply_adaln
 
-        return out, cond_mean, cond_logvar
-
-    def get_condition_embedding(self, condition: dict[str, jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Get the embedding of the condition.
-
-        Parameters
-        ----------
-            condition
-                Conditioning vector of shape ``[batch, ...]``.
-
-        Returns
-        -------
-            Learnt mean and log-variance of the condition embedding.
-            If :attr:`scaleflow.model.CellFlow.condition_mode` is ``'deterministic'``, the log-variance
-            is set to zero.
-        """
-        condition_mean, condition_logvar = self.condition_encoder(condition, training=False)
-        return condition_mean, condition_logvar
-
-    def create_train_state(
-        self,
-        rng: jax.Array,
-        optimizer: optax.OptState,
-        input_dim: int,
-        conditions: dict[str, jnp.ndarray],
-    ) -> train_state.TrainState:
-        """Create the training state.
-
-        Parameters
-        ----------
-            rng
-                Random number generator.
-            optimizer
-                Optimizer.
-            input_dim
-                Dimensionality of the velocity field.
-            conditions
-                Conditions describing the perturbation.
-
-        Returns
-        -------
-            The training state.
-        """
-        t, x_t = jnp.ones((1, 1)), jnp.ones((1, input_dim))
-        encoder_noise = jnp.ones((1, self.condition_embedding_dim))
-        cond = {
-            pert_cov: jnp.ones((1, self.max_combination_length, condition.shape[-1]))
-            for pert_cov, condition in conditions.items()
-        }
-        params_rng, condition_encoder_rng = jax.random.split(rng, 2)
-        params = self.init(
-            {"params": params_rng, "condition_encoder": condition_encoder_rng},
-            t=t,
-            x_t=x_t,
-            cond=cond,
-            encoder_noise=encoder_noise,
-            train=False,
-        )["params"]
-        return train_state.TrainState.create(apply_fn=self.apply, params=params, tx=optimizer)
-
-    @property
-    def output_dims(self):
-        """Dimensions of the output layers."""
-        return tuple(self.decoder_dims) + (self.output_dim,)
-
-    @property
-    def time_encoder(self):
-        """The time encoder used."""
-        return self._time_encoder
-
-    @time_encoder.setter
-    def time_encoder(self, encoder):
-        """Set the time encoder."""
-        self._time_encoder = encoder
-
-    @property
-    def x_encoder(self):
-        """The x encoder used."""
-        return self._x_encoder
-
-    @x_encoder.setter
-    def x_encoder(self, encoder):
-        """Set the x encoder."""
-        self._x_encoder = encoder
-
-    @property
-    def decoder(self):
-        """The decoder used."""
-        return self._decoder
-
-    @decoder.setter
-    def decoder(self, decoder):
-        """Set the decoder."""
-        self._decoder = decoder
-
-
-class GENOTConditionalVelocityField(ConditionalVelocityField):
-    """Parameterized neural vector field with conditions for GENOT.
-
-    Parameters
-    ----------
-        output_dim
-            Dimensionality of the output.
-        max_combination_length
-            Maximum number of covariates in a combination.
-        condition_mode
-            Mode of the encoder, should be one of:
-
-            - ``'deterministic'``: Learns condition encoding point-wise.
-            - ``'stochastic'``: Learns a Gaussian distribution for representing conditions.
-
-        regularization
-            Regularization strength in the latent space:
-
-            - For deterministic mode, it is the strength of the L2 regularization.
-            - For stochastic mode, it is the strength of the KL divergence regularization.
-
-        condition_embedding_dim
-            Dimensions of the condition embedding.
-        covariates_not_pooled
-            Covariates that will escape pooling (should be identical across all set elements).
-        pooling
-            Pooling method.
-        pooling_kwargs
-            Keyword arguments for the pooling method.
-        layers_before_pool
-            Layers before pooling. Either a sequence of tuples with layer type and parameters or
-            a dictionary with input-specific layers.
-        layers_after_pool
-            Layers after pooling.
-        cond_output_dropout
-            Dropout rate for the last layer of the condition encoder.
-        condition_encoder_kwargs
-            Keyword arguments for the condition encoder.
-        act_fn
-            Activation function.
-        time_freqs
-            Frequency of the cyclical time encoding.
-        time_max_period
-            Controls the minimum frequency of the time embeddings.
-        time_encoder_dims
-            Dimensions of the time embedding.
-        time_encoder_dropout
-            Dropout rate for the time embedding.
-        hidden_dims
-            Dimensions of the hidden layers.
-        hidden_dropout
-            Dropout rate for the hidden layers.
-        conditioning
-            Conditioning method, should be one of:
-
-            - ``'concatenation'``: Concatenate the time, data, and condition embeddings.
-            - ``'film'``: Use FiLM conditioning, i.e. learn FiLM weights from time, x_0, and condition embedding
-              to scale the data embeddings.
-            - ``'resnet'``: Use residual conditioning.
-
-        conditioning_kwargs
-            Keyword arguments for the conditioning method.
-        decoder_dims
-            Dimensions of the output layers (or attention dimensions for adaln_zero).
-            For adaln_zero, MLP dimensions are automatically set to match hidden_dims[-1].
-        decoder_dropout
-            Dropout rate for the output layers.
-        genot_source_dims
-            Dimensions of the layers processing the source cells.
-        genot_source_dropout
-            Dropout rate for the layers processing the source cells.
-        layer_norm_before_concatenation
-            If :obj:`True`, applies layer normalization before concatenating
-            the embedded time, embedded data, and condition embeddings.
-        linear_projection_before_concatenation
-            If :obj:`True`, applies a linear projection before concatenating
-            the embedded time, embedded data.
-
-    Returns
-    -------
-        Output of the neural vector field.
-    """
-
-    output_dim: int
-    max_combination_length: int
-    condition_mode: Literal["deterministic", "stochastic"] = "deterministic"
-    regularization: float = 1.0
-    condition_embedding_dim: int = 32
-    covariates_not_pooled: Sequence[str] = dc_field(default_factory=lambda: [])
-    pooling: Literal["mean", "attention_token", "attention_seed"] = "attention_token"
-    pooling_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    layers_before_pool: Layers_separate_input_t | Layers_t = dc_field(default_factory=lambda: [])
-    layers_after_pool: Layers_t = dc_field(default_factory=lambda: [])
-    cond_output_dropout: float = 0.0
-    mask_value: float = 0.0
-    condition_encoder_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    act_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    time_freqs: int = 1024
-    time_max_period: int = 10000
-    time_encoder_dims: Sequence[int] = (1024, 1024, 1024)
-    time_encoder_dropout: float = 0.0
-    hidden_dims: Sequence[int] = (1024, 1024, 1024)
-    hidden_dropout: float = 0.0
-    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
-    conditioning_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    decoder_dims: Sequence[int] = (1024, 1024, 1024)
-    decoder_dropout: float = 0.0
-    genot_source_dims: Sequence[int] = (1024, 1024, 1024)
-    genot_source_dropout: float = 0.0
-    layer_norm_before_concatenation: bool = False
-    linear_projection_before_concatenation: bool = False
-
-    def setup(self):
-        """Initialize the network."""
-        if isinstance(self.conditioning_kwargs, dataclasses.Field):
-            conditioning_kwargs = dict(self.conditioning_kwargs.default_factory())
-        else:
-            conditioning_kwargs = dict(self.conditioning_kwargs)
-        self.condition_encoder = ConditionEncoder(
-            condition_mode=self.condition_mode,
-            regularization=self.regularization,
-            output_dim=self.condition_embedding_dim,
-            pooling=self.pooling,
-            pooling_kwargs=self.pooling_kwargs,
-            layers_before_pool=self.layers_before_pool,
-            layers_after_pool=self.layers_after_pool,
-            output_dropout=self.cond_output_dropout,
-            covariates_not_pooled=self.covariates_not_pooled,
-            mask_value=self.mask_value,
-            **self.condition_encoder_kwargs,
-        )
-        self.layer_cond_output_dropout = nn.Dropout(rate=self.cond_output_dropout)
-        self.layer_norm_condition = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
-
-        self.time_encoder = MLPBlock(
-            dims=self.time_encoder_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.time_encoder_dropout,
-            act_last_layer=False,
-        )
-        self.layer_norm_time = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
-
-        self.x_encoder = MLPBlock(
-            dims=self.hidden_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.hidden_dropout,
-            act_last_layer=(False if self.linear_projection_before_concatenation else True),
-        )
-        self.layer_norm_x = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
-
-        self.x_0_encoder = MLPBlock(
-            dims=self.genot_source_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.genot_source_dropout,
-        )
-        self.layer_norm_x_0 = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
-
-        self.decoder = MLPBlock(
-            dims=self.decoder_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.decoder_dropout,
-            act_last_layer=(False if self.linear_projection_before_concatenation else True),
-        )
-
-        self.output_layer = nn.Dense(self.output_dim)
-
-        if self.conditioning == "film":
-            self.film_block = FilmBlock(
-                input_dim=self.hidden_dims[-1],
-                cond_dim=self.time_encoder_dims[-1] + self.condition_embedding_dim,
-                **conditioning_kwargs,
+            # Modulate each cell by its OWN conditioning vector — see build_adaln_blocks.
+            return apply_adaln(
+                adaln_blocks=self.adaln_blocks,
+                output_layer=self.output_layer,
+                out=out,
+                conditioning_vec=conditioning_vec,
+                squeeze=squeeze,
+                train=train,
             )
-        elif self.conditioning == "resnet":
-            self.resnet_block = ResNetBlock(
-                input_dim=self.hidden_dims[-1],
-                **conditioning_kwargs,
-            )
-        elif self.conditioning == "concatenation":
-            if len(conditioning_kwargs) > 0:
-                raise ValueError("If `conditioning=='concatenation' mode, no conditioning kwargs can be passed.")
-        else:
-            raise ValueError(f"Unknown conditioning mode: {self.conditioning}")
-
-    def __call__(
-        self,
-        t: jnp.ndarray,
-        x_t: jnp.ndarray,
-        x_0: jnp.ndarray,
-        cond: dict[str, jnp.ndarray],
-        encoder_noise: jnp.ndarray,
-        train: bool = True,
-    ):
-        squeeze = x_t.ndim == 1
-        cond_mean, cond_logvar = self.condition_encoder(cond, training=train)
-        if self.condition_mode == "deterministic":
-            cond_embedding = cond_mean
-        else:
-            cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
-        cond_embedding = self.layer_cond_output_dropout(cond_embedding, deterministic=not train)
-        t_encoded = sinusoidal_time_encoder(t, time_freqs=self.time_freqs, time_max_period=self.time_max_period)
-        t_encoded = self.time_encoder(t_encoded, training=train)
-        x_encoded = self.x_encoder(x_t, training=train)
-        x_0_encoded = self.x_0_encoder(x_0, training=train)
-
-        t_encoded = self.layer_norm_time(t_encoded)
-        x_encoded = self.layer_norm_x(x_encoded)
-        x_0_encoded = self.layer_norm_x_0(x_0_encoded)
-        cond_embedding = self.layer_norm_condition(cond_embedding)
-
-        if squeeze:
-            cond_embedding = jnp.squeeze(cond_embedding)  # , 0)
-        elif cond_embedding.shape[0] != x_t.shape[0]:  # type: ignore[attr-defined]
-            cond_embedding = jnp.tile(cond_embedding, (x_t.shape[0], 1))
-
-        if self.conditioning == "concatenation":
-            out = jnp.concatenate((t_encoded, x_encoded, x_0_encoded, cond_embedding), axis=-1)
-        elif self.conditioning == "film":
-            out = self.film_block(x_encoded, jnp.concatenate((t_encoded, x_0_encoded, cond_embedding), axis=-1))
-        elif self.conditioning == "resnet":
-            out = self.resnet_block(x_encoded, jnp.concatenate((t_encoded, x_0_encoded, cond_embedding), axis=-1))
-        else:
-            raise ValueError(f"Unknown conditioning mode: {self.conditioning}.")
 
         out = self.decoder(out, training=train)
-        return self.output_layer(out), cond_mean, cond_logvar
-
-    def create_train_state(
-        self,
-        rng: jax.Array,
-        optimizer: optax.OptState,
-        input_dim: int,
-        conditions: dict[str, jnp.ndarray],
-    ) -> train_state.TrainState:
-        """Create the training state.
-
-        Parameters
-        ----------
-            rng
-                Random number generator.
-            optimizer
-                Optimizer.
-            input_dim
-                Dimensionality of the velocity field.
-            conditions
-                Conditions describing the perturbation.
-
-        Returns
-        -------
-            The training state.
-        """
-        t, x_t, x_0 = jnp.ones((1, 1)), jnp.ones((1, input_dim)), jnp.ones((1, input_dim))
-        encoder_noise = jnp.ones((1, self.condition_embedding_dim))
-        cond = {
-            pert_cov: jnp.ones((1, self.max_combination_length, condition.shape[-1]))
-            for pert_cov, condition in conditions.items()
-        }
-        params_rng, condition_encoder_rng = jax.random.split(rng, 2)
-        params = self.init(
-            {"params": params_rng, "condition_encoder": condition_encoder_rng},
-            t=t,
-            x_t=x_t,
-            x_0=x_0,
-            cond=cond,
-            encoder_noise=encoder_noise,
-            train=False,
-        )["params"]
-        return train_state.TrainState.create(apply_fn=self.apply, params=params, tx=optimizer)
+        return self.output_layer(out)
 
 
-class EquilibriumVelocityField(nn.Module):
-    """Parameterized neural gradient field for Equilibrium Matching (no time conditioning).
+class GENOTConditionalVelocityField(_CFGENOTConditionalVelocityField):
+    """GENOT velocity field, extending :class:`cellflow.networks.GENOTConditionalVelocityField`.
 
-    Same as ConditionalVelocityField but without time encoder.
+    Adds the ``'adaln_zero'`` conditioning mode (per-cell AdaLN-Zero modulation by the
+    ``(t, x_0, condition)`` vector — the same signals GENOT's film/resnet already use,
+    with the source folded in), reusing the shared adaln helpers. Also carries the
+    ``cell_transformer_*`` fields so the uniform model constructor can build it (GENOT
+    does not use a cell transformer, so they are accepted and ignored).
     """
 
-    output_dim: int
-    max_combination_length: int
-    condition_mode: Literal["deterministic", "stochastic"] = "deterministic"
-    regularization: float = 1.0
-    condition_embedding_dim: int = 32
-    covariates_not_pooled: Sequence[str] = dc_field(default_factory=lambda: [])
-    pooling: Literal["mean", "attention_token", "attention_seed"] = "attention_token"
-    pooling_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    layers_before_pool: Layers_separate_input_t | Layers_t = dc_field(default_factory=lambda: [])
-    layers_after_pool: Layers_t = dc_field(default_factory=lambda: [])
-    cond_output_dropout: float = 0.0
-    mask_value: float = 0.0
-    condition_encoder_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    act_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.silu
-    hidden_dims: Sequence[int] = (1024, 1024, 1024)
-    hidden_dropout: float = 0.0
+    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
     cell_transformer_layers: int = 0
     cell_transformer_heads: int = 8
     cell_transformer_dim: int = 128
     cell_transformer_dropout: float = 0.1
     cell_transformer_mode: Literal["before_condition", "after_condition"] = "before_condition"
-    conditioning: Literal["concatenation", "film", "resnet", "adaln_zero"] = "concatenation"
-    conditioning_kwargs: dict[str, Any] = dc_field(default_factory=lambda: {})
-    decoder_dims: Sequence[int] = (1024, 1024, 1024)
-    decoder_dropout: float = 0.0
-    layer_norm_before_concatenation: bool = False
-    linear_projection_before_concatenation: bool = False
-    condition_dropout_prob: float = 0.0   # classifier-free guidance: prob of dropping the whole
-                                          # condition to a null (zeros) embedding during training
 
-    def setup(self):
-        """Initialize the network."""
-        if isinstance(self.conditioning_kwargs, dataclasses.Field):
-            conditioning_kwargs = dict(self.conditioning_kwargs.default_factory())
-        else:
-            conditioning_kwargs = dict(self.conditioning_kwargs)
-        self.condition_encoder = ConditionEncoder(
-            condition_mode=self.condition_mode,
-            regularization=self.regularization,
-            output_dim=self.condition_embedding_dim,
-            pooling=self.pooling,
-            pooling_kwargs=self.pooling_kwargs,
-            layers_before_pool=self.layers_before_pool,
-            layers_after_pool=self.layers_after_pool,
-            covariates_not_pooled=self.covariates_not_pooled,
-            mask_value=self.mask_value,
-            **self.condition_encoder_kwargs,
-        )
+    def _setup_conditioning(self, conditioning_kwargs: dict[str, Any]) -> None:
+        """Add the ``'adaln_zero'`` mode (modulated by ``(t, x_0, condition)``); delegate the rest."""
+        if self.conditioning == "adaln_zero":
+            from scaleflow.networks._utils import build_adaln_blocks
 
-        self.layer_cond_output_dropout = nn.Dropout(rate=self.cond_output_dropout)
-        self.layer_norm_condition = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
-
-        self.x_encoder = MLPBlock(
-            dims=self.hidden_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.hidden_dropout,
-            act_last_layer=(False if self.linear_projection_before_concatenation else True),
-        )
-        self.layer_norm_x = nn.LayerNorm() if self.layer_norm_before_concatenation else lambda x: x
-
-        if self.cell_transformer_layers > 0:
-            from scaleflow.networks._utils import SelfAttentionBlock
-
-            self.cell_transformer = SelfAttentionBlock(
-                num_heads=[self.cell_transformer_heads] * self.cell_transformer_layers,
-                qkv_dim=[self.cell_transformer_dim] * self.cell_transformer_layers,
-                dropout_rate=self.cell_transformer_dropout,
-                transformer_block=True,
-                layer_norm=True,
+            self.adaln_blocks = build_adaln_blocks(
+                decoder_dims=self.decoder_dims,
+                cond_dim=self.time_encoder_dims[-1] + self.genot_source_dims[-1] + self.condition_embedding_dim,
+                decoder_dropout=self.decoder_dropout,
                 act_fn=self.act_fn,
+                conditioning_kwargs=conditioning_kwargs,
             )
-
-        self.decoder = MLPBlock(
-            dims=self.decoder_dims,
-            act_fn=self.act_fn,
-            dropout_rate=self.decoder_dropout,
-            act_last_layer=(False if self.linear_projection_before_concatenation else True),
-        )
-
-        self.output_layer = nn.Dense(self.output_dim)
-
-        if self.conditioning == "film":
-            self.film_block = FilmBlock(
-                input_dim=self.hidden_dims[-1],
-                cond_dim=self.condition_embedding_dim,  # No time encoder!
-                **conditioning_kwargs,
-            )
-        elif self.conditioning == "resnet":
-            self.resnet_block = ResNetBlock(
-                input_dim=self.hidden_dims[-1],
-                **conditioning_kwargs,
-            )
-        elif self.conditioning == "adaln_zero":
-            from scaleflow.networks._utils import AdaLNZeroBlock
-
-            cond_dim = self.condition_embedding_dim
-
-            # Use standard Transformer MLP expansion (4x by default)
-            # mlp_dim is left as None, so it will use mlp_ratio * hidden_dim
-            # This gives: hidden_dim → (4 × hidden_dim) → hidden_dim
-            mlp_ratio = conditioning_kwargs.get("mlp_ratio", 4.0)
-
-            # Per-cell AdaLN-Zero: modulate each cell by its OWN (t, condition). No cross-cell
-            # attention — the velocity field must be a per-cell function, and cells within a
-            # batch have different flow-times t, so they must not attend to each other.
-            self.adaln_blocks = [
-                AdaLNZeroBlock(
-                    hidden_dim=dim,
-                    cond_dim=cond_dim,
-                    num_heads=conditioning_kwargs.get("num_heads", 8),
-                    qkv_dim=conditioning_kwargs.get("qkv_dim", None),
-                    mlp_ratio=mlp_ratio,  # Standard 4x expansion in MLP
-                    dropout_rate=self.decoder_dropout,
-                    use_attention=False,
-                    act_fn=self.act_fn,
-                )
-                for dim in self.decoder_dims
-            ]
-        elif self.conditioning == "concatenation":
-            if len(conditioning_kwargs) > 0:
-                raise ValueError("If `conditioning=='concatenation' mode, no conditioning kwargs can be passed.")
         else:
-            raise ValueError(f"Unknown conditioning mode: {self.conditioning}")
+            super()._setup_conditioning(conditioning_kwargs)
+
+    def _combine_and_decode(
+        self,
+        t_encoded: jnp.ndarray,
+        x_encoded: jnp.ndarray,
+        cond_embedding: jnp.ndarray,
+        squeeze: bool,
+        train: bool,
+        x_0_encoded: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        """Route ``'adaln_zero'`` through the shared adaln helper; delegate the rest."""
+        if self.conditioning == "adaln_zero":
+            from scaleflow.networks._utils import apply_adaln
+
+            _, conditioning_vec = self._conditioning_signals(t_encoded, x_encoded, cond_embedding, x_0_encoded)
+            return apply_adaln(
+                adaln_blocks=self.adaln_blocks,
+                output_layer=self.output_layer,
+                out=x_encoded,
+                conditioning_vec=conditioning_vec,
+                squeeze=squeeze,
+                train=train,
+            )
+        return super()._combine_and_decode(t_encoded, x_encoded, cond_embedding, squeeze, train, x_0_encoded)
+
+
+class EquilibriumVelocityField(ConditionalVelocityField):
+    """Gradient field for Equilibrium Matching — a time-less :class:`ConditionalVelocityField`.
+
+    Reuses everything (setup, condition encoder, cell transformer, the
+    concat/film/resnet/adaln_zero conditioning, and the helpers) but drops the time
+    encoder: EqM's field is a function of ``(x, condition)`` only (the gamma interpolation
+    lives in the solver, not the field), so it modulates/concatenates by the condition
+    alone. Its ``__call__`` therefore takes no ``t`` and does no classifier-free guidance.
+    """
+
+    def _setup_time(self) -> None:
+        """EqM has no time encoder."""
+
+    def _adaln_cond_dim(self) -> int:
+        """EqM modulates the adaln blocks by the condition only (no time)."""
+        return self.condition_embedding_dim
+
+    def _conditioning_signals(
+        self,
+        t_encoded: jnp.ndarray,
+        x_encoded: jnp.ndarray,
+        cond_embedding: jnp.ndarray,
+        x_0_encoded: jnp.ndarray | None = None,
+    ) -> tuple[tuple[jnp.ndarray, ...], jnp.ndarray]:
+        """No time (or source): concatenate/modulate by the condition alone."""
+        return (x_encoded, cond_embedding), cond_embedding
 
     def __call__(
         self,
@@ -826,19 +309,9 @@ class EquilibriumVelocityField(nn.Module):
             cond_embedding = cond_mean
         else:
             cond_embedding = cond_mean + encoder_noise * jnp.exp(cond_logvar / 2.0)
-
         cond_embedding = self.layer_cond_output_dropout(cond_embedding, deterministic=not train)
-        x_encoded = self.x_encoder(x, training=train)
 
-        if self.cell_transformer_layers > 0 and self.cell_transformer_mode == "before_condition":
-            if squeeze:
-                x_encoded_expanded = jnp.expand_dims(x_encoded, 0)
-                x_encoded = self.cell_transformer(x_encoded_expanded, mask=None, training=train)
-                x_encoded = jnp.squeeze(x_encoded, 0)
-            else:
-                x_encoded_expanded = jnp.expand_dims(x_encoded, 0) if x_encoded.ndim == 1 else x_encoded
-                x_encoded = self.cell_transformer(x_encoded_expanded, mask=None, training=train)
-
+        x_encoded = self._encode_x(x, squeeze, train)
         x_encoded = self.layer_norm_x(x_encoded)
         cond_embedding = self.layer_norm_condition(cond_embedding)
 
@@ -847,48 +320,8 @@ class EquilibriumVelocityField(nn.Module):
         elif cond_embedding.shape[0] != x.shape[0]:
             cond_embedding = jnp.tile(cond_embedding, (x.shape[0], 1))
 
-        if self.conditioning == "concatenation":
-            out = jnp.concatenate((x_encoded, cond_embedding), axis=-1)  # No time!
-        elif self.conditioning == "film":
-            out = self.film_block(x_encoded, cond_embedding)  # No time!
-        elif self.conditioning == "resnet":
-            out = self.resnet_block(x_encoded, cond_embedding)  # No time!
-        elif self.conditioning == "adaln_zero":
-            out = x_encoded
-        else:
-            raise ValueError(f"Unknown conditioning mode: {self.conditioning}.")
-
-        if self.cell_transformer_layers > 0 and self.cell_transformer_mode == "after_condition":
-            if squeeze:
-                out_expanded = jnp.expand_dims(out, 0)
-                out = self.cell_transformer(out_expanded, mask=None, training=train)
-                out = jnp.squeeze(out, 0)
-            else:
-                out_expanded = jnp.expand_dims(out, 0) if out.ndim == 1 else out
-                out = self.cell_transformer(out_expanded, mask=None, training=train)
-
-        if self.conditioning == "adaln_zero":
-            # Per-cell modulation: cells are the BATCH dim, each modulated by its own condition.
-            # No cell-0 collapse, no cross-cell attention.
-            conditioning_vec = cond_embedding
-            if squeeze:
-                out = jnp.expand_dims(out, 0)                    # (1, hidden)
-                conditioning_vec = jnp.expand_dims(conditioning_vec, 0)  # (1, cond_dim)
-            for block in self.adaln_blocks:
-                out = block(out, conditioning_vec, mask=None, training=train)
-            if squeeze:
-                out = jnp.squeeze(out, 0)
-            out = self.output_layer(out)
-        else:
-            out = self.decoder(out, training=train)
-            out = self.output_layer(out)
-
+        out = self._combine_and_decode(None, x_encoded, cond_embedding, squeeze, train)
         return out, cond_mean, cond_logvar
-
-    def get_condition_embedding(self, condition: dict[str, jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Get the embedding of the condition."""
-        condition_mean, condition_logvar = self.condition_encoder(condition, training=False)
-        return condition_mean, condition_logvar
 
     def create_train_state(
         self,
@@ -897,8 +330,8 @@ class EquilibriumVelocityField(nn.Module):
         input_dim: int,
         conditions: dict[str, jnp.ndarray],
     ) -> train_state.TrainState:
-        """Create the training state."""
-        x = jnp.ones((1, input_dim))  # No time variable!
+        """Create the training state (no time variable)."""
+        x = jnp.ones((1, input_dim))
         encoder_noise = jnp.ones((1, self.condition_embedding_dim))
         cond = {
             pert_cov: jnp.ones((1, self.max_combination_length, condition.shape[-1]))
@@ -913,8 +346,3 @@ class EquilibriumVelocityField(nn.Module):
             train=False,
         )["params"]
         return train_state.TrainState.create(apply_fn=self.apply, params=params, tx=optimizer)
-
-    @property
-    def output_dims(self):
-        """Dimensions of the output layers."""
-        return tuple(self.decoder_dims) + (self.output_dim,)

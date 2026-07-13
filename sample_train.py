@@ -4,7 +4,7 @@ from scaleflow.data import AnnDataLocation, DataManager, GroupedDistribution, pr
 from scaleflow.data._dataloader import CombinedSampler, InMemorySampler, ReservoirSampler, ValidationSampler
 from scaleflow.datasets import sample_adata
 from scaleflow.model import ScaleFlow
-from scaleflow.training import Metrics
+from cellflow.training import Metrics
 
 # Create sample data
 print("Creating sample data...")

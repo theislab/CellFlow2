@@ -5,12 +5,13 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+from cellflow.training import ComputationCallback, Metrics
 
 import scaleflow
 from scaleflow._compat import ConstantNoiseFlow
-from scaleflow.solvers import _otfm
-from scaleflow.training import CellFlowTrainer, ComputationCallback, Metrics
-from scaleflow.utils import match_linear
+from scaleflow.solvers import OTFlowMatching
+from scaleflow.training import CellFlowTrainer
+from cellflow.utils import match_linear
 
 x_test = jnp.ones((10, 5)) * 10
 t_test = jnp.ones((10, 1))
@@ -52,7 +53,7 @@ class TestTrainer:
             hidden_dims=(32, 32),
             decoder_dims=(32, 32),
         )
-        model = _otfm.OTFlowMatching(
+        model = OTFlowMatching(
             vf=vf,
             match_fn=match_linear,
             probability_path=ConstantNoiseFlow(0.0),
@@ -88,7 +89,7 @@ class TestTrainer:
             hidden_dims=(32, 32),
             decoder_dims=(32, 32),
         )
-        model = _otfm.OTFlowMatching(
+        model = OTFlowMatching(
             vf=vf,
             match_fn=match_linear,
             probability_path=ConstantNoiseFlow(0.0),
@@ -134,7 +135,7 @@ class TestTrainer:
             hidden_dims=(32, 32),
             decoder_dims=(32, 32),
         )
-        solver = _otfm.OTFlowMatching(
+        solver = OTFlowMatching(
             vf=vf,
             match_fn=match_linear,
             probability_path=ConstantNoiseFlow(0.0),
@@ -178,7 +179,7 @@ class TestTrainer:
             hidden_dims=(32, 32),
             decoder_dims=(32, 32),
         )
-        model_1 = _otfm.OTFlowMatching(
+        model_1 = OTFlowMatching(
             vf=vf_1,
             match_fn=match_linear,
             probability_path=ConstantNoiseFlow(0.0),
@@ -186,7 +187,7 @@ class TestTrainer:
             conditions=cond,
             rng=vf_rng,
         )
-        model_2 = _otfm.OTFlowMatching(
+        model_2 = OTFlowMatching(
             vf=vf_2,
             match_fn=match_linear,
             probability_path=ConstantNoiseFlow(0.0),
@@ -196,7 +197,7 @@ class TestTrainer:
         )
 
         metric_to_compute = "e_distance"
-        metrics_callback = scaleflow.training.Metrics(metrics=[metric_to_compute])
+        metrics_callback = Metrics(metrics=[metric_to_compute])
 
         predict_kwargs_1 = {"max_steps": 3, "throw": False}
         predict_kwargs_2 = {"max_steps": 500, "throw": False}

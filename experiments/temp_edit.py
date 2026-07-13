@@ -32,12 +32,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-from scaleflow.training._callbacks import ComputationCallback
-from scaleflow.metrics._metrics import (
-    compute_e_distance_fast,
-    compute_scalar_mmd,
-)
+from cellflow.metrics import compute_e_distance_fast, compute_scalar_mmd
+from cellflow.training import ComputationCallback
 
 SPLIT_COLORS = {"train": "#9e9e9e", "val": "#2196F3", "test": "#e74c3c"}
 
@@ -135,7 +131,8 @@ def scalar_diagnostics(df: pd.DataFrame) -> dict:
 # ── (1) training-time callback (scalars → wandb; reuses trainer predictions) ──
 class EffectSizeMonitor(ComputationCallback):
     """Logs effect-size / gap-closure scalars each val step; returns per-dataset
-    {ds}_gap_closure_mean for monitor_metrics. No inference — uses valid_pred_data."""
+    {ds}_gap_closure_mean for monitor_metrics. No inference — uses valid_pred_data.
+    """
 
     def __init__(self, valid_freq: int, wandb_run=None, max_cells: int = 2000, prefix: str = "val"):
         self._valid_freq, self._wandb_run = valid_freq, wandb_run
@@ -167,7 +164,8 @@ class EffectSizeMonitor(ComputationCallback):
 def make_diagnostic_samplers(data: dict, n_conditions: int = 100, transform=None, seed: int = 0) -> dict:
     """data: {ds: {"train": gd, "val": gd, "test": gd}} (split_datasets output).
     → {split: {ds: ValidationSampler}} with conditions capped at n_conditions (so the
-    three splits are comparable and the predict pass stays bounded)."""
+    three splits are comparable and the predict pass stays bounded).
+    """
     from scaleflow.data._dataloader import ValidationSampler
     out: dict = {}
     for split in ("train", "val", "test"):
@@ -200,8 +198,9 @@ def full_diagnostics(solver, split_samplers: dict, output_dir, name: str = "mode
     plain conditional). Every (split, dataset) is sampled ONCE and reused across all w so
     the curves are comparable. split_samplers from make_diagnostic_samplers.
     """
-    import jax
     from functools import partial
+
+    import jax
 
     output_dir = Path(output_dir)
     ws = [float(w) for w in guidance_scales] if guidance_scales else [1.0]

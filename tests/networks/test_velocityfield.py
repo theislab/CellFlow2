@@ -96,6 +96,45 @@ class TestVelocityField:
         assert out_mean.shape == (1, 12)
         assert out_logvar.shape == (1, 12)
 
+    @pytest.mark.parametrize("condition_null", ["zero_embedding", "mask_value"])
+    def test_velocityfield_condition_null(self, condition_null):
+        """CFG null: `force_uncond` must drop the condition, so different conditions give the
+        same output; without it they must differ. Covers both `zero_embedding` and `mask_value`."""
+        vf = _velocity_field.ConditionalVelocityField(
+            output_dim=5,
+            max_combination_length=2,
+            condition_mode="deterministic",
+            condition_embedding_dim=12,
+            hidden_dims=[8, 8],
+            decoder_dims=[8, 8],
+            condition_dropout_prob=0.5,
+            condition_null=condition_null,
+        )
+        vf_rng = jax.random.PRNGKey(0)
+        vf_rng, apply_rng, noise_rng = jax.random.split(vf_rng, 3)
+        encoder_noise = jax.random.normal(noise_rng, (x_test.shape[0], vf.condition_embedding_dim))
+        vf_state = vf.create_train_state(rng=vf_rng, optimizer=optax.adam(1e-3), input_dim=5, conditions=cond)
+
+        cond_a = {"pert1": jnp.ones((1, 2, 3))}
+        cond_b = {"pert1": jnp.ones((1, 2, 3)) * 7.0}
+
+        def run(c, force_uncond):
+            out, _, _ = vf_state.apply_fn(
+                {"params": vf_state.params},
+                t_test,
+                x_test,
+                c,
+                encoder_noise,
+                train=False,
+                force_uncond=force_uncond,
+                rngs={"condition_encoder": apply_rng},
+            )
+            return out
+
+        assert jnp.all(jnp.isfinite(run(cond_a, True)))
+        assert jnp.allclose(run(cond_a, True), run(cond_b, True))  # unconditional: condition dropped
+        assert not jnp.allclose(run(cond_a, False), run(cond_b, False))  # conditional: condition matters
+
     @pytest.mark.parametrize("condition_mode", ["deterministic", "stochastic"])
     @pytest.mark.parametrize(
         "velocity_field_cls",

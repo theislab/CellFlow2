@@ -30,7 +30,7 @@ from scaleflow.data import split_datasets
 from scaleflow.data._dataloader import ReservoirSampler, ValidationSampler
 from scaleflow.model import ScaleFlow
 from scaleflow.model._recon import ReconDecoder
-from scaleflow.utils import match_linear
+from cellflow.utils import match_linear
 
 import utils
 import callbacks

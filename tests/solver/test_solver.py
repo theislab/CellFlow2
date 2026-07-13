@@ -6,8 +6,8 @@ import pytest
 
 import scaleflow
 from scaleflow._compat import ConstantNoiseFlow
-from scaleflow.solvers import _eqm, _genot, _otfm
-from scaleflow.utils import match_linear
+from scaleflow.solvers import EquilibriumMatching, GENOT, OTFlowMatching
+from cellflow.utils import match_linear
 
 src = {
     ("drug_1",): np.random.rand(10, 5),
@@ -25,7 +25,7 @@ def eqm_dataloader():
     class DataLoader:
         n_conditions = 10
 
-        def sample(self):
+        def sample(self, rng=None):
             return {
                 "src_cell_data": jnp.ones((10, 5)) * 10,
                 "tgt_cell_data": jnp.ones((10, 5)),
@@ -42,7 +42,7 @@ def dataloader():
     class DataLoader:
         n_conditions = 10
 
-        def sample(self):
+        def sample(self, rng=None):
             return {
                 "src_cell_data": jnp.ones((10, 5)) * 10,
                 "tgt_cell_data": jnp.ones((10, 5)),
@@ -71,7 +71,7 @@ class TestSolver:
             decoder_dims=(32, 32),
         )
         if solver_class == "otfm":
-            solver = _otfm.OTFlowMatching(
+            solver = OTFlowMatching(
                 vf=vf,
                 match_fn=match_linear,
                 probability_path=ConstantNoiseFlow(0.0),
@@ -80,7 +80,7 @@ class TestSolver:
                 rng=vf_rng,
             )
         elif solver_class == "genot":
-            solver = _genot.GENOT(
+            solver = GENOT(
                 vf=vf,
                 data_match_fn=match_linear,
                 probability_path=ConstantNoiseFlow(0.0),
@@ -91,7 +91,7 @@ class TestSolver:
                 rng=vf_rng,
             )
         else:
-            solver = _eqm.EquilibriumMatching(
+            solver = EquilibriumMatching(
                 vf=vf,
                 match_fn=match_linear,
                 optimizer=opt,
@@ -135,7 +135,7 @@ class TestSolver:
                 hidden_dims=(8, 8),
                 decoder_dims=(8, 8),
             )
-            solver = _otfm.OTFlowMatching(
+            solver = OTFlowMatching(
                 vf=vf,
                 match_fn=match_linear,
                 probability_path=ConstantNoiseFlow(0.0),
@@ -151,7 +151,7 @@ class TestSolver:
                 hidden_dims=(8, 8),
                 decoder_dims=(8, 8),
             )
-            solver = _genot.GENOT(
+            solver = GENOT(
                 vf=vf,
                 data_match_fn=match_linear,
                 probability_path=ConstantNoiseFlow(0.0),
@@ -198,7 +198,7 @@ class TestSolver:
         )
 
         if solver_class == "otfm":
-            solver1 = _otfm.OTFlowMatching(
+            solver1 = OTFlowMatching(
                 vf=vf1,
                 match_fn=match_linear,
                 probability_path=ConstantNoiseFlow(0.0),
@@ -208,7 +208,7 @@ class TestSolver:
                 ema=ema,
             )
         else:
-            solver1 = _eqm.EquilibriumMatching(
+            solver1 = EquilibriumMatching(
                 vf=vf1,
                 match_fn=match_linear,
                 optimizer=opt,
