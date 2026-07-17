@@ -1,0 +1,9 @@
+# @package _global_
+# comboSciplex, X_pca latent (obsm['X_pca'], 50-d). Condition = drug_0 + drug_1. A fast, light
+# sanity-check space (metrics live in PCA space; no gene decoder). Built by
+# scripts/prepare_combosciplex_zarr.py --embedding_key X_pca.
+datasets:
+  sciplex:
+    path: /storage/pancellflow/combosciplex_X_pca.zarr
+recon:
+  decoder_path: null

@@ -1,0 +1,17 @@
+# @package _global_
+# comboSciplex, X_pca latent (obsm['X_pca'], 50-d). Same SEPARATE drug_0 + drug_1 token setup as
+# combosciplex_gene, but the flow transports in the 50-d PCA space instead of gene space.
+# NOTE: with no decoder, the val/test metrics (DEG, pearson_delta, …) are computed in PCA space, not
+# gene space — this is a fast sanity-check / comparison space, not biologically-interpretable DEG.
+data:
+  dist_flag_key: control
+  src_dist_keys: [cell_line]
+  tgt_dist_keys: [drug_0, drug_1]
+  rep_keys:
+    drug_0: drug_0_embeddings
+    drug_1: drug_1_embeddings
+  extra_rep_keys:                 # kept only when ablation=prophet; one prophet token per drug slot
+    prophet_0: [drug_0, prophet_emb]
+    prophet_1: [drug_1, prophet_emb]
+  cell_embedding:
+    key: X_pca                    # obsm latent (50-d) = the flow space

@@ -1,0 +1,48 @@
+# @package _global_
+# ─────────────────────────────────────────────────────────────────────────────
+# CellFlow2 on comboSciplex, X_pca latent (50-d), CFG OFF. Fast sanity-check counterpart to
+# combo_gene_x.yaml — confirms the pipeline + the "both drug_0 & drug_1 conditioned" log line in
+# minutes. COMBINATION conditioning: condition carries BOTH drug_0 and drug_1 (256-d each) +
+# cell_line. No dose (constant in this dataset).
+#
+#   python experiments/train_zarr.py +experiment=combo_x_pca wandb.run_name=my_run
+# ─────────────────────────────────────────────────────────────────────────────
+defaults:
+  - override /datasets: zarr_sciplex
+  - override /conditioning: adaln_zero
+  - override /embedding: combo_X_pca
+  - override /ablation: default
+  - override /split: combo_631          # 60/30/10 held out by (drug_0, drug_1) combination
+
+selected_datasets: [sciplex]
+output_dir: /storage/pancellflow/outputs/combo_x_pca
+
+model:
+  hidden_dims: [256, 256, 256]
+  decoder_dims: [256, 256, 256]
+  condition_embedding_dim: 256
+  condition_dropout_prob: 0.0            # CFG OFF
+  layer_norm_before_concatenation: false
+  probability_path_kwargs:
+    constant_noise: 0.1
+  condition_encoder:
+    cond_output_dropout: 0.2
+
+ablation:
+  mode: prophet
+
+match_fn:
+  epsilon: 1.0                           # low-dim (50) latent → smaller OT entropy reg than gene space
+
+training:
+  peak_lr: 1.0e-4
+  batch_size: 512
+  warmup_iterations: 5000
+  num_iterations: 2000000
+  valid_freq: 200000
+
+wandb:
+  enabled: true
+  entity: pancellflow
+  project: combosciplex
+  run_name: combo_x_pca

@@ -1,0 +1,10 @@
+# @package _global_
+# comboSciplex 60/30/10 split, held out by drug COMBINATION identity (drug_0, drug_1):
+# whole (drug_0, drug_1) target distributions are assigned to train/val/test — so val/test
+# measure generalization to UNSEEN drug pairs, not just held-out cells of seen pairs.
+# 31 targets (6 single-drug + 25 combos) → ~18 train / ~9 val / ~3 test.
+split:
+  by: [drug_0, drug_1]
+  ratios: [0.6, 0.3, 0.1]
+  random_state: 42
+  holdout_combinations: false

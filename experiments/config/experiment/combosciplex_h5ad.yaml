@@ -1,0 +1,35 @@
+# @package _global_
+# comboSciplex on the cellflow h5ad path (experiments/train_comparison.py), GENE space, adaln_zero,
+# separate drug_0/drug_1 tokens. Add `ablation=prophet` for the prophet tokens.
+#   python experiments/train_comparison.py +experiment=combosciplex_h5ad wandb.enabled=true
+defaults:
+  - override /data: combosciplex_gene
+  - override /split: combo_631
+  - override /conditioning: adaln_zero
+  - override /ablation: default
+
+selected_datasets: [combosciplex]
+datasets:
+  combosciplex:
+    path: /storage/pancellflow/filtered_data/combosciplex_prophet_only_hvg.h5ad
+
+model:
+  hidden_dims:  [256, 256, 256]
+  decoder_dims: [256, 256, 256]        # adaln_zero needs decoder_dims[-1] == hidden_dims[-1]
+  condition_embedding_dim: 256
+  condition_dropout_prob: 0.0
+  condition_encoder:
+    cond_output_dropout: 0.2
+
+match_fn:
+  epsilon: 10                          # gene-space OT entropy reg
+
+training:
+  num_iterations: 200000
+  valid_freq: 20000
+  checkpoint_metric: pearson_r_delta
+
+wandb:
+  enabled: true
+  project: combosciplex_runs
+  run_name: combosciplex_h5ad

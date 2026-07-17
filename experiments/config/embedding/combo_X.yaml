@@ -1,0 +1,10 @@
+# @package _global_
+# comboSciplex, GENE SPACE (adata.X, 27,518 genes). Condition = drug_0 + drug_1 (both 256-d
+# drug_*_embeddings, pooled by the set-encoder). Source = single A549 vehicle+vehicle control
+# pool; targets = 31 (drug_0, drug_1) combinations. No reconstruction (decoder_path null →
+# gene-space metrics directly). Built by scripts/prepare_combosciplex_zarr.py --embedding_key X.
+datasets:
+  sciplex:
+    path: /storage/pancellflow/combosciplex_X.zarr
+recon:
+  decoder_path: null

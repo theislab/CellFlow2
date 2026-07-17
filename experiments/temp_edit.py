@@ -145,12 +145,18 @@ class EffectSizeMonitor(ComputationCallback):
         df = diagnostics_over_datasets(vsrc, vtrue, vpred, max_cells=self._max_cells)
         if df.empty:
             return {}
-        scal = scalar_diagnostics(df)
+        out: dict = {}
+        for ds, g in df.groupby("dataset"):                # per-dataset scalars (in-loop = val)
+            sc = scalar_diagnostics(g)
+            out.update({f"{ds}_{k}": v for k, v in sc.items()})
+            print(f"    [effect {ds}] " + "  ".join(f"{k}={v:.3f}" for k, v in sc.items()))
+        # Two logging paths, so neither train_zarr (scaleflow) nor train_comparison (cellflow) regresses:
+        #   • if a wandb_run was passed (train_zarr), self-log — the scaleflow trainer does NOT log returns;
+        #   • ALWAYS return the scalars — cellflow's WandbLogger (a LoggingCallback) logs callback returns.
+        # On the cellflow path we construct this WITHOUT a wandb_run, so there's no double-logging.
         if self._wandb_run is not None:
-            self._wandb_run.log({f"{self._prefix}_{k}": v for k, v in scal.items()})
-        print("    [effect] " + "  ".join(f"{k}={v:.3f}" for k, v in scal.items()))
-        return {f"{ds}_gap_closure_mean": float(np.nanmean(g["gap_closure"]))
-                for ds, g in df.groupby("dataset") if "gap_closure" in g}
+            self._wandb_run.log(out)
+        return out
 
     def on_log_iteration(self, valid_source_data, valid_true_data, valid_pred_data, solver, **kwargs):
         self._step += self._valid_freq
@@ -368,3 +374,123 @@ def plot_guidance_sweep(summary: dict, output_dir, tag: str = "diag",
         figs[metric] = fig
 
     return figs
+
+
+# ── (3) plot diagnostics as a callback on the validation prediction dicts ─────
+class DiagnosticsPlots(ComputationCallback):
+    """Build the per-condition effect-size table from the validation predictions and log the
+    scatter panels (effect calibration, strength-vs-error, effect-vs-rΔ) + the table to wandb.
+
+    Runs at train-end by default; ``every_val=True`` also emits each validation. Optional UMAP
+    effect panels for the top-``umap_top_k`` conditions per dataset (needs the ``umap`` package).
+
+    Uses the SAME nested {ds:{cond:array}} dicts cellflow hands the callback — no extra inference and
+    no scaleflow samplers, which is why the sampler-coupled full_diagnostics isn't used on this branch.
+    """
+
+    def __init__(self, output_dir, wandb_run=None, max_cells: int = 2000, seed: int = 0,
+                 every_val: bool = False, umap_top_k: int = 0):
+        self._out = Path(output_dir)
+        self._wandb_run = wandb_run
+        self._max_cells, self._seed = max_cells, seed
+        self._every_val, self._umap_k = every_val, int(umap_top_k)
+
+    def on_train_begin(self, *args, **kwargs) -> None:
+        return None
+
+    def _resolve_run(self):
+        import wandb
+        return self._wandb_run or getattr(wandb, "run", None)
+
+    def _emit(self, vsrc, vtrue, vpred, tag: str) -> dict:
+        df = diagnostics_over_datasets(vsrc, vtrue, vpred, max_cells=self._max_cells)
+        if df.empty:
+            return {}
+        # color panels by split: dataset names are 'train'/'val'/'test' → plot_diagnostics groups by
+        # 'split' and maps them onto SPLIT_COLORS (grey / blue / red).
+        if "dataset" in df.columns:
+            df["split"] = df["dataset"]
+        self._out.mkdir(parents=True, exist_ok=True)
+        figs = plot_diagnostics(df, self._out, tag=tag)
+        run = self._resolve_run()
+        log: dict = {}
+        if self._umap_k > 0:                                   # optional qualitative UMAP panels
+            try:
+                import wandb
+                from utils import umap_effect_panels
+                for ds in vtrue:
+                    if ds not in vpred:
+                        continue
+                    out_png = self._out / f"{tag}_{ds}_umap.png"
+                    umap_effect_panels(vsrc.get(ds, {}), vtrue[ds], {"model": vpred[ds]},
+                                       k=self._umap_k, seed=self._seed, out_path=str(out_png),
+                                       title=f"{ds} effect panels ({tag})")
+                    if run is not None:
+                        log[f"diagnostics/{tag}_{ds}_umap"] = wandb.Image(str(out_png))
+            except Exception as e:                             # umap missing / too few conditions
+                print(f"    [diagnostics] UMAP panels skipped: {e}")
+        if run is not None:
+            import wandb
+            log.update({f"diagnostics/{tag}_{nm}": wandb.Image(fig) for nm, fig in figs.items()})
+            log[f"diagnostics/{tag}_table"] = wandb.Table(dataframe=df)
+            run.log(log)
+        print(f"    [diagnostics] {tag}: {len(figs)} panels"
+              + (" + UMAP" if self._umap_k else "")
+              + (" → wandb" if run is not None else f" → {self._out}"))
+        import matplotlib.pyplot as plt
+        for fig in figs.values():
+            plt.close(fig)
+        return {}
+
+    def on_log_iteration(self, valid_source_data, valid_true_data, valid_pred_data, solver, **kwargs):
+        return self._emit(valid_source_data, valid_true_data, valid_pred_data, "val") if self._every_val else {}
+
+    def on_train_end(self, valid_source_data, valid_true_data, valid_pred_data, solver, **kwargs):
+        return self._emit(valid_source_data, valid_true_data, valid_pred_data, "final")
+
+
+# ── train_zarr-style FINAL diagnostics, cellflow-native ───────────────────────
+def cellflow_split_diagnostics(solver, split_samplers: dict, output_dir, name: str = "model",
+                               wandb_run=None, max_cells: int = 2000, seed: int = 0,
+                               predict_kwargs: dict | None = None):
+    """One predict pass per split (train/val/test) → combined per-condition table with a ``split``
+    column + panels COLOURED BY SPLIT. cellflow port of ``full_diagnostics``: ``split_samplers`` maps
+    a split name to a cellflow ``ValidationSampler``; each is sampled once (mode='on_train_end') and
+    the trained ``solver`` predicts it (exactly like the trainer's validation step). Reuses
+    condition_diagnostics / plot_diagnostics / scalar_diagnostics — no scaleflow samplers, no CFG sweep.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    predict_kwargs = predict_kwargs or {}
+    frames = []
+    for split, sampler in split_samplers.items():
+        batch = sampler.sample(mode="on_train_end")
+        src, cond, true = batch["source"], batch.get("condition", None), batch["target"]
+        pred = solver.predict(src, condition=cond, **predict_kwargs)
+        df = condition_diagnostics(src, true, pred, max_cells=max_cells, seed=seed)
+        if not df.empty:
+            df.insert(0, "split", split)
+            frames.append(df)
+    alldf = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if alldf.empty:
+        print("  [diagnostics] no conditions to evaluate")
+        return alldf, {}, {}
+    csv = output_dir / f"{name}_diagnostics.csv"
+    alldf.to_csv(csv, index=False)
+    figs = plot_diagnostics(alldf, output_dir, tag=name)          # grouped/coloured by `split`
+    summary = {sp: scalar_diagnostics(g) for sp, g in alldf.groupby("split")}
+    for sp, sc in summary.items():
+        print(f"  [diag {sp:5}] " + "  ".join(f"{k}={v:.3f}" for k, v in sc.items()))
+    if wandb_run is not None:
+        import wandb
+        log: dict = {}
+        for sp, sc in summary.items():
+            log.update({f"diag_{sp}_{k}": v for k, v in sc.items()})
+        log.update({f"diagnostics/{nm}": wandb.Image(fig) for nm, fig in figs.items()})
+        log["diagnostics/table"] = wandb.Table(dataframe=alldf)
+        wandb_run.log(log)
+    import matplotlib.pyplot as plt
+    for fig in figs.values():
+        plt.close(fig)
+    print(f"  diagnostics table → {csv}  (panels coloured by split: {list(summary)})")
+    return alldf, summary, figs

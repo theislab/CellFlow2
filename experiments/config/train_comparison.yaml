@@ -1,52 +1,41 @@
 # @package _global_
-# Entrypoint config for train_comparison.py (raw .h5ad → in-memory GroupedDistributions via DataManager).
-# First target: train the flow in the AE_128 latent on recon_weights/sciplex3_with_emb.h5ad, logging
-# gene-space perturbation-delta R² (val_recon_r2_delta) per dataset to wandb(pancellflow).
-# Dose-resolved (drug × log1p dose) with an optional prophet token — choose with the ablation group:
-#   python experiments/train_comparison.py wandb.enabled=true                 # no prophet token
-#   python experiments/train_comparison.py ablation=prophet wandb.enabled=true # append prophet embedding
-#   python experiments/train_comparison.py ablation=random                     # param-matched control
-#   python experiments/train_comparison.py training.num_iterations=300 training.valid_freq=150
+# Hydra entry for the cellflow h5ad trainer (experiments/train_comparison.py). Pick a dataset with an
+# experiment — the `data:` group is the scaleflow DataManager schema, translated to cellflow with
+# SEPARATE drug_0/drug_1 tokens (see train_comparison.py):
+#   python experiments/train_comparison.py +experiment=combosciplex_h5ad
+#   python experiments/train_comparison.py +experiment=sciplex3_h5ad ablation=prophet wandb.enabled=true
+#   python experiments/train_comparison.py +experiment=combosciplex_h5ad training.num_iterations=300 training.valid_freq=150
 defaults:
   - solver: otfm
-  - conditioning: concatenation
   - datasets: h5ad_drug
-  - data: sciplex3_ae
+  - data: sciplex3_gene         # placeholder; an experiment overrides /data
   - model: h5ad
-  - condition_encoder: mlp     # mlp = per-modality MLP + 1-layer CLS pool; transformer = 2-layer CLS transformer
+  - condition_encoder: mlp
+  - conditioning: adaln_zero
   - match_fn: h5ad
   - split: drug
   - training: default
   - ablation: default
   - wandb: default
-  - _self_            # _self_ last → the overrides below win over the groups
+  - _self_
 
 seed: 42
-output_dir: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/outputs/train_comparison
+output_dir: /storage/pancellflow/outputs
 selected_datasets: [sciplex3]
+eval_test: false                # register the test set in-loop too (default: test held out during training)
 
-# point the sciplex3 registry entry at the AE h5ad (carries obsm['AE_128_opt'] + uns['prophet_emb'])
-datasets:
-  sciplex3:
-    path: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights/sciplex3_with_emb.h5ad
-
-# single-drug: one drug slot (model/h5ad.yaml defaults to 2 for drug_0+drug_1 combos)
-# cond_output_dropout 0.4 (scoped here; model/h5ad.yaml stays 0.9 so a549_transfer is unaffected) —
-# lowering 0.9→0.4 ~doubled the gene-space delta (test_recon_r2_delta ~0.09→~0.22).
-model:
-  max_combination_length: 1
-  condition_encoder:
-    cond_output_dropout: 0.4
-
-# gene-space recon via the AE_128 decoder. Only override the decoder/latent — condition_obs_keys
-# ([cell_line, drug, dose_value]) + log_dose_obs_key (dose_value) are inherited from training/default.
-# Convention B: pred delta = decode(pred) − decode(ctrl latent 'AE_128_opt'); true = real_ptb − real_ctrl.
 recon:
-  decoder_path: /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights/AE_128_opt
-  h5ad_path:    /lustre/groups/ml01/workspace/xiaotong.fu/pancellflow/recon_weights/sciplex3_with_emb.h5ad
-  emb_obsm_key: AE_128_opt
+  decoder_path: null            # gene-space default → no decode; an experiment may set a decoder
 
-# log to wandb.ai/pancellflow (enable with wandb.enabled=true)
-wandb:
-  project: pancellflow
-  entity:  pancellflow
+diagnostics:
+  enabled: true
+  splits: [train, val, test]    # split-coloured effect-size panels at train-end (one predict pass each)
+  n_conditions: 100             # cap on conditions per split for the final diagnostic pass
+  max_cells: 2000
+
+hydra:
+  job:
+    chdir: false                # keep cwd = experiments/ so relative config_path + /storage paths hold
+  output_subdir: null
+  run:
+    dir: ${output_dir}/.hydra

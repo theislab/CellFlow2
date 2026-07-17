@@ -1,0 +1,35 @@
+# @package _global_
+# sciplex3 on the cellflow h5ad path (experiments/train_comparison.py), GENE space, adaln_zero,
+# single drug + log1p dose. Add `ablation=prophet` for the prophet token.
+#   python experiments/train_comparison.py +experiment=sciplex3_h5ad wandb.enabled=true
+defaults:
+  - override /data: sciplex3_gene
+  - override /split: drug
+  - override /conditioning: adaln_zero
+  - override /ablation: default
+
+selected_datasets: [sciplex3]
+datasets:
+  sciplex3:
+    path: /storage/pancellflow/sciplex3_with_emb.h5ad
+
+model:
+  hidden_dims:  [256, 256, 256]
+  decoder_dims: [256, 256, 256]
+  condition_embedding_dim: 256
+  condition_dropout_prob: 0.0
+  condition_encoder:
+    cond_output_dropout: 0.2
+
+match_fn:
+  epsilon: 10
+
+training:
+  num_iterations: 200000
+  valid_freq: 20000
+  checkpoint_metric: pearson_r_delta
+
+wandb:
+  enabled: true
+  project: sciplex3_runs
+  run_name: sciplex3_h5ad

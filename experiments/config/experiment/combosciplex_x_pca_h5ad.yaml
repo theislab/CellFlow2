@@ -1,0 +1,39 @@
+# @package _global_
+# comboSciplex on the cellflow h5ad path, X_pca latent (50-d) instead of gene space. adaln_zero,
+# separate drug_0/drug_1 tokens. Fast sanity-check counterpart to combosciplex_h5ad.
+#   python experiments/train_comparison.py +experiment=combosciplex_x_pca_h5ad wandb.enabled=true
+# NOTE: no decoder → val/test metrics live in PCA space (DEG on PCA components is not gene-space DEG).
+defaults:
+  - override /data: combosciplex_pca
+  - override /split: combo_631
+  - override /conditioning: adaln_zero
+  - override /ablation: default
+
+selected_datasets: [combosciplex]
+datasets:
+  combosciplex:
+    path: /storage/pancellflow/filtered_data/combosciplex_prophet_only_hvg.h5ad
+
+split:
+  ratios: [0.5, 0.1, 0.4]              # train / val / test (held out by drug combination)
+
+model:
+  hidden_dims:  [256, 256, 256]
+  decoder_dims: [256, 256, 256]        # adaln_zero needs decoder_dims[-1] == hidden_dims[-1]
+  condition_embedding_dim: 256
+  condition_dropout_prob: 0.0
+  condition_encoder:
+    cond_output_dropout: 0.2
+
+match_fn:
+  epsilon: 1                           # low-dim (50) PCA latent → smaller OT entropy reg than gene space
+
+training:
+  num_iterations: 200000
+  valid_freq: 20000
+  checkpoint_metric: pearson_r_delta
+
+wandb:
+  enabled: true
+  project: combosciplex_runs
+  run_name: combosciplex_x_pca

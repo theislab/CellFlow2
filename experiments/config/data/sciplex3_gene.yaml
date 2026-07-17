@@ -1,0 +1,14 @@
+# @package _global_
+# sciplex3, GENE space (adata.X). Single drug token + numeric DOSE (log1p). drug values are keys of
+# uns['drug_0_embeddings']; dose has no rep_key → used as a continuous scalar covariate.
+data:
+  dist_flag_key: control
+  src_dist_keys: [cell_line]
+  tgt_dist_keys: [drug, dose]
+  rep_keys:
+    drug: drug_0_embeddings
+  extra_rep_keys:                 # kept only when ablation=prophet
+    prophet: [drug, prophet_emb]
+  log1p_dose_from: dose_value     # obs['dose'] = log1p(dose_value) before grouping
+  cell_embedding:
+    key: X                        # 'X' = gene space (else an obsm latent key)

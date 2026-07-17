@@ -1,0 +1,16 @@
+# @package _global_
+# comboSciplex, GENE space (adata.X). SEPARATE drug_0 + drug_1 tokens — each looked up in its own
+# 256-d embedding and encoded as an independent condition modality (max_combination_length=1), like
+# the scaleflow/train_zarr combosciplex runs. A549 only (one source pool).
+data:
+  dist_flag_key: control
+  src_dist_keys: [cell_line]
+  tgt_dist_keys: [drug_0, drug_1]
+  rep_keys:
+    drug_0: drug_0_embeddings
+    drug_1: drug_1_embeddings
+  extra_rep_keys:                 # kept only when ablation=prophet; one prophet token per drug slot
+    prophet_0: [drug_0, prophet_emb]
+    prophet_1: [drug_1, prophet_emb]
+  cell_embedding:
+    key: X                        # 'X' = gene space (else an obsm latent key)

@@ -10,10 +10,11 @@ from pathlib import Path
 
 import jax
 import numpy as np
+import pandas as pd
 import orbax.checkpoint as ocp
 from cellflow.metrics import compute_e_distance_fast, compute_scalar_mmd
 from cellflow.training import ComputationCallback
-from scipy.stats import pearsonr, ttest_ind
+from scipy.stats import pearsonr, spearmanr, ttest_ind
 from tqdm import tqdm
 
 
@@ -823,3 +824,187 @@ def save_logs(name: str, logs: dict, output_dir: Path) -> None:
     with open(path, "w") as f:
         json.dump(serialisable, f, indent=2)
     print(f"  logs saved  → {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# cellflow-native validation callbacks (used by experiments/train_combo.py). These
+# subclass cellflow's ComputationCallback, which is called with source/true/pred as
+# nested dicts {ds: {cond_key: array}} at each validation + train end, and return a
+# {metric: value} dict that cellflow logs.
+# ─────────────────────────────────────────────────────────────────────────────
+class PearsonDeltaMetrics(ComputationCallback):
+    """Mean-delta Pearson r in the model's output (gene/X) space: per condition,
+    corr(mean(true) - mean(control), mean(pred) - mean(control)) (reuses `pearson_r_delta`);
+    logged as mean & median over conditions, per validation set."""
+
+    def on_train_begin(self, *a, **k):
+        return None
+
+    def on_log_iteration(self, valid_source_data, valid_true_data, valid_pred_data, solver):
+        return self._compute(valid_source_data, valid_true_data, valid_pred_data)
+
+    def on_train_end(self, valid_source_data, valid_true_data, valid_pred_data, solver):
+        return self._compute(valid_source_data, valid_true_data, valid_pred_data)
+
+    @staticmethod
+    def _compute(src, true, pred):
+        out = {}
+        for ds in true:
+            rs = []
+            for ck, t in true[ds].items():
+                p = pred.get(ds, {}).get(ck)
+                s = src.get(ds, {}).get(ck)
+                if p is None or s is None:
+                    continue
+                r = pearson_r_delta(t, p, s)          # corr(mean(true)-ctrl, mean(pred)-ctrl)
+                if np.isfinite(r):
+                    rs.append(r)
+            if rs:
+                out[f"{ds}_pearson_delta_mean"] = float(np.mean(rs))
+                out[f"{ds}_pearson_delta_median"] = float(np.median(rs))
+        return out
+
+
+# ── ReconEval-faithful DEG (github.com/theislab/ReconEval, metrics/_deg.py) ──────
+def reconeval_perform_deg(x, refer, method: str = "t-test", set_neg_to_zero: bool = True) -> "pd.DataFrame":
+    """ReconEval.perform_deg: scanpy rank_genes_groups(treatment=x vs control=refer).
+
+    ``set_neg_to_zero`` (ReconEval default True): clip expression to >= 0 before DE. The flow predicts
+    in gene space and can output NEGATIVE values; scanpy's log2FC = log2((expm1(mean)+1e-9)/…) then
+    returns NaN for genes whose group mean is negative, which propagates to NaN in the logFC-correlation
+    metrics (deg_pearson / deg_spearman / deg_pearson_orig_k) — so they'd silently drop out. Clipping
+    (matching ReconEval) keeps those finite.
+    """
+    import warnings
+    import anndata as ad
+    import scanpy as sc
+    x = np.asarray(x, dtype=np.float32); refer = np.asarray(refer, dtype=np.float32)
+    if set_neg_to_zero:
+        x = np.clip(x, 0.0, None); refer = np.clip(refer, 0.0, None)
+    a = ad.AnnData(np.vstack([x, refer]))
+    a.var_names = [str(i) for i in range(a.n_vars)]                    # stable gene ids for the merge
+    a.obs["group"] = ["treatment"] * x.shape[0] + ["control"] * refer.shape[0]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sc.tl.rank_genes_groups(a, groupby="group", groups=["treatment"],
+                                reference="control", method=method, use_raw=False)
+    r = a.uns["rank_genes_groups"]
+    return pd.DataFrame({"gene": r["names"]["treatment"],
+                         "logfc": r["logfoldchanges"]["treatment"],
+                         "pval_adj": r["pvals_adj"]["treatment"]})
+
+
+def _reconeval_top_genes(deg, k: int, fdr) -> set:
+    """ReconEval._top_genes_by_logfc: top-k by |logFC| among FDR-significant (fallback all)."""
+    c = deg[deg["pval_adj"] <= fdr]
+    if c.empty:
+        c = deg
+    c = c.copy(); c["abs_logfc"] = c["logfc"].abs()
+    return set(c.nlargest(k, "abs_logfc")["gene"])
+
+
+class DEGMetrics(ComputationCallback):
+    """ReconEval-faithful DEG metrics in gene/X space. Per condition, DE is called with scanpy
+    rank_genes_groups (t-test) for TRUE perturbed vs control and PRED perturbed vs control (same
+    control = the flow source; ReconEval's ``true_`` comparison). Reported (mean & median over
+    conditions, per validation set): ``deg_dice_{k}`` (Dice of top-k genes by |logFC| among
+    FDR<=0.05), ``deg_pearson``/``deg_spearman`` (scipy corr of per-gene logFC, no masking — exactly
+    ReconEval), ``mean_genediff_pearson``/``_spearman``. Conditions with < MIN_CELLS skipped.
+
+    DEG lives in GENE space. Two ways to get gene-space arrays, honoring "decode only if a decoder
+    is provided":
+      • ``recon=None`` (default) → the model already predicts genes (e.g. sample_rep=X); DEG runs
+        directly on the on_log_iteration nested dicts (true/pred = genes, source = control).
+      • ``recon`` set to a :class:`ReconMetricsLogger` → reuse its h5ad lookups + decoder to build
+        (true_genes, decode(pred_latent), ctrl_genes) per condition (latent-space training)."""
+    DICE_K = (10, 50, 100, 200, 400)
+    FDR = 0.05
+    METHOD = "t-test"
+    MIN_CELLS = 30
+    KEYS = (tuple(f"deg_dice_{k}" for k in DICE_K)
+            + tuple(f"deg_pearson_orig_{k}" for k in DICE_K)      # ReconEval _compute_topk_corr
+            + tuple(f"deg_spearman_orig_{k}" for k in DICE_K)
+            + ("deg_pearson", "deg_spearman", "mean_genediff_pearson", "mean_genediff_spearman"))
+
+    def __init__(self, recon: "ReconMetricsLogger | None" = None):
+        # recon set → decode predicted latent → genes before DE (needs a ReconDecoder);
+        # recon None → predictions are already gene space, use them directly.
+        self._recon = recon
+
+    def on_train_begin(self, *a, **k):
+        return None
+
+    def on_log_iteration(self, valid_source_data, valid_true_data, valid_pred_data, solver):
+        return self._compute(valid_source_data, valid_true_data, valid_pred_data)
+
+    def on_train_end(self, valid_source_data, valid_true_data, valid_pred_data, solver):
+        return self._compute(valid_source_data, valid_true_data, valid_pred_data)
+
+    def _triples(self, src, true, pred):
+        """Yield (ds, true_genes, pred_genes, ctrl_genes) per condition, in gene space."""
+        if self._recon is None:                                   # model output IS gene space
+            for ds in true:
+                for ck, t in true[ds].items():
+                    p = pred.get(ds, {}).get(ck)
+                    s = src.get(ds, {}).get(ck)
+                    if p is None or s is None:
+                        continue
+                    yield ds, np.asarray(t), np.asarray(p), np.asarray(s)
+        else:                                                     # decode latent → genes via recon
+            r = self._recon
+            for ds in pred:
+                for ck, pred_latent in pred[ds].items():
+                    tg = r._get_true_genes(ck)
+                    cg = r._get_ctrl_genes(ck)
+                    if tg is None or cg is None:
+                        continue
+                    pg = np.asarray(r._decoder.decode(np.asarray(pred_latent, np.float32)))
+                    yield ds, np.asarray(tg), pg, np.asarray(cg)
+
+    @classmethod
+    def _condition(cls, true, pred, ctrl):
+        orig = reconeval_perform_deg(true, ctrl, cls.METHOD)
+        recon = reconeval_perform_deg(pred, ctrl, cls.METHOD)
+        out = {}
+        merged = pd.merge(orig[["gene", "logfc"]], recon[["gene", "logfc"]],
+                          on="gene", suffixes=("_orig", "_recon"))    # ReconEval _merge_deg_results (inner)
+        for k in cls.DICE_K:
+            og = _reconeval_top_genes(orig, k, cls.FDR)               # ReconEval _deg_compute_dice
+            rg = _reconeval_top_genes(recon, k, cls.FDR)
+            denom = len(og) + len(rg)
+            out[f"deg_dice_{k}"] = (2 * len(og & rg) / denom) if denom else float("nan")
+            sub = merged[merged["gene"].isin(og)]                     # ReconEval _compute_topk_corr:
+            if len(sub) >= 2:                                         # logFC corr over orig's top-k genes
+                out[f"deg_pearson_orig_{k}"] = float(pearsonr(sub["logfc_orig"], sub["logfc_recon"])[0])
+                out[f"deg_spearman_orig_{k}"] = float(spearmanr(sub["logfc_orig"], sub["logfc_recon"])[0])
+            else:
+                out[f"deg_pearson_orig_{k}"] = out[f"deg_spearman_orig_{k}"] = float("nan")
+        if len(merged) >= 2:                                          # ReconEval _compute_logfc_corr
+            out["deg_pearson"] = float(pearsonr(merged["logfc_orig"], merged["logfc_recon"])[0])
+            out["deg_spearman"] = float(spearmanr(merged["logfc_orig"], merged["logfc_recon"])[0])
+        else:
+            out["deg_pearson"] = out["deg_spearman"] = float("nan")
+        dt = np.asarray(true).mean(0) - np.asarray(ctrl).mean(0)      # ReconEval _compute_mean_diff_corr
+        dp = np.asarray(pred).mean(0) - np.asarray(ctrl).mean(0)
+        out["mean_genediff_pearson"] = float(pearsonr(dt, dp)[0])
+        out["mean_genediff_spearman"] = float(spearmanr(dt, dp)[0])
+        return out
+
+    def _compute(self, src, true, pred):
+        acc = {}                                                      # ds -> {metric: [values]}
+        for ds, t, p, s in self._triples(src, true, pred):
+            if min(t.shape[0], p.shape[0], s.shape[0]) < self.MIN_CELLS:
+                continue
+            m = self._condition(t, p, s)
+            a = acc.setdefault(ds, {k: [] for k in self.KEYS})
+            for k in self.KEYS:
+                v = m.get(k)
+                if v is not None and np.isfinite(v):
+                    a[k].append(v)
+        out = {}
+        for ds, a in acc.items():
+            for k in self.KEYS:
+                if a[k]:
+                    out[f"{ds}_{k}_mean"] = float(np.mean(a[k]))
+                    out[f"{ds}_{k}_median"] = float(np.median(a[k]))
+        return out
